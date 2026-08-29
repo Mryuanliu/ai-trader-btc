@@ -603,6 +603,22 @@ export class AgentEngine {
       return null;
     }
 
+    // 按交易所精度预取整：数量不足最小下单单位（典型场景：SELL 无持仓或仓位比例太小）
+    // → 作为风控拦截处理而非抛错，避免无意义的失败退避与熔断
+    const filters = await this.trading.getFilters(config.symbol);
+    const step = filters.stepSize > 0 ? filters.stepSize : 1e-8;
+    const minQty = filters.minQty > 0 ? filters.minQty : step;
+    const roundedQty = Math.floor(quantity / step) * step;
+    if (!(roundedQty >= minQty && roundedQty > 0)) {
+      const note =
+        side === 'SELL'
+          ? `无持仓可卖：卖出量 ${quantity.toFixed(8)} 不足最小下单单位 ${minQty}（可能没有持仓或 positionPct 太小），本轮跳过`
+          : `买入量 ${quantity.toFixed(8)} 不足最小下单单位 ${minQty}（资金或 positionPct 太小），本轮跳过`;
+      this.lastRiskVerdict = { passed: false, rejectedBy: 'MIN_QTY', note };
+      await this.risk.record('limit', 'info', note, config.symbol, decisionId);
+      return null;
+    }
+
     const quoteAmount = price * quantity;
     // 咨询性预检：用于快速失败并把拦截原因写入决策记录。
     // 这里不做取整，因此金额是估算值；真正的权威校验在 TradingService 内

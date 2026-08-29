@@ -14,6 +14,7 @@ import {
   NormalizeResult,
   PageResult,
   RunMode,
+  SymbolFilters,
 } from '@ai-trader/shared';
 import { In, Repository } from 'typeorm';
 import { OrderEntity, TradeFillEntity } from '../database/entities';
@@ -98,6 +99,19 @@ export class TradingService {
    * 风控必须基于**最终取整后的数量与实际成交价**执行，
    * 否则调用方用未取整数量和旧快照价算出的金额，与这里实际下单的金额不一致。
    */
+  /**
+   * 交易对过滤器（引擎下单前预检查数量步进/最小单位用）。
+   * 适配器层有 24h 缓存，热路径调用代价可忽略。
+   */
+  async getFilters(symbol: string, exchange?: ExchangeCode): Promise<SymbolFilters> {
+    const agentConfig = await this.agentConfig.getOrCreate();
+    const config = this.agentConfig.toShape(agentConfig);
+    const ex: ExchangeCode =
+      exchange ?? config.enabledExchanges?.[0] ?? 'binance';
+    const adapter = await this.registry.get(ex);
+    return adapter.getSymbolFilters(symbol);
+  }
+
   async placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
     const agentConfig = await this.agentConfig.getOrCreate();
     const config = this.agentConfig.toShape(agentConfig);
