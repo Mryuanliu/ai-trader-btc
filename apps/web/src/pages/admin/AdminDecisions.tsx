@@ -124,15 +124,20 @@ export function AdminDecisions() {
                 ),
               },
               {
-                title: '模型',
-                dataIndex: 'llmModel',
+                title: '链路',
+                dataIndex: 'lane',
                 width: 132,
-                render: (_: string, row: DecisionSummary) =>
-                  row.degraded ? (
-                    <Tag color="orange">指标降级</Tag>
-                  ) : (
-                    <Tag color="geekblue">{row.llmModel ?? 'LLM'}</Tag>
-                  ),
+                render: (_: string, row: DecisionSummary) => {
+                  if (row.lane === 'strategy') return <Tag color="green">策略</Tag>;
+                  if (row.degraded) {
+                    return row.strategyName ? (
+                      <Tag color="orange">降级策略</Tag>
+                    ) : (
+                      <Tag color="orange">失败观望</Tag>
+                    );
+                  }
+                  return <Tag color="geekblue">{row.llmModel ?? 'AI'}</Tag>;
+                },
               },
               {
                 title: '执行结果',
@@ -165,7 +170,19 @@ export function AdminDecisions() {
           <div className="flex items-center gap-2">
             <span>决策链条详情</span>
             {detail.data ? <ActionTag action={detail.data.action} /> : null}
-            {detail.data?.degraded ? <Tag color="orange">已降级</Tag> : null}
+            {detail.data?.lane === 'strategy' ? (
+              <Tag color="green">策略{detail.data.strategyName ? ` · ${detail.data.strategyName}` : ''}</Tag>
+            ) : null}
+            {detail.data?.lane === 'llm' && detail.data.degraded ? (
+              detail.data.strategyName ? (
+                <Tag color="orange">降级策略</Tag>
+              ) : (
+                <Tag color="orange">失败观望</Tag>
+              )
+            ) : null}
+            {detail.data && !detail.data.degraded && detail.data.llmModel ? (
+              <Tag color="geekblue">{detail.data.llmModel}</Tag>
+            ) : null}
           </div>
         }
         destroyOnClose

@@ -23,7 +23,10 @@ import {
   EXCHANGE_LABELS,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
+  strategyRegistry,
   type AgentConfigShape,
+  type DecisionLane,
+  type LlmFailurePolicy,
   type RunMode,
 } from '@ai-trader/shared';
 import {
@@ -40,6 +43,17 @@ const MODE_OPTIONS: { label: string; value: RunMode }[] = [
   { label: '模拟撮合', value: 'dry_run' },
   { label: '模拟盘/测试网', value: 'testnet' },
   { label: '实盘', value: 'live' },
+];
+
+const LANE_OPTIONS: { label: string; value: DecisionLane }[] = [
+  { label: 'AI 决策', value: 'llm' },
+  { label: '纯策略', value: 'strategy' },
+];
+
+const LLM_FAILURE_OPTIONS: { label: string; value: LlmFailurePolicy }[] = [
+  { label: '失败观望（推荐）', value: 'hold' },
+  { label: '失败降级到策略', value: 'strategy' },
+  { label: '失败跳过本轮', value: 'skip' },
 ];
 
 export function AdminAgentConfig() {
@@ -95,6 +109,9 @@ export function AdminAgentConfig() {
     });
 
   const modeValue = Form.useWatch('mode', form) ?? config?.mode ?? DEFAULT_AGENT_CONFIG.mode;
+  const laneValue: DecisionLane =
+    Form.useWatch('decisionLane', form) ?? config?.decisionLane ?? DEFAULT_AGENT_CONFIG.decisionLane;
+  const strategyOptions = useMemo(() => strategyRegistry.list(), []);
 
   const exchangeOptions = useMemo(
     () => EXCHANGE_CODES.map((code) => ({ label: EXCHANGE_LABELS[code], value: code })),
@@ -201,6 +218,34 @@ export function AdminAgentConfig() {
               <Form.Item name="enabledExchanges" label="启用交易所">
                 <Select mode="multiple" options={exchangeOptions} placeholder="选择下单通道" />
               </Form.Item>
+              <Form.Item
+                name="decisionLane"
+                label={
+                  <Tooltip title="llm=AI 直出决策；strategy=纯技术指标策略，零 LLM 成本。hybrid（AI 提供上下文、策略执行）将在后续版本提供">
+                    <span className="border-b border-dashed border-white/25">决策链路</span>
+                  </Tooltip>
+                }
+              >
+                <Segmented options={LANE_OPTIONS} />
+              </Form.Item>
+              {laneValue === 'strategy' ? (
+                <Form.Item name="strategyName" label="策略">
+                  <Select
+                    options={strategyOptions.map((s) => ({
+                      label: `${s.label}（${s.name}）`,
+                      value: s.name,
+                    }))}
+                  />
+                </Form.Item>
+              ) : (
+                <Form.Item
+                  name="llmFailurePolicy"
+                  label="LLM 失败时的行为"
+                  tooltip="仅 AI 链路生效"
+                >
+                  <Select options={LLM_FAILURE_OPTIONS} />
+                </Form.Item>
+              )}
               <Form.Item name="positionPct" label="单次仓位比例">
                 <Slider
                   min={0.01}
@@ -223,46 +268,57 @@ export function AdminAgentConfig() {
           </Col>
 
           <Col xs={24} xl={12}>
-            <Card title="模型配置" className="glass-card">
-              <Row gutter={12}>
-                <Col span={12}>
-                  <Form.Item name="model" label="模型">
-                    <Input placeholder="deepseek-chat" />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="maxTokens" label="最大 Token">
-                    <InputNumber min={128} max={8192} className="!w-full" />
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Form.Item name="temperature" label="温度">
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  marks={{ 0: '0', 0.5: '0.5', 1: '1' }}
-                  tooltip={{ formatter: (v) => (v ?? 0).toFixed(2) }}
-                />
-              </Form.Item>
-              <Form.Item
-                name="systemPrompt"
-                label={
-                  <Tooltip title="模型的角色与纪律约束，会作为 system 消息发送">
-                    <span className="border-b border-dashed border-white/25">系统提示词</span>
-                  </Tooltip>
-                }
-              >
-                <Input.TextArea rows={6} />
-              </Form.Item>
-              <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[11px] leading-relaxed text-muted">
-                模型不可用（未配置密钥 / 调用失败）时，Agent 会自动降级为「纯技术指标策略」，决策记录中标记为
-                <Tag color="orange" className="!mx-1">
-                  降级
-                </Tag>
-                并写入降级原因。
-              </div>
-            </Card>
+            {laneValue === 'strategy' ? (
+              <Card title="策略配置" className="glass-card">
+                <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[12px] leading-relaxed text-muted">
+                  当前链路为「纯策略」：决策完全由上方选定的策略产出，不调用 LLM
+                  （不读密钥、不发请求、零 token 成本），LLM 挂掉也不影响本链路。
+                  策略使用内置默认参数，参数编辑与回测报告页在后续版本提供。
+                </div>
+              </Card>
+            ) : (
+              <Card title="模型配置" className="glass-card">
+                <Row gutter={12}>
+                  <Col span={12}>
+                    <Form.Item name="model" label="模型">
+                      <Input placeholder="deepseek-chat" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={12}>
+                    <Form.Item name="maxTokens" label="最大 Token">
+                      <InputNumber min={128} max={8192} className="!w-full" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item name="temperature" label="温度">
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    marks={{ 0: '0', 0.5: '0.5', 1: '1' }}
+                    tooltip={{ formatter: (v) => (v ?? 0).toFixed(2) }}
+                  />
+                </Form.Item>
+                <Form.Item
+                  name="systemPrompt"
+                  label={
+                    <Tooltip title="模型的角色与纪律约束，会作为 system 消息发送">
+                      <span className="border-b border-dashed border-white/25">系统提示词</span>
+                    </Tooltip>
+                  }
+                >
+                  <Input.TextArea rows={6} />
+                </Form.Item>
+                <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[11px] leading-relaxed text-muted">
+                  模型不可用（未配置密钥 / 调用失败）时，按「LLM 失败时的行为」处理；
+                  标记为
+                  <Tag color="orange" className="!mx-1">
+                    降级
+                  </Tag>
+                  并写入降级原因，不再静默切换链路。
+                </div>
+              </Card>
+            )}
           </Col>
 
           <Col span={24}>
