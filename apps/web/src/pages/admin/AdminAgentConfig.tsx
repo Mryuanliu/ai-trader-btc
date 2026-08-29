@@ -49,6 +49,7 @@ const MODE_OPTIONS: { label: string; value: RunMode }[] = [
 const LANE_OPTIONS: { label: string; value: DecisionLane }[] = [
   { label: 'AI 决策', value: 'llm' },
   { label: '纯策略', value: 'strategy' },
+  { label: '混合', value: 'hybrid' },
 ];
 
 const LLM_FAILURE_OPTIONS: { label: string; value: LlmFailurePolicy }[] = [
@@ -222,15 +223,19 @@ export function AdminAgentConfig() {
               <Form.Item
                 name="decisionLane"
                 label={
-                  <Tooltip title="llm=AI 直出决策；strategy=纯技术指标策略，零 LLM 成本。hybrid（AI 提供上下文、策略执行）将在后续版本提供">
+                  <Tooltip title="llm=AI 直出决策；strategy=纯技术指标策略，零 LLM 成本；hybrid=AI 只输出市场状态元参数（1 小时缓存），映射为策略参数后由策略执行，AI 挂掉自动回落中性默认参数不停摆">
                     <span className="border-b border-dashed border-white/25">决策链路</span>
                   </Tooltip>
                 }
               >
                 <Segmented options={LANE_OPTIONS} />
               </Form.Item>
-              {laneValue === 'strategy' ? (
-                <Form.Item name="strategyName" label="策略">
+              {laneValue !== 'llm' ? (
+                <Form.Item
+                  name="strategyName"
+                  label="策略"
+                  tooltip={laneValue === 'hybrid' ? 'hybrid 链路由该策略执行交易，AI 只调节其参数' : undefined}
+                >
                   <Select
                     options={strategyOptions.map((s) => ({
                       label: `${s.label}（${s.name}）`,
@@ -315,6 +320,18 @@ export function AdminAgentConfig() {
                   策略使用内置默认参数（左侧可配置出场规则）；参数编辑与回测报告页在后续版本提供。
                 </div>
               </Card>
+            ) : laneValue === 'hybrid' ? (
+              <Card title="AI 上下文（hybrid）" className="glass-card">
+                <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[12px] leading-relaxed text-muted">
+                  当前链路为「混合」：AI 不直接下达买卖指令，只输出市场状态元参数
+                  （趋势/震荡/高波动、激进度、新闻情绪），经确定性映射调节上方策略的
+                  阈值与仓位（0.5~1.5 倍）后由策略执行。结果可回测、可审计。
+                  <br />
+                  <br />
+                  AI 分析结果缓存 1 小时；AI 失败或超期时自动沿用上次分析，再退一步
+                  则使用中性默认参数，交易不会停摆。上下文分析仍需调用模型，见下方模型配置。
+                </div>
+              </Card>
             ) : (
               <Card title="模型配置" className="glass-card">
                 <Row gutter={12}>
@@ -358,6 +375,34 @@ export function AdminAgentConfig() {
                 </div>
               </Card>
             )}
+            {laneValue === 'hybrid' ? (
+              <Card title="模型配置" className="glass-card" style={{ marginTop: 16 }}>
+                <Row gutter={12}>
+                  <Col span={12}>
+                    <Form.Item name="model" label="模型">
+                      <Input placeholder="deepseek-chat" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={12}>
+                    <Form.Item name="maxTokens" label="最大 Token">
+                      <InputNumber min={128} max={8192} className="!w-full" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item name="temperature" label="温度">
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    marks={{ 0: '0', 0.5: '0.5', 1: '1' }}
+                    tooltip={{ formatter: (v) => (v ?? 0).toFixed(2) }}
+                  />
+                </Form.Item>
+                <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[11px] leading-relaxed text-muted">
+                  该模型仅用于生成市场状态分析（低频，约每小时一次），不输出买卖指令。
+                </div>
+              </Card>
+            ) : null}
           </Col>
 
           <Col span={24}>

@@ -189,7 +189,7 @@ export interface AgentConfigShape {
    * strategy 链路完全忽略本字段。仅保留列以兼容存量数据。
    */
   degradedAction: 'hold' | 'signal';
-  /** 决策链路开关（hybrid 将在阶段 5 开放，配置层暂归一为 llm） */
+  /** 决策链路开关：llm=AI 直出决策；strategy=纯策略；hybrid=AI 上下文 + 策略执行 */
   decisionLane: DecisionLane;
   /** 仅 llm 链路生效：LLM 失败后的行为，承接原 degradedAction 职责 */
   llmFailurePolicy: LlmFailurePolicy;

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { DecisionAction } from '@ai-trader/shared';
+import { ContextInsight, DecisionAction } from '@ai-trader/shared';
 import { isTruthy } from '../common/env.util';
 
 export const DecisionSchema = z.object({
@@ -13,6 +13,16 @@ export const DecisionSchema = z.object({
 });
 
 export type LlmDecision = z.infer<typeof DecisionSchema> & { action: DecisionAction };
+
+/** 阶段 5：AI 上下文分析输出（元参数，非买卖指令） */
+export const ContextInsightSchema = z.object({
+  regime: z.enum(['trending', 'ranging', 'volatile']),
+  regimeConfidence: z.number().min(0).max(1),
+  aggression: z.number().min(0).max(1),
+  newsSentiment: z.number().min(-1).max(1),
+  positionView: z.enum(['positive', 'neutral', 'negative']),
+  comment: z.string().max(120).optional(),
+});
 
 export interface LlmResult {
   ok: boolean;
@@ -132,6 +142,80 @@ export class LlmClient {
       this.logger.warn(`模型调用失败，进入 60s 冷却：${message}`);
       return { ok: false, raw: null, error: message };
     }
+  }
+
+  /**
+   * 阶段 5 · hybrid 链路：让模型输出市场上下文元参数（非买卖指令）。
+   * 与 decide() 共享客户端与冷却机制；解析失败按 LlmResult.ok=false 处理。
+   */
+  async analyzeContext(
+    system: string,
+    user: string,
+    model: string,
+    temperature: number,
+    maxTokens: number,
+  ): Promise<LlmResult & { data?: never; insight?: ContextInsight }> {
+    const base = { ok: false, raw: null as string | null };
+    if (!this.available) return { ...base, error: '未配置 LLM_API_KEY' };
+    if (Date.now() < this.cooldownUntil) {
+      return { ...base, error: '模型调用处于冷却期' };
+    }
+    const client = this.getClient();
+    if (!client) return { ...base, error: '模型客户端初始化失败' };
+
+    try {
+      const completion = await client.chat.completions.create({
+        model,
+        temperature,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      });
+      const message = completion.choices?.[0]?.message as unknown as Record<string, string>;
+      const raw = message?.content ?? '';
+      const reasoning = message?.reasoning_content ?? null;
+      const usage = completion.usage
+        ? {
+            promptTokens: completion.usage.prompt_tokens ?? 0,
+            completionTokens: completion.usage.completion_tokens ?? 0,
+            totalTokens: completion.usage.total_tokens ?? 0,
+          }
+        : null;
+      const insight = this.parseInsight(raw) ?? (reasoning ? this.parseInsight(reasoning) : null);
+      if (!insight) {
+        this.logger.warn(`上下文输出无法解析：content=${raw.slice(0, 120)}`);
+        return { ok: false, raw, reasoning, model: completion.model ?? model, usage, error: '模型输出不是合法 JSON 上下文' };
+      }
+      this.logger.log(
+        `上下文分析：regime=${insight.regime}(${insight.regimeConfidence}) 激进度=${insight.aggression} 情绪=${insight.newsSentiment}（tokens=${usage?.totalTokens ?? '-'}）`,
+      );
+      return { ok: true, raw, reasoning, model: completion.model ?? model, usage, insight };
+    } catch (err) {
+      this.cooldownUntil = Date.now() + 60_000;
+      const msg = (err as Error).message;
+      this.logger.warn(`上下文调用失败，进入 60s 冷却：${msg}`);
+      return { ok: false, raw: null, error: msg };
+    }
+  }
+
+  private parseInsight(raw: string): ContextInsight | null {
+    if (!raw) return null;
+    const trimmed = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    const candidates = [trimmed];
+    const match = trimmed.match(/\{[\s\S]*\}/);
+    if (match) candidates.push(match[0]);
+    for (const candidate of candidates) {
+      try {
+        const json = JSON.parse(candidate);
+        const result = ContextInsightSchema.safeParse(json);
+        if (result.success) return result.data as ContextInsight;
+      } catch {
+        /* 继续尝试下一个候选 */
+      }
+    }
+    return null;
   }
 
   /** 容错解析：直接 JSON.parse，失败则截取第一个 JSON 代码块 */

@@ -102,9 +102,12 @@ export class AgentConfigService {
       minOrderIntervalSec: clampRiskValue('minOrderIntervalSec', entity.minOrderIntervalSec),
       dailyLossLimit: clampRiskValue('dailyLossLimit', entity.dailyLossLimit),
       degradedAction: entity.degradedAction === 'signal' ? 'signal' : 'hold',
-      // 链路四字段读时归一化：兜住历史脏数据，也防直接改库绕过写入校验。
-      // hybrid 在阶段 5 前不可达，直接改库置 hybrid 时读出 llm 比引擎抛错停摆更安全。
-      decisionLane: entity.decisionLane === 'strategy' ? 'strategy' : 'llm',
+      // 链路字段读时归一化：兜住历史脏数据，也防直接改库绕过写入校验。
+      // hybrid 已在阶段 5 实现，非 strategy/hybrid 一律读为 llm。
+      decisionLane:
+        entity.decisionLane === 'strategy' || entity.decisionLane === 'hybrid'
+          ? entity.decisionLane
+          : 'llm',
       llmFailurePolicy:
         entity.llmFailurePolicy === 'strategy' || entity.llmFailurePolicy === 'skip'
           ? entity.llmFailurePolicy
@@ -186,11 +189,9 @@ export class AgentConfigService {
         value = 'hold';
       }
 
-      // 链路四字段写入校验：非法值回落默认并留下 warn，而非让策略引擎拿到脏配置
-      if (key === 'decisionLane' && value !== 'llm' && value !== 'strategy') {
-        this.logger.warn(
-          `配置项 decisionLane=${String(value)} 尚未支持，回落为 llm（hybrid 将在阶段 5 提供）`,
-        );
+      // 链路字段写入校验：非法值回落默认并留下 warn，而非让策略引擎拿到脏配置
+      if (key === 'decisionLane' && value !== 'llm' && value !== 'strategy' && value !== 'hybrid') {
+        this.logger.warn(`配置项 decisionLane 非法值 ${String(value)}，回落为 llm`);
         value = 'llm';
       }
       if (key === 'llmFailurePolicy' && value !== 'hold' && value !== 'strategy' && value !== 'skip') {

@@ -3,6 +3,7 @@ export * from './registry';
 export * from './trend-following';
 export * from './mean-reversion';
 export * from './breakout';
+export * from './context-mapping';
 
 import { strategyRegistry } from './registry';
 import { TrendFollowingStrategy } from './trend-following';

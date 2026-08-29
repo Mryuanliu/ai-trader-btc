@@ -8,17 +8,22 @@ import {
   DecisionInputSnapshot,
   DecisionLane,
   DecisionSummary,
+  ContextInsight,
+  NEUTRAL_CONTEXT_INSIGHT,
   StrategyContext,
   buildSignals,
   computeIndicators,
+  mapInsightToParams,
+  normalizeInsight,
   scoreSignals,
+  strategyRegistry,
 } from '@ai-trader/shared';
 import { Repository } from 'typeorm';
 import { AgentDecisionEntity } from '../database/entities';
 import { AgentConfigService } from './agent-config.service';
 import { LlmClient, LlmDecision, LlmResult } from './llm.client';
 import { StrategyService } from './strategy.service';
-import { buildUserPrompt } from './prompt';
+import { buildContextPrompt, buildUserPrompt } from './prompt';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
 import { AccountService } from '../account/account.service';
@@ -28,6 +33,13 @@ import { RiskService } from '../trading/risk.service';
 import { EventBusService } from '../common/events';
 
 const HISTORY_LIMIT = 200;
+
+/**
+ * hybrid 链路：AI 上下文（insight）缓存有效期。
+ * 上下文变化远慢于 5 分钟级 K 线，AI 调用降频到小时级可显著省 token；
+ * 过期后下一轮重新调用，AI 失败期间沿用缓存，超期才回落中性参数。
+ */
+const INSIGHT_TTL_MS = 60 * 60 * 1000;
 
 /** 连续失败达到该次数后熔断，停止自动调度直到冷却期结束 */
 const CIRCUIT_BREAKER_THRESHOLD = 5;
@@ -48,17 +60,23 @@ interface LaneDecision {
   degradeReason: string | null;
   /** llm 链路才有：供落库 llmRaw/llmReasoning/llmModel/llmUsage */
   llmResult: LlmResult | null;
-  /** 仅 llm 链路构建；strategy 链路为空串 */
+  /** 仅 llm 链路构建；strategy 链路为空串。hybrid 链路存上下文 prompt */
   prompt: string;
 
   /** 出场规则触发时为 true：卖出全部持仓（而非按 positionPct 部分卖出） */
   closeAll?: boolean;
+
+  /** 仅 hybrid 链路：AI 激进度映射的仓位乘数（0.5~1.5），作用于开仓金额 */
+  positionMultiplier?: number;
 }
 
 @Injectable()
 export class AgentEngine {
   private readonly logger = new Logger(AgentEngine.name);
   private running = false;
+
+  /** hybrid 链路：缓存的 AI 上下文（元参数），带过期时间；重启后重新分析 */
+  private insightCache: { insight: ContextInsight; expiresAt: number } | null = null;
 
   /** 连续失败次数，成功后清零 */
   private consecutiveFailures = 0;
@@ -213,7 +231,14 @@ export class AgentEngine {
       );
       this.lastDecisionId = entity.id;
 
-      const orderId = await this.execute(config, snapshot, decision, entity.id, laneResult.closeAll);
+      const orderId = await this.execute(
+        config,
+        snapshot,
+        decision,
+        entity.id,
+        laneResult.closeAll,
+        laneResult.positionMultiplier,
+      );
       const riskVerdict = this.lastRiskVerdict;
 
       entity.riskPassed = riskVerdict?.passed ?? true;
@@ -293,7 +318,8 @@ export class AgentEngine {
    *
    * - strategy：纯策略链路，零 LLM 参与（不读 key、不发请求、零 token 成本）
    * - llm：AI 决策，失败按 llmFailurePolicy 处理（hold / strategy / skip）
-   * - hybrid：尚未实现（阶段 5），此分支仅为直接改库的防御
+   * - hybrid：AI 输出上下文元参数（1 小时 TTL 缓存），纯函数映射为策略参数后
+   *   由确定性策略执行；AI 失败/过期回落中性默认参数，交易不停摆
    */
   private async produceDecision(
     config: AgentConfigShape,
@@ -303,8 +329,7 @@ export class AgentEngine {
       return this.buildStrategyLane(config, snapshot);
     }
     if (config.decisionLane === 'hybrid') {
-      // 配置层已禁止写入 hybrid，能走到这里说明绕过了校验（直接改库）
-      throw new Error('decisionLane=hybrid 尚未实现（计划阶段 5）');
+      return this.buildHybridLane(config, snapshot);
     }
 
     // ---- llm 链路 ----
@@ -365,10 +390,78 @@ export class AgentEngine {
     }
   }
 
+  /**
+   * 阶段 5 · hybrid 链路：AI 只输出市场上下文元参数（regime/激进度/新闻情绪），
+   * 经纯函数 mapInsightToParams 映射为策略参数后由确定性策略执行。
+   *
+   * 停摆保护：AI 失败或输出不合法时不中断交易——优先沿用未过期的 insight 缓存，
+   * 否则回落 NEUTRAL_CONTEXT_INSIGHT（中性默认参数），degraded=true 留痕。
+   */
+  private async buildHybridLane(
+    config: AgentConfigShape,
+    snapshot: DecisionInputSnapshot,
+  ): Promise<LaneDecision> {
+    const prompt = buildContextPrompt(snapshot);
+    const cached = this.insightCache;
+    let insight: ContextInsight;
+    let degraded = false;
+    let degradeReason: string | null = null;
+    let llmResult: LlmResult | null = null;
+
+    if (cached && cached.expiresAt > Date.now()) {
+      insight = cached.insight;
+    } else {
+      const result = await this.llm.analyzeContext(
+        config.systemPrompt,
+        prompt,
+        config.model,
+        config.temperature,
+        config.maxTokens,
+      );
+      if (result.ok && result.insight) {
+        insight = normalizeInsight(result.insight);
+        this.insightCache = { insight, expiresAt: Date.now() + INSIGHT_TTL_MS };
+        llmResult = result;
+      } else {
+        // 缓存已过期但 AI 失败：超期缓存仍比中性默认更贴近当前市场，优先沿用
+        if (cached) {
+          insight = cached.insight;
+          degraded = true;
+          degradeReason = `AI 上下文调用失败，沿用上次分析（已超期）：${result.error ?? '未知原因'}`;
+        } else {
+          insight = NEUTRAL_CONTEXT_INSIGHT;
+          degraded = true;
+          degradeReason = `AI 上下文不可用，使用中性默认参数继续运行：${result.error ?? '未知原因'}`;
+        }
+        llmResult = result;
+      }
+    }
+
+    // 阈值基准 = 策略默认参数与用户 strategyParams 合并后的当前入场阈值
+    const baseParams = strategyRegistry.getOrDefault(config.strategyName).strategy.defaultParams;
+    const mapped = mapInsightToParams(insight, config.strategyName, {
+      ...baseParams,
+      ...config.strategyParams,
+    });
+    // 用户配置的 strategyParams 为基底，AI 映射参数覆盖同名项（AI 只调元参数，不碰其余配置）
+    const params = { ...config.strategyParams, ...mapped };
+    const lane = await this.buildStrategyLane(config, snapshot, params);
+    return {
+      ...lane,
+      lane: 'hybrid',
+      degraded: lane.degraded || degraded,
+      degradeReason: lane.degradeReason ?? degradeReason,
+      prompt,
+      positionMultiplier: mapped.positionMultiplier,
+      llmResult,
+    };
+  }
+
   /** 构造纯策略链路的决策（strategy 链路本体，也供 llm 链路 llmFailurePolicy=strategy 降级复用） */
   private async buildStrategyLane(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
+    paramsOverride?: Record<string, unknown>,
   ): Promise<LaneDecision> {
     // 策略上下文补持仓快照（阶段 4 出场规则的前置）；buildSnapshot 的其余数据保持同构复用
     const position = await this.positions.getPosition(config.symbol);
@@ -386,7 +479,7 @@ export class AgentEngine {
     const { output, strategyName, fellBack } = this.strategyService.evaluate(
       config.strategyName,
       context,
-      config.strategyParams,
+      paramsOverride ?? config.strategyParams,
     );
     return {
       lane: 'strategy',
@@ -457,6 +550,7 @@ export class AgentEngine {
     decision: LlmDecision,
     decisionId: string,
     closeAll = false,
+    positionMultiplier?: number,
   ): Promise<string | null> {
     this.lastRiskVerdict = null;
 
@@ -488,9 +582,14 @@ export class AgentEngine {
 
     const side = decision.action === 'BUY' ? 'BUY' : 'SELL';
     // 出场规则触发（closeAll）时卖出全部持仓，常规决策仍按 positionPct 部分卖出
+    // hybrid 链路的 AI 激进度映射为开仓乘数（0.5~1.5），仅放大/收缩开仓，卖出不受影响
+    const buyMultiplier =
+      decision.action === 'BUY' && positionMultiplier != null
+        ? Math.min(1.5, Math.max(0.5, positionMultiplier))
+        : 1;
     const quantity =
       side === 'BUY'
-        ? (snapshot.account.quoteFree * config.positionPct) / price
+        ? (snapshot.account.quoteFree * config.positionPct * buyMultiplier) / price
         : closeAll
           ? snapshot.account.baseFree
           : snapshot.account.baseFree * config.positionPct;
