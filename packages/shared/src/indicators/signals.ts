@@ -11,8 +11,11 @@ export function computeIndicators(candles: Candle[]): IndicatorSnapshot {
 
   const macdRes = macd(closes);
   const boll = bollinger(closes, 20, 2);
-  const avgVolume20 = sma(volumes, 20);
-  const lastVolume = volumes[volumes.length - 1] ?? 0;
+  // 量能统计只使用已闭合 K 线：最后一根在实盘是形成中的 K 线，成交量未累积完，
+  // 混入统计会让 volumeRatio 恒偏小（缺陷③）。回测引擎为保持同一口径，同样排除末根。
+  const closedVolumes = volumes.slice(0, -1);
+  const avgVolume20 = sma(closedVolumes, 20);
+  const lastClosedVolume = closedVolumes[closedVolumes.length - 1] ?? 0;
 
   return {
     sma5: sma(closes, 5),
@@ -29,7 +32,7 @@ export function computeIndicators(candles: Candle[]): IndicatorSnapshot {
     bollMid: boll.mid,
     bollLower: boll.lower,
     atr14: atr(highs, lows, closes, 14),
-    volumeRatio: avgVolume20 > 0 ? lastVolume / avgVolume20 : NaN,
+    volumeRatio: avgVolume20 > 0 ? lastClosedVolume / avgVolume20 : NaN,
     lastClose: closes[closes.length - 1] ?? NaN,
   };
 }
@@ -124,12 +127,14 @@ export function buildSignals(snapshot: IndicatorSnapshot, candles: Candle[]): Si
     note: bollNote,
   });
 
-  // 量能
+  // 量能：基于最后一根已闭合 K 线（与 volumeRatio 同口径）
   const vr = snapshot.volumeRatio;
-  const prevClose = closes[closes.length - 2] ?? close;
+  const lastClosedClose = closes[closes.length - 2] ?? close;
+  const priorClosedClose = closes[closes.length - 3] ?? lastClosedClose;
+  const closedCandleUp = lastClosedClose >= priorClosedClose;
   const volumeBias: SignalBias = Number.isNaN(vr)
     ? 'neutral'
-    : close >= prevClose
+    : closedCandleUp
       ? vr > 1.2
         ? 'bullish'
         : 'neutral'
@@ -138,14 +143,14 @@ export function buildSignals(snapshot: IndicatorSnapshot, candles: Candle[]): Si
         : 'neutral';
   signals.push({
     name: 'volume',
-    label: '量能比 (最新/20均)',
+    label: '量能比 (前收/20均)',
     value: Number.isNaN(vr) ? 'N/A' : `${vr.toFixed(2)}x`,
     bias: volumeBias,
     weight: 0.1,
     note: Number.isNaN(vr)
       ? '样本不足'
       : vr > 1.2
-        ? '放量，方向确认度提升'
+        ? '上一根已闭合 K 线放量，方向确认度提升'
         : '缩量，信号强度有限',
   });
 
@@ -166,16 +171,18 @@ export function buildSignals(snapshot: IndicatorSnapshot, candles: Candle[]): Si
   return signals;
 }
 
-/** 将信号加权合成为 -1 ~ 1 的倾向分值 */
+/** 将信号加权合成为 -1 ~ 1 的倾向分值。
+ * 缺陷②修复：分母使用全部信号权重（而非仅非中性部分），
+ * 「六个信号全部看多」才是 1.0，单信号看多只能拿到其权重占比——信号越多越可信，方向一致才高 */
 export function scoreSignals(signals: Signal[]): number {
   let total = 0;
-  let weight = 0;
+  let totalWeight = 0;
   for (const s of signals) {
     if (s.bias === 'neutral') continue;
     total += (s.bias === 'bullish' ? 1 : -1) * s.weight;
-    weight += s.weight;
   }
-  return weight === 0 ? 0 : Number((total / weight).toFixed(4));
+  totalWeight = signals.reduce((acc, s) => acc + s.weight, 0);
+  return totalWeight === 0 ? 0 : Number((total / totalWeight).toFixed(4));
 }
 
 function fmt(v: number): string {

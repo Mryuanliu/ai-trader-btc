@@ -218,6 +218,55 @@ NO_PROXY=localhost,127.0.0.1
 
 触发即写入 `risk_events` 并阻断下单，同时回写到决策记录的 `riskRejectedBy` 字段。
 
+### 开单（下单）完整链路
+
+**触发频率**：调度主循环 5 秒一次，但真正执行决策由 `decisionIntervalSec` 控制（默认 **300 秒**），
+因此实际决策间隔为 300~305 秒，一天约 288 次决策。下单量另受 `maxDailyOrders` 限制。
+
+```
+调度器 tick（每 5s）
+└─ 到期判断：now - lastRunAt >= decisionIntervalSec
+   ├─ 熔断 / 退避中          → 跳过（节流告警）
+   ├─ mode = live            → 跳过并写 risk_events（实盘需人工确认）
+   └─ AgentEngine.runOnce()
+      │
+      ├─ ① 行情快照：取 timeframe × 200 根 K 线 + Ticker
+      ├─ ② 指标信号：12 项指标 → 加权合成 -1~+1 倾向
+      ├─ ③ 上下文：最新 6 条新闻 + 账户余额
+      ├─ ④ 组装 Prompt → LLM 裁决（zod 强校验）
+      │     └─ 失败 → 纯指标兜底 → degradedAction=hold → 强制 HOLD
+      ├─ ⑤ 决策落库 agent_decisions（含快照、Prompt、token 用量）
+      │
+      └─ ⑥ execute() —— 执行下单
+            ├─ action = HOLD          → 直接返回，不下单
+            ├─ confidence < minConfidence → 拒绝并记 confidence 事件
+            ├─ 计算下单量：
+            │     BUY  = 可用 USDT × positionPct ÷ 当前价
+            │     SELL = 可用 BTC  × positionPct
+            ├─ 咨询性预检 risk.check（快速失败，结论不权威）
+            │
+            └─ TradingService.placeOrder() —— 唯一权威出口
+                  ├─ 取当前价
+                  ├─ getSymbolFilters() 取过滤器（缓存 24h）
+                  ├─ normalizeOrder() 按 stepSize/tickSize 取整
+                  │     └─ 低于 minNotional → 拒绝
+                  ├─ 权威 risk.check（基于取整后的最终金额）
+                  ├─ 落库 orders（PENDING）
+                  └─ 发单
+                        ├─ dry_run    → 按滑点撮合成交 + trade_fills
+                        └─ testnet/live → 交易所下单，失败置 FAILED
+```
+
+**仓位计算**：每次动用可用余额的 `positionPct`（默认 10%）。
+买入按 USDT 余额折算数量，卖出按 BTC 余额的 10%。
+
+**两次风控的区别**：Agent 侧的预检使用**未取整的估算量 + 快照价**，仅用于快速失败与填充决策记录；
+`TradingService` 内的权威校验使用**取整后的实际下单量 + 最终价**。两者不一致时以后者为准，
+决策记录中的 `riskRejectedBy` 也会被权威结论覆盖。
+
+**dry_run 撮合**：按 `slippageBps`（默认 5）滑点成交，买入向上滑、卖出向下滑，
+费率按 `feeRateBps`（默认 10）计。成交写入 `trade_fills`，用于推导持仓与盈亏。
+
 ### 风控的三个关键约束
 
 **1. 单一权威出口**。所有下单都由 `TradingService` 确定价格、按交易所精度取整、执行风控后再发单。

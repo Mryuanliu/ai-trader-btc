@@ -1,127 +1,152 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { computeIndicators, buildSignals, scoreSignals } from '../../indicators/signals';
-import { Signal, SignalBias } from '../../types/agent';
+import { buildSignals, computeIndicators, scoreSignals } from '../../indicators/signals';
+import type { Candle } from '../../types/market';
 import { TrendFollowingStrategy } from '../trend-following';
-import { fallbackDecisionOracle, makeContext } from './oracle';
-import goldenFixture from './fixtures/btc-5m-500.json';
+import type { StrategyContext } from '../types';
 
 const strategy = new TrendFollowingStrategy();
 
-function signal(name: string, bias: SignalBias, weight: number): Signal {
-  return { name, label: name, value: 0, bias, weight, note: '' };
+function makeContext(overrides: Partial<StrategyContext> & { indicatorScore: number }): StrategyContext {
+  return {
+    symbol: 'BTCUSDT',
+    timeframe: '5m',
+    candles: [],
+    indicators: {} as StrategyContext['indicators'],
+    signals: [],
+    ticker: { symbol: 'BTCUSDT', last: 0, bid: 0, ask: 0, time: 0 },
+    position: null,
+    account: { quoteFree: 10_000, baseFree: 0 },
+    params: {},
+    ...overrides,
+  } as StrategyContext;
 }
 
-describe('TrendFollowingStrategy.normalizeParams', () => {
-  it('非法值回落默认', () => {
-    const merged = strategy.normalizeParams({
-      entryThreshold: 'abc',
-      confidenceBase: NaN,
-      confidenceSpan: null,
-    });
-    expect(merged).toEqual(strategy.defaultParams);
+describe('TrendFollowingStrategy · 阶段3缺陷修复', () => {
+  it('默认 entryThreshold 为 0.85（回测校准值）', () => {
+    expect(strategy.defaultParams.entryThreshold).toBe(0.85);
   });
 
-  it('越界值被钳制', () => {
-    const merged = strategy.normalizeParams({
-      entryThreshold: 5,
-      confidenceBase: -1,
-      confidenceSpan: 0.9,
+  it('缺陷①：score 恰在阈值时触发 BUY，confidence = confidenceFloor，无死区', () => {
+    const out = strategy.evaluate(makeContext({ indicatorScore: 0.25, params: { entryThreshold: 0.25 } }));
+    expect(out.action).toBe('BUY');
+    expect(out.confidence).toBe(0.6);
+  });
+
+  it('缺陷①：默认阈值下 score=0.25 不再触发（修复了低阈值过度交易）', () => {
+    expect(strategy.evaluate(makeContext({ indicatorScore: 0.25 })).action).toBe('HOLD');
+  });
+
+  it('缺陷①：阈值以下 HOLD，confidence 为 0', () => {
+    const out = strategy.evaluate(makeContext({ indicatorScore: 0.2499, params: { entryThreshold: 0.25 } }));
+    expect(out.action).toBe('HOLD');
+    expect(out.confidence).toBe(0);
+  });
+
+  it('缺陷①：confidence 随 |score| 单调递增，封顶 1.0', () => {
+    const p = { entryThreshold: 0.25 };
+    const c1 = strategy.evaluate(makeContext({ indicatorScore: 0.25, params: p })).confidence;
+    const c2 = strategy.evaluate(makeContext({ indicatorScore: 0.6, params: p })).confidence;
+    const c3 = strategy.evaluate(makeContext({ indicatorScore: 2, params: p })).confidence;
+    expect(c2).toBeGreaterThan(c1);
+    expect(c3).toBe(1);
+    expect(c3).toBeGreaterThan(c2);
+  });
+
+  it('缺陷①：SELL 对称——-0.25 触发 SELL 且 confidence 同 BUY(0.25)', () => {
+    const p = { entryThreshold: 0.25 };
+    const sell = strategy.evaluate(makeContext({ indicatorScore: -0.25, params: p }));
+    const buy = strategy.evaluate(makeContext({ indicatorScore: 0.25, params: p }));
+    expect(sell.action).toBe('SELL');
+    expect(sell.confidence).toBe(buy.confidence);
+  });
+
+  it('缺陷②：单信号看多不再给出满分 score', () => {
+    const signal = (bias: 'bullish' | 'bearish' | 'neutral', weight: number) => ({
+      name: 'x', label: 'x', value: 'x', bias, weight, note: '',
     });
-    expect(merged).toEqual({ entryThreshold: 1, confidenceBase: 0, confidenceSpan: 0.9 });
+    // 仅一个权重 0.25 的信号看多：旧实现 score=1.0，新实现=0.25/1.0
+    const score = scoreSignals([signal('bullish', 0.25), signal('neutral', 0.75)]);
+    expect(score).toBeCloseTo(0.25, 4);
+  });
+
+  it('缺陷②：全部信号同向时 score = ±1', () => {
+    const signals = [0.25, 0.2, 0.2, 0.15, 0.1, 0.1].map((weight) => ({
+      name: 'x', label: 'x', value: 'x', bias: 'bullish' as const, weight, note: '',
+    }));
+    expect(scoreSignals(signals)).toBe(1);
+  });
+
+  it('缺陷③：量能统计排除未闭合的末根 K 线', () => {
+    // 末根（未闭合）成交量接近 0，前 21 根均为 100 —— 旧实现 volumeRatio≈0，新实现应为 1
+    const candles: Candle[] = Array.from({ length: 22 }, (_, i) => ({
+      time: 1_700_000_000_000 + i * 300_000,
+      open: 100, high: 101, low: 99, close: 100,
+      volume: i === 21 ? 0.001 : 100,
+    }));
+    const snapshot = computeIndicators(candles);
+    expect(snapshot.volumeRatio).toBeCloseTo(1, 6);
+  });
+
+  it('缺陷③：量能方向取已闭合 K 线——末根暴跌但已闭合 K 线上涨时量能为 bullish', () => {
+    // 前 20 根平稳（量 100），第 21 根（最后已闭合）上涨且放量，第 22 根（未闭合）暴跌缩量
+    const candles: Candle[] = Array.from({ length: 22 }, (_, i) => ({
+      time: 1_700_000_000_000 + i * 300_000,
+      open: 100, high: 101, low: 99,
+      close: i === 21 ? 50 : 100, // 末根未闭合暴跌
+      volume: i === 21 ? 200 : i === 20 ? 200 : 100,
+    }));
+    const snapshot = computeIndicators(candles);
+    const signals = buildSignals(snapshot, candles);
+    const volume = signals.find((s) => s.name === 'volume');
+    expect(volume?.bias).toBe('bullish');
   });
 });
 
-describe('TrendFollowingStrategy 边界用例（与 oracle 逐值一致）', () => {
-  const cases: { label: string; signals: Signal[] }[] = [
-    { label: '全中性', signals: ['ma_trend', 'rsi', 'macd', 'bollinger', 'volume', 'mid_term'].map((n) => signal(n, 'neutral', n === 'ma_trend' ? 0.25 : n === 'rsi' || n === 'macd' ? 0.2 : n === 'bollinger' ? 0.15 : 0.1)) },
-    { label: '单强信号看多', signals: [signal('ma_trend', 'bullish', 0.25), ...restNeutral()] },
-    { label: '单弱信号看多（死区内）', signals: [signal('volume', 'bullish', 0.1), ...restNeutral()] },
-    { label: '多空混合 3多2空1中性', signals: [
-      signal('ma_trend', 'bullish', 0.25),
-      signal('rsi', 'bullish', 0.2),
-      signal('macd', 'bullish', 0.2),
-      signal('bollinger', 'bearish', 0.15),
-      signal('volume', 'bearish', 0.1),
-      signal('mid_term', 'neutral', 0.1),
-    ] },
-  ];
-
-  for (const { label, signals } of cases) {
-    it(`${label}：action/confidence 与旧 fallbackDecision 完全一致`, () => {
-      const ctx = makeContext({ signals, indicatorScore: scoreSignals(signals) });
-      const output = strategy.evaluate(ctx);
-      const oracle = fallbackDecisionOracle({ indicatorScore: ctx.indicatorScore });
-      expect(output.action).toBe(oracle.action);
-      expect(output.confidence).toBe(oracle.confidence);
-    });
-  }
-
-  it('全中性时 HOLD 且 confidence=0.45', () => {
-    const ctx = makeContext({ signals: restNeutral().concat(signal('ma_trend', 'neutral', 0.25)) });
-    const output = strategy.evaluate(ctx);
-    expect(output.action).toBe('HOLD');
-    expect(output.confidence).toBe(0.45);
+describe('TrendFollowingStrategy · 参数归一化', () => {
+  it('非法参数回落默认值（null/undefined/空串/非数值）', () => {
+    const p = strategy.normalizeParams({ entryThreshold: null, confidenceFloor: '', extra: 'x' });
+    expect(p.entryThreshold).toBe(0.85);
+    expect(p.confidenceFloor).toBe(0.6);
+    expect(p).not.toHaveProperty('extra');
   });
 
-  it('单一最强信号（score=1.0）时 BUY 且 confidence=0.85', () => {
-    // 构造 indicatorScore=1：需要一个权重 1 的信号（绕过 buildSignals 直接注入）
-    const ctx = makeContext({ signals: [signal('all', 'bullish', 1)], indicatorScore: 1 });
-    const output = strategy.evaluate(ctx);
-    expect(output.action).toBe('BUY');
-    expect(output.confidence).toBe(0.85);
+  it('越界参数被钳制', () => {
+    const p = strategy.normalizeParams({ entryThreshold: -1, confidenceFloor: 2 });
+    expect(p.entryThreshold).toBe(0);
+    expect(p.confidenceFloor).toBe(1);
   });
 
-  it('恰在阈值 score=0.25 触发 BUY', () => {
-    const ctx = makeContext({ signals: [signal('all', 'bullish', 0.25)], indicatorScore: 0.25 });
-    expect(strategy.evaluate(ctx).action).toBe('BUY');
-  });
-
-  it('恰在负阈值 score=-0.25 触发 SELL', () => {
-    const ctx = makeContext({ signals: [signal('all', 'bearish', 0.25)], indicatorScore: -0.25 });
-    expect(strategy.evaluate(ctx).action).toBe('SELL');
-  });
-
-  it('score=0.2499 不触发', () => {
-    const ctx = makeContext({ signals: [], indicatorScore: 0.2499 });
-    expect(strategy.evaluate(ctx).action).toBe('HOLD');
+  it('entryThreshold=0 时任何非零 score 都触发（边界保护：threshold=1 不除零）', () => {
+    const out = strategy.evaluate(makeContext({ indicatorScore: 0.01, params: { entryThreshold: 0 } }));
+    expect(out.action).toBe('BUY');
+    expect(() =>
+      strategy.evaluate(makeContext({ indicatorScore: 1, params: { entryThreshold: 1 } })),
+    ).not.toThrow();
   });
 });
 
-describe('TrendFollowingStrategy golden 对比（真实 K 线滚动窗口 vs oracle）', () => {
-  const candles = goldenFixture.candles as Candle[];
-  const WINDOW = 200; // 与实盘 HISTORY_LIMIT 对齐
+describe('TrendFollowingStrategy · 真实行情 golden 抽样', () => {
+  const fixture = JSON.parse(
+    readFileSync(resolve(__dirname, 'fixtures/btc-5m-500.json'), 'utf8'),
+  ) as Candle[];
 
-  it('每个滚动窗口的 action/confidence 与旧 fallbackDecision 完全一致', () => {
-    let compared = 0;
-    let buyCount = 0;
-    let sellCount = 0;
-    for (let end = WINDOW; end <= candles.length; end++) {
-      const window = candles.slice(end - WINDOW, end);
-      const ctx = makeContext({ candles: window });
-      const output = strategy.evaluate(ctx);
-      const oracle = fallbackDecisionOracle({
-        indicatorScore: scoreSignals(buildSignals(computeIndicators(window), window)),
-      });
-      expect(output.action).toBe(oracle.action);
-      expect(output.confidence).toBe(oracle.confidence);
-      if (output.action === 'BUY') buyCount++;
-      if (output.action === 'SELL') sellCount++;
-      compared++;
+  it('500 根真实 K 线上 action 只能是 BUY/SELL/HOLD，confidence 在 [0,1]', () => {
+    const WINDOW = 200;
+    for (let i = WINDOW; i < fixture.length; i++) {
+      const window = fixture.slice(i - WINDOW, i + 1);
+      const indicators = computeIndicators(window);
+      const signals = buildSignals(indicators, window);
+      const score = scoreSignals(signals);
+      const out = strategy.evaluate(makeContext({ indicatorScore: score }));
+      expect(['BUY', 'SELL', 'HOLD']).toContain(out.action);
+      expect(out.confidence).toBeGreaterThanOrEqual(0);
+      expect(out.confidence).toBeLessThanOrEqual(1);
+      if (out.action !== 'HOLD') {
+        // 缺陷①的核心不变式：触发即通过 minConfidence=0.6
+        expect(out.confidence).toBeGreaterThanOrEqual(0.6);
+      }
     }
-    // 采样有效性：窗口数足够且 BUY/SELL/HOLD 均有出现（避免全部落进同一动作的假一致）
-    expect(compared).toBe(301);
-    expect(buyCount).toBeGreaterThan(0);
-    expect(sellCount).toBeGreaterThan(0);
-    expect(compared - buyCount - sellCount).toBeGreaterThan(0);
   });
 });
-
-function restNeutral(): Signal[] {
-  return [
-    signal('rsi', 'neutral', 0.2),
-    signal('macd', 'neutral', 0.2),
-    signal('bollinger', 'neutral', 0.15),
-    signal('volume', 'neutral', 0.1),
-    signal('mid_term', 'neutral', 0.1),
-  ];
-}
