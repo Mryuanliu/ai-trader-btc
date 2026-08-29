@@ -18,5 +18,4 @@ export const AppDataSource = new DataSource({
   synchronize: false,
   logging: false,
 });
-
-export default AppDataSource;
+// 注意：不要 default export——TypeORM CLI 要求文件中只有一个 DataSource 导出，双导出会让 migration:run 报错
