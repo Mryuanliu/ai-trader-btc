@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Space,
   Row,
   Segmented,
   Select,
@@ -264,6 +265,44 @@ export function AdminAgentConfig() {
                   tooltip={{ formatter: (v) => (v ?? 0).toFixed(2) }}
                 />
               </Form.Item>
+              <Form.Item
+                label={
+                  <Tooltip title="出场规则属于持仓层能力，两条链路均生效且优先级最高：持仓亏损/盈利达到阈值时全仓卖出，替代本轮策略或模型信号。留空表示关闭该项。">
+                    <span className="border-b border-dashed border-white/25">出场规则（止损/止盈）</span>
+                  </Tooltip>
+                }
+              >
+                <Space.Compact>
+                  <Form.Item
+                    name={['exitRules', 'stopLossPct']}
+                    noStyle
+                  >
+                    <InputNumber
+                      min={0.001}
+                      max={1}
+                      step={0.01}
+                      placeholder="止损，如 0.05"
+                      className="!w-44"
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name={['exitRules', 'takeProfitPct']}
+                    noStyle
+                  >
+                    <InputNumber
+                      min={0.001}
+                      max={1}
+                      step={0.01}
+                      placeholder="止盈，如 0.10"
+                      className="!w-44"
+                    />
+                  </Form.Item>
+                </Space.Compact>
+              </Form.Item>
+              <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[11px] leading-relaxed text-muted">
+                值为相对持仓均价的小数：0.05 = 亏损 5% 止损、0.10 = 盈利 10% 止盈；清空 = 关闭。
+                默认全关：出场会主动平仓，请确认策略配合后再启用。
+              </div>
             </Card>
           </Col>
 
@@ -273,7 +312,7 @@ export function AdminAgentConfig() {
                 <div className="rounded-lg border border-white/[0.07] bg-black/25 px-3 py-2 text-[12px] leading-relaxed text-muted">
                   当前链路为「纯策略」：决策完全由上方选定的策略产出，不调用 LLM
                   （不读密钥、不发请求、零 token 成本），LLM 挂掉也不影响本链路。
-                  策略使用内置默认参数，参数编辑与回测报告页在后续版本提供。
+                  策略使用内置默认参数（左侧可配置出场规则）；参数编辑与回测报告页在后续版本提供。
                 </div>
               </Card>
             ) : (

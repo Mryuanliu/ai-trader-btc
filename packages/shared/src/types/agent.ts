@@ -117,6 +117,8 @@ export interface DecisionSummary {
   reason: string;
   /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
   lane: DecisionLane;
+  /** LLM 失败/出场规则触发等非本体决策的降级原因 */
+  degradeReason?: string | null;
   /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
   strategyName?: string | null;
   degraded: boolean;

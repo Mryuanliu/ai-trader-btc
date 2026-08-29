@@ -128,6 +128,10 @@ export function AdminDecisions() {
                 dataIndex: 'lane',
                 width: 132,
                 render: (_: string, row: DecisionSummary) => {
+                  // 出场规则触发的决策：degradeReason 以「出场规则触发」开头（见引擎 checkExitRules）
+                  if (row.degradeReason?.startsWith('出场规则触发')) {
+                    return <Tag color="volcano">出场</Tag>;
+                  }
                   if (row.lane === 'strategy') return <Tag color="green">策略</Tag>;
                   if (row.degraded) {
                     return row.strategyName ? (
@@ -170,6 +174,9 @@ export function AdminDecisions() {
           <div className="flex items-center gap-2">
             <span>决策链条详情</span>
             {detail.data ? <ActionTag action={detail.data.action} /> : null}
+            {detail.data?.degradeReason?.startsWith('出场规则触发') ? (
+              <Tag color="volcano">出场规则</Tag>
+            ) : null}
             {detail.data?.lane === 'strategy' ? (
               <Tag color="green">策略{detail.data.strategyName ? ` · ${detail.data.strategyName}` : ''}</Tag>
             ) : null}

@@ -557,6 +557,7 @@ export class AgentEngine {
       lane: entity.lane ?? 'llm',
       strategyName: entity.strategyName ?? null,
       degraded: entity.degraded,
+      degradeReason: entity.degradeReason ?? null,
       riskPassed: entity.riskPassed,
       riskRejectedBy: entity.riskRejectedBy,
       latencyMs: entity.latencyMs,
