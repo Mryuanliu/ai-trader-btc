@@ -81,6 +81,8 @@ export interface BacktestReport {
     };
     /** 标注成交口径：回测以信号后下一根开盘价成交（无前视、偏保守） */
     fillConvention: 'next-open';
+    /** HTTP 报告的 equityCurve 超过上限被等距下采样时为 true */
+    downsampled?: boolean;
   };
   metrics: BacktestMetrics;
   equityCurve: EquityPoint[];

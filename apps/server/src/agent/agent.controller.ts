@@ -16,6 +16,7 @@ import {
   AgentConfigShape,
   AgentRuntimeState,
   DecisionAction,
+  DecisionLane,
   ExchangeCode,
   PageResult,
   DecisionSummary,
@@ -236,6 +237,7 @@ export class AgentController {
     @Query('action') action?: DecisionAction,
     @Query('executedOnly') executedOnly?: string,
     @Query('keyword') keyword?: string,
+    @Query('lane') lane?: DecisionLane,
   ): Promise<PageResult<DecisionSummary>> {
     return this.engine.list({
       page: Number(page) || 1,
@@ -243,7 +245,14 @@ export class AgentController {
       action,
       executedOnly: executedOnly === 'true',
       keyword,
+      lane: lane === 'llm' || lane === 'strategy' || lane === 'hybrid' ? lane : undefined,
     });
+  }
+
+  /** 决策链路统计：按链路分组的决策量、降级量与动作分布 */
+  @Get('decisions/stats')
+  async laneStats() {
+    return this.engine.laneStats();
   }
 
   /** 决策链条详情：行情 → 指标信号 → Prompt → 模型输出 → 风控 → 下单结果 */

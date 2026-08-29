@@ -114,6 +114,9 @@ export function AdminAgentConfig() {
   const laneValue: DecisionLane =
     Form.useWatch('decisionLane', form) ?? config?.decisionLane ?? DEFAULT_AGENT_CONFIG.decisionLane;
   const strategyOptions = useMemo(() => strategyRegistry.list(), []);
+  const strategyFormValue: string =
+    Form.useWatch('strategyName', form) ?? config?.strategyName ?? DEFAULT_AGENT_CONFIG.strategyName;
+  const currentStrategy = strategyOptions.find((s) => s.name === strategyFormValue);
 
   const exchangeOptions = useMemo(
     () => EXCHANGE_CODES.map((code) => ({ label: EXCHANGE_LABELS[code], value: code })),
@@ -252,6 +255,37 @@ export function AdminAgentConfig() {
                   <Select options={LLM_FAILURE_OPTIONS} />
                 </Form.Item>
               )}
+              {laneValue !== 'llm' && currentStrategy?.paramSchema ? (
+                <>
+                  <div className="mb-1 mt-2 text-[12px] text-subtle">策略参数</div>
+                  <Row gutter={12}>
+                    {Object.entries(
+                      currentStrategy.paramSchema.properties as Record<
+                        string,
+                        { title?: string; minimum?: number; maximum?: number }
+                      >,
+                    ).map(([key, prop]) => (
+                      <Col span={8} key={key}>
+                        <Form.Item
+                          name={['strategyParams', key]}
+                          label={prop.title ?? key}
+                          tooltip={`范围 ${prop.minimum ?? '-'} ~ ${prop.maximum ?? '-'}；留空使用默认值 ${
+                            currentStrategy.defaultParams?.[key] ?? '-'
+                          }`}
+                        >
+                          <InputNumber
+                            min={prop.minimum}
+                            max={prop.maximum}
+                            step={0.01}
+                            placeholder={String(currentStrategy.defaultParams?.[key] ?? '默认')}
+                            className="!w-full"
+                          />
+                        </Form.Item>
+                      </Col>
+                    ))}
+                  </Row>
+                </>
+              ) : null}
               <Form.Item name="positionPct" label="单次仓位比例">
                 <Slider
                   min={0.01}

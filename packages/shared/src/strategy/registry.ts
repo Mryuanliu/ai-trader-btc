@@ -40,11 +40,19 @@ export class StrategyRegistry {
     return { strategy: fallback, fellBack: true, requestedName: name };
   }
 
-  list(): { name: string; label: string; description: string }[] {
+  list(): {
+    name: string;
+    label: string;
+    description: string;
+    defaultParams: Record<string, unknown>;
+    paramSchema: Record<string, unknown> | null;
+  }[] {
     return [...this.strategies.values()].map((s) => ({
       name: s.name,
       label: s.label,
       description: s.description,
+      defaultParams: s.defaultParams,
+      paramSchema: s.paramSchema ?? null,
     }));
   }
 }

@@ -229,11 +229,104 @@ export function useDecisions(params: {
   action?: string;
   executedOnly?: boolean;
   keyword?: string;
+  lane?: string;
 }) {
   return useQuery<PageResult<DecisionSummary>>({
     queryKey: ['decisions', params],
     queryFn: () => http.get('/agent/decisions', { params }),
     refetchInterval: 30000,
+  });
+}
+
+/** 决策链路统计（阶段 6）：按链路分组的决策量、降级量与动作分布 */
+export interface LaneStats {
+  total: number;
+  degradedTotal: number;
+  lanes: { lane: 'llm' | 'strategy' | 'hybrid'; count: number; degraded: number; buys: number; sells: number; holds: number }[];
+}
+
+export function useLaneStats() {
+  return useQuery<LaneStats>({
+    queryKey: ['decision-lane-stats'],
+    queryFn: () => http.get('/agent/decisions/stats'),
+    refetchInterval: 60000,
+  });
+}
+
+// ------------------------------------------------------------------ 回测（阶段 6）
+export interface BacktestRequest {
+  symbol?: string;
+  interval?: string;
+  from: string;
+  to: string;
+  initialCapital?: number;
+  slippageBps?: number;
+  feeRateBps?: number;
+  positionPct?: number;
+  minConfidence?: number;
+  strategyName?: string;
+  strategyParams?: Record<string, unknown>;
+  exitRules?: { stopLossPct?: number | null; takeProfitPct?: number | null };
+  warmupBars?: number;
+  autoBackfill?: boolean;
+}
+
+export interface BacktestReportDTO {
+  meta: {
+    symbol: string;
+    interval: string;
+    from: number;
+    to: number;
+    candleCount: number;
+    warmupBars: number;
+    initialCapital: number;
+    strategyName: string;
+    strategyParams: Record<string, unknown>;
+    exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
+    downsampled?: boolean;
+  };
+  metrics: {
+    totalReturnPct: number;
+    annualizedReturnPct: number;
+    maxDrawdownPct: number;
+    sharpeRatio: number;
+    winRate: number;
+    profitFactor: number;
+    tradeCount: number;
+    buyHoldReturnPct: number;
+    excessVsBuyHoldPct: number;
+  };
+  equityCurve: { time: number; equity: number; drawdownPct: number }[];
+  trades: {
+    time: number;
+    side: 'BUY' | 'SELL';
+    price: number;
+    quantity: number;
+    fee: number;
+    equityAfter: number;
+    decisionConfidence: number;
+  }[];
+}
+
+export function useBacktestStrategies() {
+  return useQuery<
+    {
+      name: string;
+      label: string;
+      description: string;
+      defaultParams: Record<string, unknown>;
+      paramSchema: Record<string, unknown> | null;
+    }[]
+  >({
+    queryKey: ['backtest-strategies'],
+    queryFn: () => http.get('/backtest/strategies'),
+    staleTime: Infinity,
+  });
+}
+
+export function useRunBacktest() {
+  return useMutation<BacktestReportDTO, Error, BacktestRequest>({
+    mutationFn: (req) => http.post('/backtest/run', req),
   });
 }
 

@@ -18,6 +18,7 @@ import { AuthModule } from './auth/auth.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { OverviewModule } from './overview/overview.module';
+import { BacktestModule } from './backtest/backtest.module';
 import { AllExceptionsFilter } from './common/all-exception.filter';
 
 @Module({
@@ -49,6 +50,7 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     TradingModule,
     AgentModule,
     OverviewModule,
+    BacktestModule,
     GatewayModule,
     SchedulerModule,
   ],

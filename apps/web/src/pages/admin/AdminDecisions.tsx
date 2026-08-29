@@ -13,7 +13,7 @@ import {
   Tag,
 } from 'antd';
 import { DECISION_ACTION_LABELS, type DecisionAction, type DecisionSummary } from '@ai-trader/shared';
-import { useDecisionDetail, useDecisions } from '@/api/hooks';
+import { useDecisionDetail, useDecisions, useLaneStats } from '@/api/hooks';
 import { ActionTag } from '@/components/OrderStatusTag';
 import { DecisionTimeline } from '@/components/DecisionTimeline';
 import { formatRelative, formatTime } from '@/utils/format';
@@ -25,9 +25,23 @@ const ACTIONS: { label: string; value: string }[] = [
   { label: '观望', value: 'HOLD' },
 ];
 
+const LANES: { label: string; value: string }[] = [
+  { label: '全部链路', value: 'ALL' },
+  { label: 'AI 决策', value: 'llm' },
+  { label: '纯策略', value: 'strategy' },
+  { label: '混合', value: 'hybrid' },
+];
+
+const LANE_LABELS: Record<string, string> = {
+  llm: 'AI 决策',
+  strategy: '纯策略',
+  hybrid: '混合',
+};
+
 export function AdminDecisions() {
   const [page, setPage] = useState(1);
   const [action, setAction] = useState('ALL');
+  const [lane, setLane] = useState('ALL');
   const [keyword, setKeyword] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [llmOnly, setLlmOnly] = useState(false);
@@ -36,8 +50,10 @@ export function AdminDecisions() {
     page,
     pageSize: 20,
     action: action === 'ALL' ? undefined : action,
+    lane: lane === 'ALL' ? undefined : lane,
     keyword: keyword || undefined,
   });
+  const stats = useLaneStats();
   const detail = useDecisionDetail(selected);
 
   // 仅看真实调用了大模型的决策：便于把降级为纯指标的记录排除掉
@@ -45,8 +61,30 @@ export function AdminDecisions() {
 
   return (
     <div className="flex flex-col gap-4">
+      {stats.data && stats.data.total > 0 ? (
+        <div className="glass-card flex flex-wrap items-center gap-x-6 gap-y-2 p-3 text-[12px]">
+          <span className="text-subtle">
+            决策总量 <span className="num text-white">{stats.data.total}</span>
+          </span>
+          {stats.data.lanes.map((l) => (
+            <span key={l.lane} className="text-subtle">
+              {LANE_LABELS[l.lane] ?? l.lane}{' '}
+              <span className="num text-white">{l.count}</span>
+              <span className="ml-1 text-[10px] text-muted">
+                （买 {l.buys} / 卖 {l.sells} / 望 {l.holds}
+                {l.degraded > 0 ? ` · 降级 ${l.degraded}` : ''}）
+              </span>
+            </span>
+          ))}
+          {stats.data.degradedTotal > 0 ? (
+            <span className="text-warn">降级合计 {stats.data.degradedTotal}</span>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="glass-card flex flex-wrap items-center justify-between gap-3 p-4">
         <Space wrap>
+          <Segmented value={lane} onChange={(v) => setLane(String(v))} options={LANES} />
           <Segmented value={action} onChange={(v) => setAction(String(v))} options={ACTIONS} />
           <Input.Search
             allowClear

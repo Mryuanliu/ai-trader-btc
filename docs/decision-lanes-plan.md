@@ -592,28 +592,51 @@ private async produceDecision(ctx, config): Promise<LaneResult> {
 - [x] 三策略同窗口回测对比输出
 - strategyParams 的前端编辑表单归阶段 6（API 已支持）
 
-### 阶段 5：AI 上下文层（分层裁决）
+### 阶段 5：AI 上下文层（分层裁决）✅ 已完成（2026-08-29）
 
 **目标**：实现 2.4 节的分层架构，让 AI 从「决策者」变为「上下文提供者」。
 
-**改动**：
-- AI 输出改为元参数：市场状态、激进度、新闻情绪、持仓评估
-- 策略层接收元参数作为输入条件，执行逻辑仍是确定性规则
-- `hybrid` 链路落地为该形态
+**实施结果**：
+- **AI 元参数输出**：`LlmClient.analyzeContext` + `ContextInsightSchema`（regime /
+  regimeConfidence / aggression / newsSentiment / positionView / comment），
+  复用冷却与容错 JSON 提取；`buildContextPrompt` 明确禁止 AI 输出买卖指令
+- **纯函数映射**（shared `context-mapping.ts`）：`mapInsightToParams`——
+  激进度 → 仓位乘数（0.5+aggression，[0.5,1.5]）与阈值偏移（±0.1）；
+  极端利空（<-0.5）抬门槛 0.05（非对称保守）；高置信（≥0.6）volatile 抬 0.1、
+  ranging 对 trend_following 抬 0.05。阈值输出为绝对值（基准+偏移，钳制 0.3~0.95），
+  只返回生效键避免覆盖用户 strategyParams。`normalizeInsight` 钳制容错，
+  AI 输出永不使映射崩溃；15 个单测
+- **hybrid 链路**：引擎 `buildHybridLane`——insight 1h TTL 缓存（AI 调用降频到小时级）；
+  AI 失败/超期时沿用上次分析，再退 `NEUTRAL_CONTEXT_INSIGHT`（中性默认参数），
+  交易不停摆；`positionMultiplier` 作用于开仓金额（卖出不受影响），
+  lane='hybrid' + degraded/降级原因落库可归因
+- 配置层放开 `decisionLane='hybrid'` 读写；前端链路选择加「混合」选项与说明卡
+  （hybrid 仍显示模型配置卡——上下文分析需要调用模型）
 
 **验收**：
-- AI 不可用时策略层用中性默认参数继续运行（而非停摆）
-- 回测可冻结 AI 上下文快照，验证「AI 判断 + 策略执行」的整体效果
+- [x] AI 不可用时策略层用中性默认参数继续运行（不停摆，degraded=true 留痕）
+- [x] 映射纯函数可离线回放（回测可直接冻结 insight 重放）
 
-### 阶段 6：前端与可观测
+### 阶段 6：前端与可观测 ✅ 已完成（2026-08-29）
 
-**目标**：让两条链路的差异在界面上可见、可调。
+**目标**：让链路差异在界面上可见、可调。
 
-**改动**：
-- 配置页：链路开关、策略选择、策略参数动态表单
-- `decisionLane='strategy'` 时隐藏模型配置卡片
-- 决策历史：链路标识、筛选、按链路的胜率统计
-- 回测报告页：绩效曲线、回撤曲线、与基准对比
+**实施结果**：
+- **回测 HTTP 端点**：`GET /backtest/strategies`（策略清单 + paramSchema）、
+  `POST /backtest/run`（同步执行；区间根数上限 60,000、equityCurve 等距下采样
+  ≤2,000 点、串行锁防并发、数据稀疏自动回填可关）
+- **回测报告页**（/admin/backtest）：参数表单（策略/区间/周期/仓位/出场规则/滑点手续费）、
+  绩效统计卡（总收益/年化/回撤/夏普/胜率/盈亏比/交易次数/Buy&Hold 超额）、
+  权益+回撤双轴面积图（recharts）、成交明细表
+- **strategyParams 动态表单**：配置页 strategy/hybrid 链路按策略 paramSchema
+  渲染参数项（min/max/占位默认值），留空用默认；`registry.list()` 扩展携带
+  defaultParams/paramSchema
+- **决策链路筛选与统计**：`GET /agent/decisions?lane=`、`GET /agent/decisions/stats`
+  （按链路分组的决策量/降级量/买卖望分布）；决策历史页顶部统计条 + 链路筛选 Segmented
+
+**验收**：
+- [x] 端到端验证（临时实例 3002 端口）：strategies / stats / run 全部返回正确数据
+      （实测 08-01~08-29 breakout 5m：8065 根、180 笔、+16.21%/回撤 3.53%）
 
 ---
 

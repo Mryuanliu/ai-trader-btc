@@ -673,12 +673,14 @@ export class AgentEngine {
     action?: DecisionAction;
     executedOnly?: boolean;
     keyword?: string;
+    lane?: DecisionLane;
   }) {
     const page = Math.max(1, Number(params.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(params.pageSize) || 20));
 
     const qb = this.decisionRepo.createQueryBuilder('d');
     if (params.action) qb.andWhere('d.action = :action', { action: params.action });
+    if (params.lane) qb.andWhere('d.lane = :lane', { lane: params.lane });
     if (params.executedOnly) qb.andWhere('d.orderId IS NOT NULL');
     if (params.keyword) {
       qb.andWhere('(d.reason ILIKE :kw OR d.riskNotes ILIKE :kw)', { kw: `%${params.keyword}%` });
@@ -687,6 +689,41 @@ export class AgentEngine {
 
     const [rows, total] = await qb.getManyAndCount();
     return { items: rows.map((r) => this.toSummary(r)), total, page, pageSize };
+  }
+
+  /**
+   * 决策链路统计（阶段 6）：按链路分组的决策量、降级量与动作分布，
+   * 供决策历史页顶部统计条使用。
+   */
+  async laneStats(): Promise<{
+    total: number;
+    degradedTotal: number;
+    lanes: { lane: DecisionLane; count: number; degraded: number; buys: number; sells: number; holds: number }[];
+  }> {
+    const rows = await this.decisionRepo
+      .createQueryBuilder('d')
+      .select('d.lane', 'lane')
+      .addSelect('COUNT(*)', 'count')
+      .addSelect('SUM(CASE WHEN d.degraded THEN 1 ELSE 0 END)', 'degraded')
+      .addSelect("SUM(CASE WHEN d.action = 'BUY' THEN 1 ELSE 0 END)", 'buys')
+      .addSelect("SUM(CASE WHEN d.action = 'SELL' THEN 1 ELSE 0 END)", 'sells')
+      .addSelect("SUM(CASE WHEN d.action = 'HOLD' THEN 1 ELSE 0 END)", 'holds')
+      .groupBy('d.lane')
+      .getRawMany<{ lane: string | null; count: string; degraded: string; buys: string; sells: string; holds: string }>();
+
+    const lanes = rows.map((r) => ({
+      lane: (r.lane ?? 'llm') as DecisionLane,
+      count: Number(r.count),
+      degraded: Number(r.degraded ?? 0),
+      buys: Number(r.buys ?? 0),
+      sells: Number(r.sells ?? 0),
+      holds: Number(r.holds ?? 0),
+    }));
+    return {
+      total: lanes.reduce((acc, l) => acc + l.count, 0),
+      degradedTotal: lanes.reduce((acc, l) => acc + l.degraded, 0),
+      lanes,
+    };
   }
 
   async recent(limit = 10): Promise<DecisionSummary[]> {

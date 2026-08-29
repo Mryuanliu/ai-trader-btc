@@ -9,6 +9,7 @@ import {
   ProfileOutlined,
   BankOutlined,
   SafetyCertificateOutlined,
+  LineChartOutlined,
   ReloadOutlined,
   MobileOutlined,
 } from '@ant-design/icons';
@@ -29,6 +30,7 @@ const MENU = [
   { key: '/admin/orders', icon: <ProfileOutlined />, label: '订单成交' },
   { key: '/admin/accounts', icon: <BankOutlined />, label: '交易所账户' },
   { key: '/admin/risk', icon: <SafetyCertificateOutlined />, label: '风控事件' },
+  { key: '/admin/backtest', icon: <LineChartOutlined />, label: '策略回测' },
 ];
 
 export function AdminLayout() {
