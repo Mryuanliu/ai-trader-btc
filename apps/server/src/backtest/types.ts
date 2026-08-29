@@ -18,6 +18,14 @@ export interface BacktestConfig {
   minConfidence: number;
   strategyName: string;
   strategyParams?: Record<string, unknown>;
+  /**
+   * 出场规则（止损/止盈），与实盘 checkExitRules 同口径：
+   * 持仓层能力，优先级高于策略信号，触发时全仓卖出
+   */
+  exitRules?: {
+    stopLossPct?: number | null;
+    takeProfitPct?: number | null;
+  };
   /** 前 N 根只累积指标窗口、不出信号 */
   warmupBars: number;
 }
@@ -67,6 +75,10 @@ export interface BacktestReport {
     minConfidence: number;
     strategyName: string;
     strategyParams: Record<string, unknown>;
+    exitRules: {
+      stopLossPct: number | null;
+      takeProfitPct: number | null;
+    };
     /** 标注成交口径：回测以信号后下一根开盘价成交（无前视、偏保守） */
     fillConvention: 'next-open';
   };

@@ -98,6 +98,13 @@ export class AgentConfigEntity {
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
   strategyParams: Record<string, unknown>;
 
+  /** 出场规则（止损/止盈）：两条链路均生效，默认全关，显式配置才启用 */
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+  exitRules: {
+    stopLossPct: number | null;
+    takeProfitPct: number | null;
+  };
+
   /** 模拟撮合滑点（bps） */
   @Column({ type: 'float8', default: DEFAULT_AGENT_CONFIG.slippageBps })
   slippageBps: number;

@@ -7,7 +7,7 @@ import {
   computePosition,
   scoreSignals,
 } from '@ai-trader/shared';
-import type { PositionFill } from '@ai-trader/shared';
+import type { PositionFill, PositionSnapshot } from '@ai-trader/shared';
 import { computeMetrics } from './metrics';
 import type { BacktestConfig, BacktestReport, BacktestTrade, EquityPoint } from './types';
 
@@ -68,7 +68,16 @@ export function runBacktest(
       params: strategy.normalizeParams(config.strategyParams),
     };
 
-    const output = strategy.evaluate(context);
+    // 出场规则（阶段 4）：优先级最高，触发时替代策略信号全仓卖出（与实盘 checkExitRules 同口径）
+    const exit = checkExitTrigger(context.position, price, config.exitRules);
+    const output = exit
+      ? {
+          action: 'SELL' as const,
+          confidence: 1,
+          reason: `出场规则触发：${exit}。按出场规则全仓卖出。`,
+          exitFull: true,
+        }
+      : strategy.evaluate(context);
 
     // ---- 3. 下单意图：以第 i+1 根开盘价成交（下一迭代外推成交价）----
     if (output.action !== 'HOLD' && output.confidence >= config.minConfidence) {
@@ -80,7 +89,9 @@ export function runBacktest(
       const rawQty =
         output.action === 'BUY'
           ? (quoteFree * config.positionPct) / fillPrice
-          : baseFree * config.positionPct;
+          : exit
+            ? baseFree
+            : baseFree * config.positionPct;
 
       if (rawQty > 0) {
         const notional = rawQty * fillPrice;
@@ -163,6 +174,10 @@ export function runBacktest(
       minConfidence: config.minConfidence,
       strategyName: strategy.name,
       strategyParams: strategy.normalizeParams(config.strategyParams),
+      exitRules: {
+        stopLossPct: config.exitRules?.stopLossPct ?? null,
+        takeProfitPct: config.exitRules?.takeProfitPct ?? null,
+      },
       fillConvention: 'next-open',
     },
     metrics,
@@ -171,3 +186,33 @@ export function runBacktest(
   };
 }
 
+/**
+ * 出场规则判定（与实盘 AgentEngine.checkExitRules 同口径）：
+ * 持仓盈亏相对均价触及阈值时返回触发描述，无持仓/未配置返回 null。
+ */
+function checkExitTrigger(
+  position: PositionSnapshot | null,
+  price: number,
+  rules?: BacktestConfig['exitRules'],
+): string | null {
+  const stop = rules?.stopLossPct ?? null;
+  const take = rules?.takeProfitPct ?? null;
+  if (stop == null && take == null) return null;
+  if (!position || !(position.quantity > 0) || !(position.avgCost > 0)) return null;
+  if (!(price > 0)) return null;
+
+  const pnlPct = (price - position.avgCost) / position.avgCost;
+  if (stop != null && pnlPct <= -stop) {
+    return (
+      `止损触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
+      `亏损 ${(pnlPct * 100).toFixed(2)}%，达到 -${(stop * 100).toFixed(2)}% 阈值`
+    );
+  }
+  if (take != null && pnlPct >= take) {
+    return (
+      `止盈触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
+      `盈利 ${(pnlPct * 100).toFixed(2)}%，达到 +${(take * 100).toFixed(2)}% 阈值`
+    );
+  }
+  return null;
+}

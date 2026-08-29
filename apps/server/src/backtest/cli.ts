@@ -13,7 +13,7 @@ import type { BacktestConfig } from './types';
  * 用法：
  *   pnpm -F @ai-trader/server backtest -- --strategy=trend_following \
  *     --interval=5m --from=2026-06-01 --to=2026-08-01 [--backfill] \
- *     [--capital=10000] [--position-pct=0.1] [--min-confidence=0.6]
+ *     [--capital=10000] [--position-pct=0.1] [--min-confidence=0.6] [--stop-loss=0.05] [--take-profit=0.1]
  *
  * 数据不足时自动回填（Binance 公共 REST，无需密钥）。
  * 报告落盘 apps/server/reports/backtest/，终端输出摘要。
@@ -56,6 +56,13 @@ async function main(): Promise<void> {
     minConfidence: Number(args['min-confidence'] ?? 0.6),
     strategyName: String(args.strategy ?? 'trend_following'),
     strategyParams: args.params ? JSON.parse(String(args.params)) : undefined,
+    exitRules:
+      args['stop-loss'] || args['take-profit']
+        ? {
+            stopLossPct: args['stop-loss'] ? Number(args['stop-loss']) : null,
+            takeProfitPct: args['take-profit'] ? Number(args['take-profit']) : null,
+          }
+        : undefined,
     warmupBars: Number(args.warmup ?? 120),
   };
 

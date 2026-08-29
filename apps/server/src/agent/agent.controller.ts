@@ -151,6 +151,11 @@ class UpdateAgentConfigDto implements Partial<AgentConfigShape> {
   @IsObject()
   strategyParams?: Record<string, unknown>;
 
+  /** 出场规则（止损/止盈）。值为相对均价的小数（0.05=5%），null 关闭 */
+  @IsOptional()
+  @IsObject()
+  exitRules?: AgentConfigShape['exitRules'];
+
   @IsOptional()
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(0)

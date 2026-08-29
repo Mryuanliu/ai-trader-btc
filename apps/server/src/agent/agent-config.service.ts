@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   AgentConfigShape,
+  ExitRulesShape,
   clampRiskValue,
   DEFAULT_AGENT_CONFIG,
   ExchangeCode,
@@ -19,6 +20,26 @@ function isUniqueViolation(err: unknown): boolean {
   const code = (err as { code?: string; driverError?: { code?: string } })?.code;
   const driver = (err as { driverError?: { code?: string } })?.driverError?.code;
   return code === '23505' || code === 'SQLITE_CONSTRAINT' || driver === '23505';
+}
+
+/**
+ * 出场规则归一化：比例值须为 (0,1] 区间内有限数值，非法回落 null（关闭）。
+ * 读取与写入共用，兜住历史脏数据与直接改库绕过校验的情况。
+ */
+function normalizeExitRules(raw: unknown, logger?: { warn: (m: string) => void }): ExitRulesShape {
+  const close = (label: string, v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const clamped = Math.min(1, n);
+    if (clamped !== n && logger) logger.warn(`出场规则 ${label}=${n} 越界，已钳制为 ${clamped}`);
+    return clamped;
+  };
+  const obj = (raw ?? {}) as Record<string, unknown>;
+  return {
+    stopLossPct: close('stopLossPct', obj.stopLossPct),
+    takeProfitPct: close('takeProfitPct', obj.takeProfitPct),
+  };
 }
 
 @Injectable()
@@ -90,6 +111,8 @@ export class AgentConfigService {
           : 'hold',
       strategyName: entity.strategyName?.trim() || DEFAULT_AGENT_CONFIG.strategyName,
       strategyParams: entity.strategyParams ?? {},
+      // 出场规则读时归一化：比例值钳制到 (0,1]，非法回落 null（关闭）
+      exitRules: normalizeExitRules(entity.exitRules, this.logger),
       slippageBps: clampRiskValue('slippageBps', entity.slippageBps),
       feeRateBps: clampRiskValue('feeRateBps', entity.feeRateBps),
       maxExposurePct: clampRiskValue('maxExposurePct', entity.maxExposurePct),
@@ -126,6 +149,7 @@ export class AgentConfigService {
       'llmFailurePolicy',
       'strategyName',
       'strategyParams',
+      'exitRules',
       'slippageBps',
       'feeRateBps',
       'maxExposurePct',
@@ -177,12 +201,18 @@ export class AgentConfigService {
         this.logger.warn(`配置项 strategyName 非法值 ${String(value)}，回落为 trend_following`);
         value = 'trend_following';
       }
-      if (
+           if (
         key === 'strategyParams' &&
         (typeof value !== 'object' || value === null || Array.isArray(value))
       ) {
         this.logger.warn(`配置项 strategyParams 非法值，回落为 {}`);
         value = {};
+      }
+
+      // 出场规则写入校验：比例值钳制到 (0,1]，非法回落 null（关闭）
+      if (key === 'exitRules' && (typeof value !== 'object' || value === null || Array.isArray(value))) {
+        this.logger.warn(`配置项 exitRules 非法值，回落为全关`);
+        value = { stopLossPct: null, takeProfitPct: null };
       }
 
       (row as unknown as Record<string, unknown>)[key] = value;

@@ -50,6 +50,9 @@ interface LaneDecision {
   llmResult: LlmResult | null;
   /** 仅 llm 链路构建；strategy 链路为空串 */
   prompt: string;
+
+  /** 出场规则触发时为 true：卖出全部持仓（而非按 positionPct 部分卖出） */
+  closeAll?: boolean;
 }
 
 @Injectable()
@@ -165,7 +168,10 @@ export class AgentEngine {
       }
 
       const snapshot = await this.buildSnapshot(config, candles);
-      const laneResult = await this.produceDecision(config, snapshot);
+      // 出场检查（阶段 4）：持仓层能力，优先级最高，两条链路均生效；
+      // 触发时直接以出场决策替代链路决策，策略/模型本轮不参与
+      const exitResult = await this.checkExitRules(config, snapshot);
+      const laneResult = exitResult ?? (await this.produceDecision(config, snapshot));
       const decision = laneResult.decision;
       const degraded = laneResult.degraded;
       const degradeReason = laneResult.degradeReason;
@@ -207,7 +213,7 @@ export class AgentEngine {
       );
       this.lastDecisionId = entity.id;
 
-      const orderId = await this.execute(config, snapshot, decision, entity.id);
+      const orderId = await this.execute(config, snapshot, decision, entity.id, laneResult.closeAll);
       const riskVerdict = this.lastRiskVerdict;
 
       entity.riskPassed = riskVerdict?.passed ?? true;
@@ -394,12 +400,63 @@ export class AgentEngine {
     };
   }
 
+  /**
+   * 出场规则检查（阶段 4）：持仓层能力，两条链路均生效，优先级最高。
+   * 持仓亏损触及止损或盈利达到止盈时，产出全仓卖出决策，替代本轮策略/模型决策。
+   * 默认全关（exitRules 两项均为 null），不配置则完全不参与决策流程。
+   */
+  private async checkExitRules(
+    config: AgentConfigShape,
+    snapshot: DecisionInputSnapshot,
+  ): Promise<LaneDecision | null> {
+    const { stopLossPct, takeProfitPct } = config.exitRules ?? {};
+    if (stopLossPct == null && takeProfitPct == null) return null;
+
+    const position = await this.positions.getPosition(config.symbol);
+    if (!position || !(position.quantity > 0) || !(position.avgCost > 0)) return null;
+
+    const price = snapshot.ticker.price || snapshot.indicators.lastClose;
+    if (!(price > 0)) return null;
+
+    const pnlPct = (price - position.avgCost) / position.avgCost;
+
+    let trigger: string | null = null;
+    if (stopLossPct != null && pnlPct <= -stopLossPct) {
+      trigger =
+        `止损触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
+        `亏损 ${(pnlPct * 100).toFixed(2)}%，达到 -${(stopLossPct * 100).toFixed(2)}% 阈值`;
+    } else if (takeProfitPct != null && pnlPct >= takeProfitPct) {
+      trigger =
+        `止盈触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
+        `盈利 ${(pnlPct * 100).toFixed(2)}%，达到 +${(takeProfitPct * 100).toFixed(2)}% 阈值`;
+    }
+    if (!trigger) return null;
+
+    this.logger.warn(`出场规则触发 → 全仓卖出：${trigger}`);
+    return {
+      lane: 'strategy',
+      strategyName: null,
+      degraded: true,
+      degradeReason: `出场规则触发（优先级高于策略/模型信号）：${trigger}`,
+      llmResult: null,
+      prompt: '',
+      closeAll: true,
+      decision: {
+        action: 'SELL',
+        confidence: 1,
+        reason: `出场规则触发：${trigger}。按出场规则全仓卖出。`,
+        riskNotes: '出场规则属于持仓层能力，两条链路均生效，优先级高于开仓信号。',
+      },
+    };
+  }
+
   /** 风控校验 + 下单 */
   private async execute(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
     decision: LlmDecision,
     decisionId: string,
+    closeAll = false,
   ): Promise<string | null> {
     this.lastRiskVerdict = null;
 
@@ -430,10 +487,13 @@ export class AgentEngine {
     }
 
     const side = decision.action === 'BUY' ? 'BUY' : 'SELL';
+    // 出场规则触发（closeAll）时卖出全部持仓，常规决策仍按 positionPct 部分卖出
     const quantity =
       side === 'BUY'
-        ? ((snapshot.account.quoteFree * config.positionPct) / price)
-        : snapshot.account.baseFree * config.positionPct;
+        ? (snapshot.account.quoteFree * config.positionPct) / price
+        : closeAll
+          ? snapshot.account.baseFree
+          : snapshot.account.baseFree * config.positionPct;
 
     if (!(quantity > 0)) {
       this.lastRiskVerdict = {

@@ -142,6 +142,18 @@ export type LlmFailurePolicy = 'hold' | 'strategy' | 'skip';
 /** 策略标识。开放字符串：策略是插件式集合，运行时合法性由 StrategyRegistry 校验 */
 export type StrategyName = 'trend_following' | (string & {});
 
+/**
+ * 出场规则（止损/止盈）。
+ * 值为相对持仓均价的小数（0.05 = 5%），null 表示该项关闭；默认全关。
+ * 出场属于持仓层能力，两条链路均生效，优先级高于任何开仓信号。
+ */
+export interface ExitRulesShape {
+  /** 止损：亏损达到该比例强制全仓卖出（null 关闭） */
+  stopLossPct: number | null;
+  /** 止盈：盈利达到该比例强制全仓卖出（null 关闭） */
+  takeProfitPct: number | null;
+}
+
 /** Agent 配置（前后端共用的可编辑部分） */
 export interface AgentConfigShape {
   name: string;
@@ -183,6 +195,12 @@ export interface AgentConfigShape {
   strategyName: StrategyName;
   /** 策略专属参数，由各策略 normalizeParams 校验合并 */
   strategyParams: Record<string, unknown>;
+  /**
+   * 出场规则（止损/止盈，持仓层能力，两条链路均生效，优先级高于任何开仓信号）。
+   * 值为相对持仓均价的小数（0.05 = 5%）；null 表示该项关闭。
+   * 默认全关：出场规则会主动平仓，必须显式配置才启用。
+   */
+  exitRules: ExitRulesShape;
   /** 模拟撮合滑点，单位 bps */
   slippageBps: number;
   /** 手续费率，单位 bps */
@@ -226,6 +244,8 @@ export const DEFAULT_AGENT_CONFIG: AgentConfigShape = {
   feeRateBps: 10,
   // 单一标的持仓不超过总权益的 60%
   maxExposurePct: 60,
+  // 出场规则默认全关：会主动平仓，必须显式配置才启用（计划风险条款）
+  exitRules: { stopLossPct: null, takeProfitPct: null },
 };
 
 export interface AgentRuntimeState {
