@@ -6,7 +6,9 @@ import {
   Candle,
   DecisionAction,
   DecisionInputSnapshot,
+  DecisionLane,
   DecisionSummary,
+  StrategyContext,
   buildSignals,
   computeIndicators,
   scoreSignals,
@@ -14,11 +16,13 @@ import {
 import { Repository } from 'typeorm';
 import { AgentDecisionEntity } from '../database/entities';
 import { AgentConfigService } from './agent-config.service';
-import { LlmClient, LlmDecision } from './llm.client';
+import { LlmClient, LlmDecision, LlmResult } from './llm.client';
+import { StrategyService } from './strategy.service';
 import { buildUserPrompt } from './prompt';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
 import { AccountService } from '../account/account.service';
+import { PositionService } from '../account/position.service';
 import { TradingService } from '../trading/trading.service';
 import { RiskService } from '../trading/risk.service';
 import { EventBusService } from '../common/events';
@@ -32,6 +36,21 @@ const CIRCUIT_BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
 /** 连续失败退避基数，实际退避 = min(base * 2^(n-1), max) */
 const RETRY_BACKOFF_BASE_MS = 30 * 1000;
 const RETRY_BACKOFF_MAX_MS = 10 * 60 * 1000;
+
+/** 一次链路分派的产出：决策本体 + 归因元数据（落库字段来源） */
+interface LaneDecision {
+  /** 链路归属：strategy 链路记 'strategy'；llm 链路（含降级到策略）记 'llm' */
+  lane: DecisionLane;
+  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  strategyName: string | null;
+  decision: LlmDecision;
+  degraded: boolean;
+  degradeReason: string | null;
+  /** llm 链路才有：供落库 llmRaw/llmReasoning/llmModel/llmUsage */
+  llmResult: LlmResult | null;
+  /** 仅 llm 链路构建；strategy 链路为空串 */
+  prompt: string;
+}
 
 @Injectable()
 export class AgentEngine {
@@ -50,6 +69,8 @@ export class AgentEngine {
     private readonly decisionRepo: Repository<AgentDecisionEntity>,
     private readonly agentConfig: AgentConfigService,
     private readonly llm: LlmClient,
+    private readonly strategyService: StrategyService,
+    private readonly positions: PositionService,
     private readonly market: MarketService,
     private readonly news: NewsService,
     private readonly accounts: AccountService,
@@ -144,47 +165,14 @@ export class AgentEngine {
       }
 
       const snapshot = await this.buildSnapshot(config, candles);
-      const prompt = buildUserPrompt(snapshot);
-
-      const llmResult = await this.llm.decide(
-        config.systemPrompt,
-        prompt,
-        config.model,
-        config.temperature,
-        config.maxTokens,
-      );
-
-      let decision: LlmDecision;
-      let degraded = false;
-      let degradeReason: string | null = null;
-
-      if (llmResult.ok && llmResult.data) {
-        decision = llmResult.data;
-      } else {
-        degraded = true;
-        degradeReason = llmResult.error ?? '模型不可用';
-        decision = this.fallbackDecision(snapshot);
-
-        // 降级态下兜底的纯指标策略未经回测验证，默认不允许它接管真实资金。
-        // 配置为 signal 时才保留原有行为，供有充分评估的场景使用。
-        if (config.degradedAction === 'hold' && decision.action !== 'HOLD') {
-          this.logger.warn(
-            `LLM 不可用且降级动作为 hold，已将 ${decision.action} 降级为 HOLD（降级原因：${degradeReason}）`,
-          );
-          decision = {
-            ...decision,
-            action: 'HOLD',
-            reason:
-              `${decision.reason}\n\n【降级保护】模型不可用（${degradeReason}），` +
-              `按配置 degradedAction=hold 强制观望，避免未经验证的兜底策略接管资金。`,
-            riskNotes: '降级态强制观望，未执行下单。',
-          };
-        }
-      }
+      const laneResult = await this.produceDecision(config, snapshot);
+      const decision = laneResult.decision;
+      const degraded = laneResult.degraded;
+      const degradeReason = laneResult.degradeReason;
 
       this.logger.log(
         `决策完成: ${config.symbol} ${decision.action} 置信度 ${decision.confidence}` +
-          `${degraded ? '（已降级为纯指标）' : ''} 耗时 ${Date.now() - startedAt}ms`,
+          `（链路 ${laneResult.lane}${degraded ? '，已降级' : ''}） 耗时 ${Date.now() - startedAt}ms`,
       );
 
       // 先落库决策，再把下单结果回填，保证 order 与 decision 双向可追溯
@@ -197,17 +185,19 @@ export class AgentEngine {
           reason: decision.reason,
           riskNotes: decision.riskNotes ?? null,
           inputSnapshot: snapshot,
-          prompt,
-          llmRaw: llmResult.raw,
-          llmReasoning: llmResult.reasoning ?? null,
-          llmModel: llmResult.model ?? null,
-          llmUsage: llmResult.usage
+          prompt: laneResult.prompt,
+          llmRaw: laneResult.llmResult?.raw ?? null,
+          llmReasoning: laneResult.llmResult?.reasoning ?? null,
+          llmModel: laneResult.llmResult?.model ?? null,
+          llmUsage: laneResult.llmResult?.usage
             ? {
-                prompt: llmResult.usage.promptTokens,
-                completion: llmResult.usage.completionTokens,
-                total: llmResult.usage.totalTokens,
+                prompt: laneResult.llmResult.usage.promptTokens,
+                completion: laneResult.llmResult.usage.completionTokens,
+                total: laneResult.llmResult.usage.totalTokens,
               }
             : null,
+          lane: laneResult.lane,
+          strategyName: laneResult.strategyName,
           degraded,
           degradeReason,
           riskPassed: true,
@@ -292,20 +282,115 @@ export class AgentEngine {
     };
   }
 
-  /** 模型不可用时的纯指标策略 */
-  private fallbackDecision(snapshot: DecisionInputSnapshot): LlmDecision {
-    const score = snapshot.indicatorScore;
-    const magnitude = Math.min(1, Math.abs(score));
-    let action: DecisionAction = 'HOLD';
-    if (score >= 0.25) action = 'BUY';
-    else if (score <= -0.25) action = 'SELL';
+  /**
+   * 按配置的决策链路（decisionLane）产出决策。
+   *
+   * - strategy：纯策略链路，零 LLM 参与（不读 key、不发请求、零 token 成本）
+   * - llm：AI 决策，失败按 llmFailurePolicy 处理（hold / strategy / skip）
+   * - hybrid：尚未实现（阶段 5），此分支仅为直接改库的防御
+   */
+  private async produceDecision(
+    config: AgentConfigShape,
+    snapshot: DecisionInputSnapshot,
+  ): Promise<LaneDecision> {
+    if (config.decisionLane === 'strategy') {
+      return this.buildStrategyLane(config, snapshot);
+    }
+    if (config.decisionLane === 'hybrid') {
+      // 配置层已禁止写入 hybrid，能走到这里说明绕过了校验（直接改库）
+      throw new Error('decisionLane=hybrid 尚未实现（计划阶段 5）');
+    }
 
-    const direction = score > 0 ? '偏多' : score < 0 ? '偏空' : '中性';
+    // ---- llm 链路 ----
+    const prompt = buildUserPrompt(snapshot);
+    const llmResult = await this.llm.decide(
+      config.systemPrompt,
+      prompt,
+      config.model,
+      config.temperature,
+      config.maxTokens,
+    );
+
+    if (llmResult.ok && llmResult.data) {
+      return {
+        lane: 'llm',
+        strategyName: null,
+        decision: llmResult.data,
+        degraded: false,
+        degradeReason: null,
+        llmResult,
+        prompt,
+      };
+    }
+
+    const degradeReason = llmResult.error ?? '模型不可用';
+    switch (config.llmFailurePolicy) {
+      case 'skip':
+        // 抛错 → runOnce catch → recordFailure 退避/熔断，本轮不落库
+        throw new Error(`LLM 不可用且 llmFailurePolicy=skip，已跳过本次决策：${degradeReason}`);
+
+      case 'strategy': {
+        // 降级到策略执行：链路归属仍记 llm，配合 degraded=true 与 strategyName 可唯一归因
+        const lane = await this.buildStrategyLane(config, snapshot);
+        return {
+          ...lane,
+          lane: 'llm',
+          degraded: true,
+          degradeReason: `LLM 失败降级到策略：${degradeReason}`,
+        };
+      }
+
+      case 'hold':
+      default:
+        return {
+          lane: 'llm',
+          strategyName: null,
+          llmResult,
+          prompt,
+          degraded: true,
+          degradeReason,
+          decision: {
+            action: 'HOLD',
+            confidence: 0,
+            reason: `模型不可用（${degradeReason}），按 llmFailurePolicy=hold 强制观望。`,
+            riskNotes: 'LLM 失败保守观望，未执行下单。',
+          },
+        };
+    }
+  }
+
+  /** 构造纯策略链路的决策（strategy 链路本体，也供 llm 链路 llmFailurePolicy=strategy 降级复用） */
+  private async buildStrategyLane(
+    config: AgentConfigShape,
+    snapshot: DecisionInputSnapshot,
+  ): Promise<LaneDecision> {
+    // 策略上下文补持仓快照（阶段 4 出场规则的前置）；buildSnapshot 的其余数据保持同构复用
+    const position = await this.positions.getPosition(config.symbol);
+    const context: Omit<StrategyContext, 'params'> = {
+      symbol: snapshot.symbol,
+      timeframe: snapshot.timeframe,
+      candles: snapshot.candles,
+      indicators: snapshot.indicators,
+      signals: snapshot.signals,
+      indicatorScore: snapshot.indicatorScore,
+      ticker: snapshot.ticker,
+      position,
+      account: { quoteFree: snapshot.account.quoteFree, baseFree: snapshot.account.baseFree },
+    };
+    const { output, strategyName, fellBack } = this.strategyService.evaluate(
+      config.strategyName,
+      context,
+      config.strategyParams,
+    );
     return {
-      action,
-      confidence: Number((0.45 + magnitude * 0.4).toFixed(2)),
-      reason: `模型不可用，按指标信号执行：综合倾向 ${score.toFixed(2)}（${direction}），采用 MA/RSI/MACD/布林带加权结果。`,
-      riskNotes: '当前为降级决策，未经过语义层面的新闻解读，建议降低仓位。',
+      lane: 'strategy',
+      strategyName,
+      decision: output,
+      // 配置了不存在的策略名 → 记录降级原因，而非静默回退
+      degraded: fellBack,
+      degradeReason: fellBack ? `策略 ${config.strategyName} 不存在，已回退 ${strategyName}` : null,
+      llmResult: null,
+      prompt: '',
     };
   }
 
@@ -409,6 +494,8 @@ export class AgentEngine {
       action: entity.action,
       confidence: entity.confidence,
       reason: entity.reason,
+      lane: entity.lane ?? 'llm',
+      strategyName: entity.strategyName ?? null,
       degraded: entity.degraded,
       riskPassed: entity.riskPassed,
       riskRejectedBy: entity.riskRejectedBy,
