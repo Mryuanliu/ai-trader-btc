@@ -10,6 +10,7 @@ import { AccountModule } from '../account/account.module';
 import { TradingModule } from '../trading/trading.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { AgentController } from './agent.controller';
+import { StrategyService } from './strategy.service';
 
 @Module({
   imports: [
@@ -21,8 +22,8 @@ import { AgentController } from './agent.controller';
     TradingModule,
     ExchangesModule,
   ],
-  providers: [AgentEngine, LlmClient],
+  providers: [AgentEngine, LlmClient, StrategyService],
   controllers: [AgentController],
-  exports: [AgentEngine, LlmClient],
+  exports: [AgentEngine, LlmClient, StrategyService],
 })
 export class AgentModule {}

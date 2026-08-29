@@ -7,3 +7,4 @@ export * from './position';
 export * from './dto/api';
 export * from './indicators/core';
 export * from './indicators/signals';
+export * from './strategy';
