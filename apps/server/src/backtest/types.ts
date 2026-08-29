@@ -83,6 +83,8 @@ export interface BacktestReport {
     fillConvention: 'next-open';
     /** HTTP 报告的 equityCurve 超过上限被等距下采样时为 true */
     downsampled?: boolean;
+    /** HTTP 报告的 trades 超过上限只保留最近 N 笔时为 true */
+    tradesTruncated?: boolean;
   };
   metrics: BacktestMetrics;
   equityCurve: EquityPoint[];

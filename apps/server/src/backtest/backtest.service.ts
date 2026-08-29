@@ -8,10 +8,12 @@ import { backfill, loadRange } from './candle-source';
 import { runBacktest } from './engine';
 import type { BacktestConfig, BacktestReport } from './types';
 
-/** 区间应有根数上限：HTTP 同步回测防止拉取/计算过量 */
-const MAX_EXPECTED_BARS = 60_000;
+/** 区间应有根数上限：HTTP 同步回测防止拉取/计算过量（官方数据包入库后 1m 短中期均可） */
+const MAX_EXPECTED_BARS = 150_000;
 /** 报告 equityCurve 下采样上限，控制响应体积 */
 const MAX_CURVE_POINTS = 2_000;
+/** HTTP 报告 trades 保留上限（只保留最近 N 笔） */
+const MAX_TRADES = 2_000;
 
 /** 回测请求体（与 CLI 参数同口径，日期用 ISO 字符串便于 JSON 传输） */
 export interface BacktestRequestDto {
@@ -107,10 +109,17 @@ export class BacktestService {
     }
 
     const report = runBacktest(candles, strategy, config);
+    // 大区间 1m 回测成交可能数万笔：HTTP 响应只带最近 2000 笔，避免响应体积失控
+    const tradesTruncated = report.trades.length > MAX_TRADES;
     return {
       ...report,
+      trades: tradesTruncated ? report.trades.slice(-MAX_TRADES) : report.trades,
       equityCurve: downsample(report.equityCurve, MAX_CURVE_POINTS),
-      meta: { ...report.meta, downsampled: report.equityCurve.length > MAX_CURVE_POINTS },
+      meta: {
+        ...report.meta,
+        downsampled: report.equityCurve.length > MAX_CURVE_POINTS,
+        tradesTruncated,
+      },
     };
   }
 }
