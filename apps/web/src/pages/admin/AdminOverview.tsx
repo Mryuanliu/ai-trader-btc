@@ -103,7 +103,7 @@ export function AdminOverview() {
               options={TIMEFRAMES.map((tf) => ({ label: TIMEFRAME_LABELS[tf], value: tf }))}
             />
           </div>
-          <KlineChart candles={candles} height={340} />
+          <KlineChart candles={candles} height={340} resetKey={interval} />
         </div>
 
         <div className="glass-card p-4">

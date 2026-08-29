@@ -3,15 +3,24 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
 
-/** Agent 配置（单 Agent 版本，取第一条记录） */
+/** Agent 配置（单 Agent 版本，以 key 唯一约束保证只有一行） */
 @Entity('agent_configs')
 export class AgentConfigEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /**
+   * 配置行唯一键。
+   * 单 Agent 版本固定为 'default'，配合唯一索引让 getOrCreate 可以安全并发 upsert。
+   */
+  @Column({ type: 'varchar', length: 32, default: 'default' })
+  @Index('IDX_agent_configs_key', { unique: true })
+  key: string;
 
   @Column({ length: 64, default: DEFAULT_AGENT_CONFIG.name })
   name: string;
@@ -67,6 +76,22 @@ export class AgentConfigEntity {
 
   @Column({ type: 'float8', default: DEFAULT_AGENT_CONFIG.dailyLossLimit })
   dailyLossLimit: number;
+
+  /** 行情或 LLM 降级时的行为：hold 强制观望（默认）/ signal 沿用兜底信号 */
+  @Column({ type: 'varchar', length: 16, default: DEFAULT_AGENT_CONFIG.degradedAction })
+  degradedAction: 'hold' | 'signal';
+
+  /** 模拟撮合滑点（bps） */
+  @Column({ type: 'float8', default: DEFAULT_AGENT_CONFIG.slippageBps })
+  slippageBps: number;
+
+  /** 手续费率（bps） */
+  @Column({ type: 'float8', default: DEFAULT_AGENT_CONFIG.feeRateBps })
+  feeRateBps: number;
+
+  /** 单一标的持仓市值占总权益上限（百分比） */
+  @Column({ type: 'float8', default: DEFAULT_AGENT_CONFIG.maxExposurePct })
+  maxExposurePct: number;
 
   // ---------------- 运行态 ----------------
   @Column({ type: 'timestamptz', nullable: true })

@@ -1,5 +1,15 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import {
+  IsArray,
+  IsBoolean,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
+import {
   AgentConfigShape,
   AgentRuntimeState,
   DecisionAction,
@@ -15,25 +25,121 @@ import { ExchangeAccountService } from '../exchanges/exchange-account.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 
+/**
+ * 配置更新 DTO。
+ *
+ * 字段必须完整覆盖前端可提交的项，否则启用 ValidationPipe 白名单后会被静默剥离。
+ * 数值类字段做类型与范围校验，拦截非法输入；
+ * 但风控参数的最终安全边界由 AgentConfigService 统一钳制，此处不重复定义上下限。
+ */
 class UpdateAgentConfigDto implements Partial<AgentConfigShape> {
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
   name?: string;
+
+  @IsOptional()
+  @IsBoolean()
   enabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
   symbol?: string;
+
+  @IsOptional()
+  @IsString()
   timeframe?: AgentConfigShape['timeframe'];
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(30)
+  @Max(86_400)
   decisionIntervalSec?: number;
+
+  @IsOptional()
+  @IsString()
   mode?: AgentConfigShape['mode'];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
   enabledExchanges?: ExchangeCode[];
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   positionPct?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   minConfidence?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
   model?: string;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  @Max(2)
   temperature?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(1)
+  @Max(32_000)
   maxTokens?: number;
+
+  @IsOptional()
+  @IsString()
   systemPrompt?: string;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   maxOrderAmount?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   maxDailyOrders?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   maxDrawdownPct?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   minOrderIntervalSec?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
   dailyLossLimit?: number;
+
+  @IsOptional()
+  @IsString()
+  degradedAction?: AgentConfigShape['degradedAction'];
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  slippageBps?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  feeRateBps?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  maxExposurePct?: number;
 }
 
 @Controller('agent')
@@ -58,6 +164,7 @@ export class AgentController {
       lastRunAt: entity.lastRunAt ? entity.lastRunAt.toISOString() : null,
       lastDecisionId: entity.lastDecisionId,
       llmAvailable: this.llm.available,
+      health: this.engine.getHealth(),
       exchanges: accounts.map((a) => ({
         code: a.exchange,
         label: a.label,

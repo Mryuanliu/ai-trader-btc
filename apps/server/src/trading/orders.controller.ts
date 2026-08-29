@@ -49,7 +49,7 @@ export class OrdersController {
     if (body.type === 'LIMIT' && !body.price) {
       throw new BusinessException('BAD_REQUEST', '限价单必须提供 price');
     }
-    return this.trading.placeOrder({
+    const result = await this.trading.placeOrder({
       exchange: body.exchange as ExchangeCode,
       symbol: body.symbol,
       side: body.side as OrderSide,
@@ -59,6 +59,7 @@ export class OrdersController {
       source: 'manual',
       confirmToken: body.confirmToken,
     });
+    return result.order;
   }
 
   @UseGuards(JwtAuthGuard)

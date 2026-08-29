@@ -35,7 +35,7 @@ export function MobileTrade() {
         {isLoading && candles.length === 0 ? (
           <Skeleton active paragraph={{ rows: 6 }} />
         ) : (
-          <KlineChart candles={candles} height={260} />
+          <KlineChart candles={candles} height={260} resetKey={interval} />
         )}
       </section>
 

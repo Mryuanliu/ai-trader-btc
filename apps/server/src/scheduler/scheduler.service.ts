@@ -8,6 +8,7 @@ import { CandleStoreService } from '../market/candle-store.service';
 import { NewsService } from '../news/news.service';
 import { AccountService } from '../account/account.service';
 import { TradingService } from '../trading/trading.service';
+import { RiskService } from '../trading/risk.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 
 @Injectable()
@@ -16,6 +17,9 @@ export class SchedulerService {
   private lastNewsAt = 0;
   private lastSnapshotAt = 0;
   private lastOrderSyncAt = 0;
+  private lastLiveSkipEventAt = 0;
+  /** 按 key 记录上次告警时间，避免高频刷屏 */
+  private readonly warnThrottle = new Map<string, number>();
 
   constructor(
     private readonly market: MarketService,
@@ -25,6 +29,7 @@ export class SchedulerService {
     private readonly agentConfig: AgentConfigService,
     private readonly accounts: AccountService,
     private readonly trading: TradingService,
+    private readonly risk: RiskService,
     private readonly registry: ExchangeRegistry,
     private readonly config: ConfigService,
   ) {}
@@ -66,9 +71,17 @@ export class SchedulerService {
     const lastRun = entity.lastRunAt ? entity.lastRunAt.getTime() : 0;
     if (Date.now() - lastRun < intervalMs) return;
 
-    // 实盘模式下 Agent 不自动携带二次确认 Token，直接跳过并提示
+    // 连续失败后按退避/熔断跳过，避免每 5 秒重试打爆 LLM 与交易所
+    const gate = this.agent.shouldSkipScheduledRun();
+    if (gate.skip) {
+      this.throttledWarn('agent-backoff', gate.reason ?? '处于冷却期', 10 * 60_000);
+      return;
+    }
+
+    // 实盘不自动下单（设计如此：需人工携带二次确认 Token）。
+    // 这里补写一条风控事件并节流告警，避免「以为在跑其实没跑」且无痕迹。
     if (entity.mode === 'live') {
-      this.logger.warn('实盘模式不支持自动下单（缺少二次确认），请切换为测试网或模拟撮合');
+      await this.recordLiveSkipped(entity.symbol);
       return;
     }
 
@@ -78,6 +91,36 @@ export class SchedulerService {
     } catch (err) {
       this.logger.error(`Agent 决策失败: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * 实盘跳过时落一条可审计的事件。
+   * 日志每 10 分钟才打一次，但事件按每小时写入一次，保证前端风控面板能看到。
+   */
+  private async recordLiveSkipped(symbol: string) {
+    const note =
+      '实盘模式不支持自动下单：Agent 不会自动携带二次确认 Token。' +
+      '如需实盘交易，请通过前端手动下单（携带确认 Token），或切换为 testnet / dry_run。';
+
+    this.throttledWarn('live-skipped', note, 10 * 60_000);
+
+    const now = Date.now();
+    if (now - this.lastLiveSkipEventAt < 60 * 60_000) return;
+    this.lastLiveSkipEventAt = now;
+    try {
+      await this.risk.record('reject', 'warn', note, symbol, null);
+    } catch (err) {
+      this.logger.warn(`记录实盘跳过事件失败: ${(err as Error).message}`);
+    }
+  }
+
+  /** 按 key 节流输出告警，避免每 5 秒刷屏 */
+  private throttledWarn(key: string, message: string, intervalMs: number) {
+    const now = Date.now();
+    const last = this.warnThrottle.get(key) ?? 0;
+    if (now - last < intervalMs) return;
+    this.warnThrottle.set(key, now);
+    this.logger.warn(message);
   }
 
   private async snapshotBalances() {

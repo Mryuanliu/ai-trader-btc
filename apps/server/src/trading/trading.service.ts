@@ -2,13 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
+  clampRiskValue,
   DEFAULT_SYMBOL,
   ExchangeCode,
+  normalizeOrder,
   OrderDTO,
   OrderSide,
   OrderSource,
   OrderStatus,
   OrderType,
+  NormalizeResult,
   PageResult,
   RunMode,
 } from '@ai-trader/shared';
@@ -33,8 +36,18 @@ export interface PlaceOrderInput {
   source: OrderSource;
   decisionId?: string | null;
   confirmToken?: string;
-  /** 跳过风控（仅内部补偿使用，正常链路禁止） */
-  skipRisk?: boolean;
+}
+
+/**
+ * 下单结论。
+ *
+ * `risk` 始终是 TradingService 内的权威判定结果。
+ * 调用方（如 Agent）可自行做一次咨询性预检用于快速失败，
+ * 但不得以此替代本处结论——否则上游与下游两次读价之间的漂移会让风控形同虚设。
+ */
+export interface PlaceOrderResult {
+  order: OrderDTO;
+  risk: { passed: boolean; rejectedBy?: string; note?: string };
 }
 
 @Injectable()
@@ -79,7 +92,13 @@ export class TradingService {
     };
   }
 
-  async placeOrder(input: PlaceOrderInput): Promise<OrderDTO> {
+  /**
+   * 下单唯一出口：确定价格 -> 按交易所精度取整 -> 权威风控 -> 发单。
+   *
+   * 风控必须基于**最终取整后的数量与实际成交价**执行，
+   * 否则调用方用未取整数量和旧快照价算出的金额，与这里实际下单的金额不一致。
+   */
+  async placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
     const agentConfig = await this.agentConfig.getOrCreate();
     const config = this.agentConfig.toShape(agentConfig);
     const symbol = input.symbol ?? config.symbol ?? DEFAULT_SYMBOL;
@@ -88,51 +107,72 @@ export class TradingService {
 
     this.market.ensureSymbol(symbol);
     const ticker = this.market.getTicker(symbol);
-    const price = input.type === 'LIMIT' && input.price ? input.price : ticker.price || 0;
-    if (!(price > 0)) {
+    const marketPrice = ticker.price || 0;
+    if (!(marketPrice > 0)) {
       throw new BusinessException('EXCHANGE_ERROR', '无法获取当前价格，下单已取消');
     }
 
-    const quantity = Number(input.quantity);
-    if (!(quantity > 0)) {
+    const requestedQty = Number(input.quantity);
+    if (!(requestedQty > 0)) {
       throw new BusinessException('BAD_REQUEST', '下单数量必须大于 0');
     }
 
-    const quoteAmount = price * quantity;
-
-    // ---- 风控前置（自动单与手动单统一） ----
-    let riskVerdict: { passed: boolean; rejectedBy?: string; note?: string } = {
-      passed: true,
-      note: '未启用风控校验',
-    };
-    if (!input.skipRisk) {
-      const balances = await this.accounts.getBalances(mode, config.enabledExchanges);
-      const quoteFree = sumAsset(balances.rows, 'USDT');
-      const baseFree = sumAsset(balances.rows, 'BTC');
-      riskVerdict = await this.risk.check({
-        config,
+    // ---- 按交易所精度取整，得到真正会被提交的订单参数 ----
+    const adapter = await this.registry.get(exchange);
+    const filters = await adapter.getSymbolFilters(symbol);
+    const normalized = normalizeOrder({
+      quantity: requestedQty,
+      price: input.type === 'LIMIT' && input.price ? input.price : marketPrice,
+      filters,
+      type: input.type,
+    });
+    // 注意：本项目 strictNullChecks=false，布尔字面量会被拓宽成 boolean，
+    // 判别联合无法自动收窄，这里显式断言出成功分支
+    if (!normalized.ok) {
+      const failure = normalized as Extract<NormalizeResult, { ok: false }>;
+      await this.risk.record(
+        'reject',
+        'warn',
+        `${input.side} ${symbol} 订单参数不合法：${failure.note}`,
         symbol,
-        side: input.side,
-        quantity,
-        price,
-        quoteAmount,
-        quoteFree,
-        baseFree,
-        quoteSource: balances.source,
-        source: input.source,
-        confirmToken: input.confirmToken,
-        liveConfirmToken: this.config.get<string>('LIVE_TRADING_CONFIRM_TOKEN', ''),
-      });
-      if (!riskVerdict.passed) {
-        await this.risk.record(
-          'reject',
-          'warn',
-          `${input.side} ${symbol} 被风控拦截：${riskVerdict.note}`,
-          symbol,
-          input.decisionId ?? null,
-        );
-        throw new BusinessException('RISK_REJECTED', riskVerdict.note ?? '风控拦截');
-      }
+        input.decisionId ?? null,
+      );
+      throw new BusinessException('BAD_REQUEST', failure.note);
+    }
+
+    const ok = normalized as Extract<NormalizeResult, { ok: true }>;
+    const quantity = ok.quantity;
+    const price = ok.price ?? marketPrice;
+    // 风控金额以取整后的最终结果为准，消除上下游两次读价的漂移
+    const quoteAmount = ok.quoteAmount;
+
+    // ---- 权威风控（自动单与手动单统一，无条件执行） ----
+    const balances = await this.accounts.getBalances(mode, config.enabledExchanges);
+    const quoteFree = sumAsset(balances.rows, 'USDT');
+    const baseFree = sumAsset(balances.rows, 'BTC');
+    const riskVerdict = await this.risk.check({
+      config,
+      symbol,
+      side: input.side,
+      quantity,
+      price,
+      quoteAmount,
+      quoteFree,
+      baseFree,
+      quoteSource: balances.source,
+      source: input.source,
+      confirmToken: input.confirmToken,
+      liveConfirmToken: this.config.get<string>('LIVE_TRADING_CONFIRM_TOKEN', ''),
+    });
+    if (!riskVerdict.passed) {
+      await this.risk.record(
+        'reject',
+        'warn',
+        `${input.side} ${symbol} 被风控拦截：${riskVerdict.note}`,
+        symbol,
+        input.decisionId ?? null,
+      );
+      throw new BusinessException('RISK_REJECTED', riskVerdict.note ?? '风控拦截');
     }
 
     const clientOrderId = `at_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -156,26 +196,35 @@ export class TradingService {
     order = await this.orderRepo.save(order);
 
     if (mode === 'dry_run') {
+      // 模拟撮合引入滑点：买入向上滑、卖出向下滑，避免回测结果系统性偏乐观
+      const slippage = clampRiskValue('slippageBps', config.slippageBps) / 10_000;
+      const fillPrice =
+        input.side === 'BUY' ? price * (1 + slippage) : price * (1 - slippage);
+      const filledQuote = quantity * fillPrice;
+      const feeRate = clampRiskValue('feeRateBps', config.feeRateBps) / 10_000;
+
       order.status = 'FILLED';
       order.filledQuantity = quantity;
-      order.filledPrice = price;
+      order.filledPrice = fillPrice;
       order.exchangeOrderId = `DRY_${order.id.slice(0, 8)}`;
       order = await this.orderRepo.save(order);
       await this.fillRepo.save(
         this.fillRepo.create({
           orderId: order.id,
           symbol,
-          price,
+          price: fillPrice,
           quantity,
-          fee: quoteAmount * 0.001,
+          fee: filledQuote * feeRate,
           feeAsset: 'USDT',
           filledAt: new Date(),
         }),
       );
-      this.logger.log(`[dry-run] ${input.side} ${quantity} ${symbol} @ ${price}`);
+      this.logger.log(
+        `[dry-run] ${input.side} ${quantity} ${symbol} @ ${fillPrice.toFixed(2)}` +
+          ` (滑点 ${(slippage * 10_000).toFixed(1)}bps, 费率 ${(feeRate * 10_000).toFixed(1)}bps)`,
+      );
     } else {
       try {
-        const adapter = await this.registry.get(exchange);
         const result = await adapter.placeOrder({
           symbol,
           side: input.side,
@@ -218,7 +267,7 @@ export class TradingService {
 
     const dto = this.toDTO(order);
     this.events.emit('order', dto);
-    return dto;
+    return { order: dto, risk: riskVerdict };
   }
 
   async cancelOrder(id: string): Promise<OrderDTO> {

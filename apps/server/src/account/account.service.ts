@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { BalanceRow } from '@ai-trader/shared';
+import { BalanceRow, TERMINAL_EMPTY_STATUSES } from '@ai-trader/shared';
 import { Between, Repository } from 'typeorm';
 import { BalanceSnapshotEntity, OrderEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -60,24 +60,29 @@ export class AccountService {
     return { rows: await this.getVirtualBalances(), source: 'virtual' };
   }
 
-  /** 虚拟账户：由 dry-run 历史成交推导，保证与下单记录自洽 */
+  /**
+   * 虚拟账户：由 dry-run 历史成交推导，保证与下单记录自洽。
+   *
+   * 用 SQL 聚合而非加载全部订单逐行累加——该方法被决策、快照、概览三处高频调用，
+   * 此前无 take 限制，订单量增长后会线性变慢。
+   */
   async getVirtualBalances(): Promise<BalanceRow[]> {
-    const orders = await this.orderRepo.find({
-      where: { mode: 'dry_run', status: 'FILLED' },
-      select: ['side', 'filledQuantity', 'filledPrice', 'quoteAmount'],
-    });
+    const row = await this.orderRepo
+      .createQueryBuilder('o')
+      .select(
+        `COALESCE(SUM(CASE WHEN o.side = 'BUY' THEN -o."quoteAmount" ELSE o."quoteAmount" END), 0)::float8`,
+        'usdtDelta',
+      )
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN o.side = 'BUY' THEN o."filledQuantity" ELSE -o."filledQuantity" END), 0)::float8`,
+        'btcDelta',
+      )
+      .where('o.mode = :mode', { mode: 'dry_run' })
+      .andWhere('o.status = :status', { status: 'FILLED' })
+      .getRawOne<{ usdtDelta: string; btcDelta: string }>();
 
-    let usdt = VIRTUAL_INITIAL_USDT;
-    let btc = VIRTUAL_INITIAL_BTC;
-    for (const order of orders) {
-      if (order.side === 'BUY') {
-        usdt -= order.quoteAmount;
-        btc += order.filledQuantity;
-      } else {
-        usdt += order.quoteAmount;
-        btc -= order.filledQuantity;
-      }
-    }
+    let usdt = VIRTUAL_INITIAL_USDT + Number(row?.usdtDelta ?? 0);
+    let btc = VIRTUAL_INITIAL_BTC + Number(row?.btcDelta ?? 0);
     usdt = Math.max(0, usdt);
     btc = Math.max(0, btc);
 
@@ -173,12 +178,21 @@ export class AccountService {
     return { pnl, pct: (pnl / baseline) * 100, hasBaseline: true };
   }
 
-  /** 今日已成交订单数（风控用） */
+  /**
+   * 今日已成交订单数（风控用）。
+   *
+   * 只统计真正占用风险敞口的订单：已终结且未成交任何数量（CANCELED/REJECTED/
+   * EXPIRED/FAILED）不应计入每日笔数上限，否则一次失败重试就会耗尽配额。
+   */
   async countOrdersToday(): Promise<number> {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
-    return this.orderRepo.count({
-      where: { createdAt: Between(start, new Date()) },
-    });
+    return this.orderRepo
+      .createQueryBuilder('o')
+      .where('o."createdAt" BETWEEN :start AND :end', { start, end: new Date() })
+      .andWhere('o.status NOT IN (:...excluded)', {
+        excluded: [...TERMINAL_EMPTY_STATUSES],
+      })
+      .getCount();
   }
 }

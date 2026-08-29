@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { DEFAULT_SYMBOL, DataSourceStatus, OverviewDTO, RecentOrderItem } from '@ai-trader/shared';
+import {
+  DEFAULT_SYMBOL,
+  DataSourceStatus,
+  OverviewDTO,
+  PositionSnapshot,
+  RecentOrderItem,
+} from '@ai-trader/shared';
 import { DataSource } from 'typeorm';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
@@ -7,6 +13,7 @@ import { AgentConfigService } from '../agent/agent-config.service';
 import { AgentEngine } from '../agent/agent-engine.service';
 import { LlmClient } from '../agent/llm.client';
 import { AccountService } from '../account/account.service';
+import { PositionService } from '../account/position.service';
 import { TradingService } from '../trading/trading.service';
 
 @Injectable()
@@ -19,6 +26,7 @@ export class OverviewService {
     private readonly llm: LlmClient,
     private readonly accounts: AccountService,
     private readonly trading: TradingService,
+    private readonly positions: PositionService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -80,12 +88,22 @@ export class OverviewService {
       keywordTrends,
       dataSources: await this.dataSources(balanceSource),
       updatedAt: new Date().toISOString(),
-      // 附加信息：余额来源与最近一次运行时间
+      // 附加信息：余额来源、最近一次运行时间与持仓快照
       ...({
         balanceSource,
         agentLastRunAt: entity.lastRunAt ? entity.lastRunAt.toISOString() : null,
+        position: await this.getPositionSafe(symbol),
       } as Record<string, unknown>),
     } as OverviewDTO;
+  }
+
+  /** 持仓推导失败不应拖垮整个概览接口 */
+  private async getPositionSafe(symbol: string): Promise<PositionSnapshot | null> {
+    try {
+      return await this.positions.getPosition(symbol);
+    } catch {
+      return null;
+    }
   }
 
   private async dataSources(

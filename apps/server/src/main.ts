@@ -13,7 +13,10 @@ async function bootstrap() {
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
-      whitelist: false,
+      // 剥离未在 DTO 中声明的字段，避免无关或恶意字段透传到业务层。
+      // 不启用 forbidNonWhitelisted：前端可能携带后端未跟进的字段，
+      // 直接报 400 会让旧版本前端无法兼容，静默剥离更稳妥。
+      whitelist: true,
       forbidNonWhitelisted: false,
     }),
   );

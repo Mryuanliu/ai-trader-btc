@@ -24,14 +24,31 @@ const HISTORY_COUNT: Record<Timeframe, number> = {
   '1d': 180,
 };
 
+/** 高频报价约 100ms 一帧，聚合成秒级推送，避免前端被高频事件淹没 */
+const PRICE_PUSH_INTERVAL_MS = 1000;
+/** K 线流心跳超时：1m K 线约 2s 一帧，30s 无数据判定为断线 */
+const KLINE_STALE_MS = 30_000;
+/** 报价流心跳超时：最优报价约 100ms 一帧，15s 无数据判定为断线 */
+const TICKER_STALE_MS = 15_000;
+/** 实时报价有效期，超时后回落为 K 线收盘价 */
+const LIVE_PRICE_TTL_MS = 10_000;
+
 @Injectable()
 export class MarketService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MarketService.name);
   private readonly symbols = new Set<string>([DEFAULT_SYMBOL]);
   private readonly feeds = new Map<string, SimulatedFeed>();
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeTicker: (() => void) | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private wsConnected = false;
+
+  /** 最新高频报价：用于替代 1m K 线收盘价，让价格与指标跟随真实盘口 */
+  private readonly livePrices = new Map<string, { price: number; ts: number }>();
+  private lastPricePushAt = 0;
+  /** 两路流各自的心跳时间戳，用于独立判定断线与重连 */
+  private lastKlineAt = 0;
+  private lastTickAt = 0;
 
   /** 行情来源：实时交易所 / 模拟 */
   private source: 'live' | 'simulated' = 'simulated';
@@ -52,6 +69,7 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy() {
     this.unsubscribe?.();
+    this.unsubscribeTicker?.();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
   }
 
@@ -128,37 +146,103 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
   // ------------------------------------------------------------------
   private startWebSocket() {
     const symbol = DEFAULT_SYMBOL;
-    const adapterPromise = this.registry.getPublic();
 
-    void adapterPromise.then((adapter) => {
-      const attach = () => {
+    void this.registry.getPublic().then((adapter) => {
+      const attachKlines = () => {
+        this.unsubscribe?.();
+        this.lastKlineAt = Date.now();
         this.unsubscribe = adapter.subscribeKlines(symbol, '1m', (candle) => {
+          this.lastKlineAt = Date.now();
           this.wsConnected = true;
           this.source = 'live';
           this.applyCandle(symbol, '1m', candle);
         });
-        this.logger.log(`已订阅 ${adapter.code} ${symbol} 1m 实时行情`);
+      };
+
+      const attachTicker = () => {
+        this.unsubscribeTicker?.();
+        this.lastTickAt = Date.now();
+        this.unsubscribeTicker = adapter.subscribeTicker(symbol, (quote) => {
+          this.lastTickAt = Date.now();
+          this.onLiveQuote(symbol, quote.price);
+        });
       };
 
       try {
-        attach();
-        // 简易重连：每 60s 检查一次，断了就重连
-        this.reconnectTimer = setInterval(() => {
-          if (this.source === 'simulated') {
-            try {
-              this.unsubscribe?.();
-              attach();
-            } catch (err) {
-              this.lastError = `行情重连失败: ${(err as Error).message}`;
-            }
-          }
-        }, 60_000);
-        if (this.reconnectTimer.unref) this.reconnectTimer.unref();
+        attachKlines();
+        attachTicker();
+        this.logger.log(`已订阅 ${adapter.code} ${symbol} 1m K 线与最优报价流（秒级推送）`);
       } catch (err) {
         this.lastError = `行情订阅失败: ${(err as Error).message}`;
         this.logger.warn(this.lastError);
       }
+
+      // 心跳式重连：两路流各自判定，任一路断掉只重连该路，互不影响
+      this.reconnectTimer = setInterval(() => {
+        const now = Date.now();
+        const klineFresh = now - this.lastKlineAt < KLINE_STALE_MS;
+        const tickFresh = now - this.lastTickAt < TICKER_STALE_MS;
+
+        try {
+          if (!klineFresh) {
+            this.lastError = 'K 线流超时，正在重连';
+            this.logger.warn(this.lastError);
+            attachKlines();
+          }
+          if (!tickFresh) attachTicker();
+        } catch (err) {
+          this.lastError = `行情重连失败: ${(err as Error).message}`;
+        }
+
+        this.wsConnected = klineFresh || tickFresh;
+      }, 15_000);
+      if (this.reconnectTimer.unref) this.reconnectTimer.unref();
     });
+  }
+
+  /**
+   * 高频报价落地：记录最新价并让当前 K 线跟随，推送由 pushPrice 统一节流。
+   * 1m K 线帧仍是权威数据（约 2s 一帧），这里只填补两帧之间的空白。
+   */
+  private onLiveQuote(symbol: string, price: number) {
+    if (!(price > 0)) return;
+    // 模拟行情下不接管价格，避免真实报价与模拟曲线混算
+    if (this.source !== 'live') return;
+
+    this.livePrices.set(symbol, { price, ts: Date.now() });
+
+    // 刷新各周期当前 K 线，使图表与指标在两次 K 线帧之间也保持连续
+    this.syncDerivedIntervals(symbol, price);
+
+    this.pushPrice(symbol);
+  }
+
+  /**
+   * 统一的价格推送出口，按秒节流。
+   * K 线流与报价流都会触发，合并到同一出口避免两路流重复推送同一价格。
+   */
+  private pushPrice(symbol: string) {
+    const now = Date.now();
+    if (now - this.lastPricePushAt < PRICE_PUSH_INTERVAL_MS) return;
+    this.lastPricePushAt = now;
+
+    const ticker = this.getTicker(symbol);
+    if (!(ticker.price > 0)) return;
+
+    this.events.emit('price', {
+      symbol,
+      price: ticker.price,
+      changePercent24h: ticker.changePercent24h,
+      ts: now,
+    });
+  }
+
+  /** 取有效的高频报价，过期返回 null 以回落到 K 线收盘价 */
+  private getLivePrice(symbol: string): number | null {
+    const live = this.livePrices.get(symbol);
+    if (!live) return null;
+    if (Date.now() - live.ts > LIVE_PRICE_TTL_MS) return null;
+    return live.price;
   }
 
   private applyCandle(symbol: string, interval: Timeframe, candle: Candle) {
@@ -169,13 +253,7 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
     }
     if (closed) void this.store.flush();
 
-    const ticker = this.getTicker(symbol);
-    this.events.emit('price', {
-      symbol,
-      price: ticker.price,
-      changePercent24h: ticker.changePercent24h,
-      ts: Date.now(),
-    });
+    this.pushPrice(symbol);
     this.events.emit('candle', { symbol, interval, candle });
   }
 
@@ -270,11 +348,13 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const price = sourceCandles[sourceCandles.length - 1].close;
+    // 有高频报价时以它为准，否则回落到最新 K 线收盘价
+    const price = this.getLivePrice(symbol) ?? sourceCandles[sourceCandles.length - 1].close;
     const window = sourceCandles.slice(-1440);
     const open24h = window[0].open;
-    const high24h = Math.max(...window.map((c) => c.high));
-    const low24h = Math.min(...window.map((c) => c.low));
+    // 实时价同样参与 24h 高低统计，避免盘口突破后高低值仍停留在上一根 K 线
+    const high24h = Math.max(...window.map((c) => c.high), price);
+    const low24h = Math.min(...window.map((c) => c.low), price);
     const volume24h = window.reduce((acc, c) => acc + c.volume, 0);
     const quoteVolume24h = window.reduce((acc, c) => acc + c.volume * c.close, 0);
 

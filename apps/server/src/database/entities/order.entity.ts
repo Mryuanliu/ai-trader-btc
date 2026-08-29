@@ -18,6 +18,11 @@ import {
 
 @Entity('orders')
 @Index(['symbol', 'createdAt'])
+/**
+ * 虚拟账户推导（按 mode+status 聚合全部成交单）与今日笔数统计
+ * （按 mode+status 过滤后按 createdAt 计数）都命中这个索引。
+ */
+@Index('IDX_orders_mode_status_created', ['mode', 'status', 'createdAt'])
 export class OrderEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -9,6 +9,12 @@ import {
 
 @Entity('balance_snapshots')
 @Index(['exchange', 'asset', 'createdAt'])
+/**
+ * 补 (source, createdAt) 索引：迁移里已建，但实体若不同步声明，
+ * 开发环境的 synchronize=true 会把该索引 DROP 掉，
+ * 导致今日盈亏与回撤查询（风控链路每次下单都会跑）退化为全表扫描。
+ */
+@Index('IDX_balance_snapshots_source', ['source', 'createdAt'])
 export class BalanceSnapshotEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;

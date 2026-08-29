@@ -1,12 +1,15 @@
+import { Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import WebSocket from 'ws';
 import {
   Balance,
   Candle,
   Environment,
+  FALLBACK_SYMBOL_FILTERS,
   KlineQuery,
   ORDER_STATUSES,
   OrderStatus,
+  SymbolFilters,
   Ticker,
 } from '@ai-trader/shared';
 import {
@@ -16,6 +19,7 @@ import {
   OrderQuery,
   OrderResult,
   PlaceOrderInput,
+  PriceQuote,
 } from './adapter.interface';
 import { buildQuery, hmacSha256Hex } from './signature';
 import { axiosTransport, wsAgent } from '../common/proxy';
@@ -42,6 +46,29 @@ const WS_HOSTS: Record<Environment, string> = {
 const PUBLIC_REST_HOST = 'https://data-api.binance.vision';
 const PUBLIC_WS_HOST = 'wss://data-stream.binance.vision';
 
+/** 过滤器缓存时长：交易对规则极少变动，取 24h */
+const FILTERS_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** 解析币安 filters 数组，缺失项回落到兜底值 */
+function parseBinanceFilters(
+  symbol: string,
+  filters: { filterType: string; [k: string]: string }[],
+): SymbolFilters {
+  const pick = (type: string) => filters.find((f) => f.filterType === type);
+  const lot = pick('LOT_SIZE');
+  const price = pick('PRICE_FILTER');
+  const notional = pick('NOTIONAL') ?? pick('MIN_NOTIONAL');
+
+  return {
+    symbol,
+    stepSize: Number(lot?.stepSize) || FALLBACK_SYMBOL_FILTERS.stepSize,
+    tickSize: Number(price?.tickSize) || FALLBACK_SYMBOL_FILTERS.tickSize,
+    minQty: Number(lot?.minQty) || FALLBACK_SYMBOL_FILTERS.minQty,
+    maxQty: Number(lot?.maxQty) || FALLBACK_SYMBOL_FILTERS.maxQty,
+    minNotional: Number(notional?.minNotional) || FALLBACK_SYMBOL_FILTERS.minNotional,
+  };
+}
+
 const STATUS_MAP: Record<string, OrderStatus> = {
   NEW: 'NEW',
   PARTIALLY_FILLED: 'PARTIALLY_FILLED',
@@ -61,18 +88,21 @@ function hostOf(url: string): string {
 }
 
 export class BinanceAdapter implements ExchangeAdapter {
+  private readonly logger: Logger;
   readonly code = 'binance' as const;
   /** 交易通道：走账户环境主机，携带 API Key */
   private readonly tradeHttp: AxiosInstance;
   /** 公共行情通道：走公共域名，不携带密钥，不受账户权重限制 */
   private readonly publicHttp: AxiosInstance;
   private readonly sockets = new Set<WebSocket>();
+  private readonly filtersCache = new Map<string, { filters: SymbolFilters; cachedAt: number }>();
 
   constructor(
     readonly environment: Environment,
     private readonly apiKey: string,
     private readonly apiSecret: string,
   ) {
+    this.logger = new Logger(BinanceAdapter.name);
     this.tradeHttp = axios.create({
       baseURL: REST_HOSTS[environment],
       timeout: 20000,
@@ -191,6 +221,35 @@ export class BinanceAdapter implements ExchangeAdapter {
     }));
   }
 
+  /**
+   * 取交易对过滤器并按 symbol 缓存 24h。
+   * exchangeInfo 全量响应约 1MB，只在首次下单前按需拉取，不进入行情与决策热路径。
+   */
+  async getSymbolFilters(symbol: string): Promise<SymbolFilters> {
+    const upper = symbol.toUpperCase();
+    const now = Date.now();
+    const hit = this.filtersCache.get(upper);
+    if (hit && now - hit.cachedAt < FILTERS_TTL_MS) return hit.filters;
+
+    const fallback: SymbolFilters = { symbol: upper, ...FALLBACK_SYMBOL_FILTERS };
+    try {
+      const data = await this.get<{
+        symbols: { symbol: string; filters: { filterType: string; [k: string]: string }[] }[];
+      }>(this.publicHttp, '/api/v3/exchangeInfo', { symbol: upper });
+
+      const entry = data.symbols?.find((s) => s.symbol === upper);
+      if (!entry) return fallback;
+
+      const filters = parseBinanceFilters(upper, entry.filters ?? []);
+      this.filtersCache.set(upper, { filters, cachedAt: now });
+      return filters;
+    } catch (err) {
+      // 过滤器获取失败不阻断下单，回落兜底值后由交易所返回具体错误
+      this.logger.warn(`获取 ${upper} 过滤器失败，使用兜底值: ${(err as Error).message}`);
+      return fallback;
+    }
+  }
+
   // ---------------------------------------------------------------- 账户接口
   async getBalances(): Promise<Balance[]> {
     const data = await this.signed<{
@@ -286,6 +345,40 @@ export class BinanceAdapter implements ExchangeAdapter {
           close: Number(k.c),
           volume: Number(k.v),
         });
+      } catch {
+        // 忽略无法解析的帧
+      }
+    });
+    ws.on('error', () => {
+      /* 由外层重连逻辑处理 */
+    });
+
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
+      this.sockets.delete(ws);
+    };
+  }
+
+  /**
+   * 高频价格：订阅最优买卖价流（约 100ms 一帧），取中间价。
+   * 相比逐笔成交流，中间价不受单笔大额成交影响，抖动更小。
+   */
+  subscribeTicker(symbol: string, onQuote: (quote: PriceQuote) => void): () => void {
+    const stream = `${symbol.toLowerCase()}@bookTicker`;
+    const ws = new WebSocket(`${PUBLIC_WS_HOST}/ws/${stream}`, wsAgent(hostOf(PUBLIC_WS_HOST)));
+    this.sockets.add(ws);
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        const bid = Number(msg?.b);
+        const ask = Number(msg?.a);
+        if (!(bid > 0) || !(ask > 0)) return;
+        onQuote({ price: (bid + ask) / 2, ts: Date.now() });
       } catch {
         // 忽略无法解析的帧
       }

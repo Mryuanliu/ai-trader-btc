@@ -149,6 +149,18 @@ export interface AgentConfigShape {
   maxDrawdownPct: number;
   minOrderIntervalSec: number;
   dailyLossLimit: number;
+  /**
+   * 行情或 LLM 降级时的行为。
+   * - hold：强制观望（默认，最安全）
+   * - signal：沿用纯指标兜底信号，仍可能下单
+   */
+  degradedAction: 'hold' | 'signal';
+  /** 模拟撮合滑点，单位 bps */
+  slippageBps: number;
+  /** 手续费率，单位 bps */
+  feeRateBps: number;
+  /** 单一标的持仓市值占总权益的上限（百分比） */
+  maxExposurePct: number;
 }
 
 export const DEFAULT_AGENT_CONFIG: AgentConfigShape = {
@@ -175,6 +187,12 @@ export const DEFAULT_AGENT_CONFIG: AgentConfigShape = {
   maxDrawdownPct: 10,
   minOrderIntervalSec: 60,
   dailyLossLimit: 500,
+  // 降级时强制观望：兜底的纯指标策略未经回测验证，不应接管真实资金
+  degradedAction: 'hold',
+  slippageBps: 5,
+  feeRateBps: 10,
+  // 单一标的持仓不超过总权益的 60%
+  maxExposurePct: 60,
 };
 
 export interface AgentRuntimeState {
@@ -183,6 +201,15 @@ export interface AgentRuntimeState {
   lastRunAt: string | null;
   lastDecisionId: string | null;
   llmAvailable: boolean;
+  /**
+   * 连续失败退避与熔断状态。
+   * `tripped` 为 true 表示已熔断，自动调度暂停，需人工排查下游（LLM / 交易所）。
+   */
+  health: {
+    consecutiveFailures: number;
+    nextRetryAt: number;
+    tripped: boolean;
+  };
   exchanges: {
     code: ExchangeCode;
     label: string;

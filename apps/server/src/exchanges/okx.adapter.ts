@@ -1,11 +1,14 @@
+import { Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import WebSocket from 'ws';
 import {
   Balance,
   Candle,
   Environment,
+  FALLBACK_SYMBOL_FILTERS,
   KlineQuery,
   OrderStatus,
+  SymbolFilters,
   Ticker,
   Timeframe,
 } from '@ai-trader/shared';
@@ -16,6 +19,7 @@ import {
   OrderQuery,
   OrderResult,
   PlaceOrderInput,
+  PriceQuote,
 } from './adapter.interface';
 import { buildQuery, hmacSha256Base64, okxTimestamp } from './signature';
 import { axiosTransport, wsAgent } from '../common/proxy';
@@ -64,12 +68,17 @@ function toInstId(symbol: string): string {
   return symbol;
 }
 
+/** 过滤器缓存时长 */
+const FILTERS_TTL_MS = 24 * 60 * 60 * 1000;
+
 export class OkxAdapter implements ExchangeAdapter {
+  private readonly logger = new Logger(OkxAdapter.name);
   readonly code = 'okx' as const;
   private readonly http: AxiosInstance;
   private readonly sockets = new Set<WebSocket>();
   /** OKX Demo 盘通过 header 区分，非单独域名 */
   private readonly simulated: boolean;
+  private readonly filtersCache = new Map<string, { filters: SymbolFilters; cachedAt: number }>();
 
   constructor(
     readonly environment: Environment,
@@ -187,6 +196,46 @@ export class OkxAdapter implements ExchangeAdapter {
         volume: Number(row[5]),
       }))
       .sort((a, b) => a.time - b.time);
+  }
+
+  /** 取交易对过滤器并按 instId 缓存 24h */
+  async getSymbolFilters(symbol: string): Promise<SymbolFilters> {
+    const upper = symbol.toUpperCase();
+    const now = Date.now();
+    const hit = this.filtersCache.get(upper);
+    if (hit && now - hit.cachedAt < FILTERS_TTL_MS) return hit.filters;
+
+    const fallback: SymbolFilters = { symbol: upper, ...FALLBACK_SYMBOL_FILTERS };
+    try {
+      const instId = toInstId(upper);
+      const data = await this.publicGet<{
+        data: {
+          instId: string;
+          lotSz: string;
+          tickSz: string;
+          minSz: string;
+          maxLmtSz: string;
+        }[];
+      }>('/api/v5/public/instruments', { instType: 'SPOT', instId });
+
+      const entry = data.data?.find((d) => d.instId === instId);
+      if (!entry) return fallback;
+
+      const filters: SymbolFilters = {
+        symbol: upper,
+        stepSize: Number(entry.lotSz) || FALLBACK_SYMBOL_FILTERS.stepSize,
+        tickSize: Number(entry.tickSz) || FALLBACK_SYMBOL_FILTERS.tickSize,
+        minQty: Number(entry.minSz) || FALLBACK_SYMBOL_FILTERS.minQty,
+        maxQty: Number(entry.maxLmtSz) || FALLBACK_SYMBOL_FILTERS.maxQty,
+        // okx instruments 不直接给出最小名义价值，用最小数量 × 现价在下单时估算
+        minNotional: 0,
+      };
+      this.filtersCache.set(upper, { filters, cachedAt: now });
+      return filters;
+    } catch (err) {
+      this.logger.warn(`获取 ${upper} 过滤器失败，使用兜底值: ${(err as Error).message}`);
+      return fallback;
+    }
   }
 
   async getBalances(): Promise<Balance[]> {
@@ -307,6 +356,53 @@ export class OkxAdapter implements ExchangeAdapter {
             close: Number(row[4]),
             volume: Number(row[5]),
           });
+        }
+      } catch {
+        /* 忽略无法解析的帧 */
+      }
+    });
+
+    ws.on('error', () => {
+      /* 由外层重连逻辑处理 */
+    });
+
+    return () => {
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
+      this.sockets.delete(ws);
+    };
+  }
+
+  /** 高频价格：订阅 tickers 频道，取最新成交价 */
+  subscribeTicker(symbol: string, onQuote: (quote: PriceQuote) => void): () => void {
+    const instId = toInstId(symbol);
+    const ws = new WebSocket(
+      WS_HOSTS[this.environment],
+      wsAgent(hostOf(WS_HOSTS[this.environment])),
+    );
+    this.sockets.add(ws);
+
+    ws.on('open', () => {
+      ws.send(
+        JSON.stringify({
+          op: 'subscribe',
+          args: [{ channel: 'tickers', instId }],
+        }),
+      );
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (!msg?.data?.length) return;
+        for (const row of msg.data) {
+          // OKX tickers: last 为最新成交价
+          const price = Number(row?.last);
+          if (!(price > 0)) continue;
+          onQuote({ price, ts: Number(row?.ts) || Date.now() });
         }
       } catch {
         /* 忽略无法解析的帧 */

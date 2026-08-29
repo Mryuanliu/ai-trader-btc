@@ -4,6 +4,7 @@ import { AgentConfigShape, OrderSide } from '@ai-trader/shared';
 import { Between, Repository } from 'typeorm';
 import { BalanceSnapshotEntity, OrderEntity, RiskEventEntity, RiskLevel } from '../database/entities';
 import { AccountService } from '../account/account.service';
+import { PositionService } from '../account/position.service';
 
 export interface RiskContext {
   config: AgentConfigShape;
@@ -51,6 +52,7 @@ export class RiskService {
     @InjectRepository(BalanceSnapshotEntity)
     private readonly snapshotRepo: Repository<BalanceSnapshotEntity>,
     private readonly accounts: AccountService,
+    private readonly positions: PositionService,
   ) {}
 
   /** 所有下单（含手动单）统一经过此守卫 */
@@ -135,6 +137,20 @@ export class RiskService {
         `可用 USDT ${context.quoteFree.toFixed(2)}，不足以支付 ${context.quoteAmount.toFixed(2)}`,
       );
     }
+
+    // 买入还需校验集中度：原逻辑只看「单笔金额」和「余额是否够」，
+    // 连续加仓可以一直买到 USDT 耗尽，等于把全部资金压在单一标的上。
+    if (context.side === 'BUY') {
+      const exposure = await this.computeExposurePct(context);
+      if (exposure !== null && exposure > config.maxExposurePct) {
+        return this.reject(
+          context,
+          'MAX_EXPOSURE',
+          `买入后 ${context.symbol} 持仓占比将达 ${exposure.toFixed(2)}%，` +
+            `超过上限 ${config.maxExposurePct}%`,
+        );
+      }
+    }
     if (context.side === 'SELL' && context.quantity > context.baseFree) {
       return this.reject(
         context,
@@ -144,6 +160,28 @@ export class RiskService {
     }
 
     return { passed: true, note: '风控校验通过' };
+  }
+
+  /**
+   * 计算「本次买入后」该标的持仓市值占总权益的百分比。
+   * 返回 null 表示总权益无法取得，此时不因敞口拦单（避免误伤）。
+   */
+  private async computeExposurePct(context: RiskContext): Promise<number | null> {
+    try {
+      const position = await this.positions.getPosition(context.symbol);
+      const totalEquity = await this.accounts.currentEquity(
+        context.config.mode,
+        context.config.enabledExchanges,
+      );
+      if (!(totalEquity > 0)) return null;
+
+      // 现仓市值 + 本次买入金额，再除以总权益
+      const afterValue = position.marketValue + context.quoteAmount;
+      return (afterValue / totalEquity) * 100;
+    } catch (err) {
+      this.logger.warn(`计算持仓敞口失败，跳过该项校验: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   private async reject(
@@ -194,43 +232,56 @@ export class RiskService {
     };
   }
 
-  /** 今日最大回撤（%），仅统计当前账户来源，避免跨口径误判 */
+  /**
+   * 今日最大回撤（%），仅统计当前账户来源，避免跨口径误判。
+   *
+   * 整个计算下沉到 SQL：先用窗口函数把同一批写入的快照归组求和得到权益曲线，
+   * 再对曲线求前缀最大值并计算最大回落。
+   *
+   * 此前是把 `take: 2000` 的行拉进内存遍历，而快照按 60s 写入、每次 2 条，
+   * 一天约 2880 行——运行约 14 小时后 ASC 排序只会取到当天前 2000 行，
+   * 后半段的回撤被静默忽略，熔断形同虚设。改为 SQL 聚合后不存在该上限。
+   */
   async currentDrawdownPct(source: 'virtual' | 'exchange' = 'virtual'): Promise<number> {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
 
-    const snapshots = await this.snapshotRepo.find({
-      where: { createdAt: Between(start, new Date()), source },
-      order: { createdAt: 'ASC' },
-      take: 2000,
-      select: ['createdAt', 'usdtValue'],
-    });
-    if (snapshots.length < 2) return 0;
+    // 两段式聚合：
+    // 1) buckets —— 按秒归组求和，得到权益曲线。快照是整批写入的（同一批时间戳相同），
+    //    因此按秒归组与「一次快照 = 一个权益点」严格对齐。
+    //    注意不能用固定 5 秒窗口：那会在窗口边界切出不完整分桶（末桶可能只剩 1 行），
+    //    实测会把真实 20% 的回撤误算成 84%，直接误触发熔断。
+    // 2) peaks   —— 对权益曲线求前缀最大值，再算出最大回落。
+    // 全程在库内完成，单次查询只返回一个标量，不存在行数上限。
+    const row = await this.snapshotRepo.query(
+      `WITH buckets AS (
+         SELECT date_trunc('second', s."createdAt") AS bucket,
+                SUM(s."usdtValue")::float8 AS equity
+         FROM balance_snapshots s
+         WHERE s."createdAt" BETWEEN $1 AND $2
+           AND s.source = $3
+         GROUP BY 1
+       ),
+       peaks AS (
+         SELECT equity,
+                MAX(equity) OVER (
+                  ORDER BY bucket
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS peak
+         FROM buckets
+       )
+       SELECT COALESCE(
+                MAX(CASE WHEN peak > 0 THEN (peak - equity) / peak * 100 ELSE 0 END),
+                0
+              )::float8 AS drawdown,
+              COUNT(*)::int AS points
+       FROM peaks`,
+      [start, new Date(), source],
+    );
 
-    // 按写入时间归组求和，得到权益曲线
-    const equityPoints: number[] = [];
-    let bucketTime = 0;
-    let bucketSum = 0;
-    for (const snap of snapshots) {
-      const ts = snap.createdAt.getTime();
-      if (ts - bucketTime > 5_000) {
-        if (bucketTime > 0) equityPoints.push(bucketSum);
-        bucketTime = ts;
-        bucketSum = 0;
-      }
-      bucketSum += Number(snap.usdtValue);
-    }
-    equityPoints.push(bucketSum);
-    if (equityPoints.length < 2) return 0;
-
-    let peak = equityPoints[0];
-    let maxDrawdown = 0;
-    for (const value of equityPoints) {
-      peak = Math.max(peak, value);
-      if (peak > 0) {
-        maxDrawdown = Math.max(maxDrawdown, ((peak - value) / peak) * 100);
-      }
-    }
-    return maxDrawdown;
+    const result = Array.isArray(row) ? row[0] : row;
+    // 只有一个权益点时无法计算回落
+    if (!result || Number(result.points) < 2) return 0;
+    return Number(result.drawdown) || 0;
   }
 }

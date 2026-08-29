@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef } from 'react';
 import {
   useMutation,
   useQuery,
@@ -5,6 +6,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import { http } from './client';
+import { useRealtimeStore } from '@/ws/realtime';
 import type {
   AgentConfigShape,
   AgentRuntimeState,
@@ -23,6 +25,7 @@ import type {
   Timeframe,
   ExchangeCode,
 } from '@ai-trader/shared';
+import { TIMEFRAME_MS } from '@ai-trader/shared';
 
 // ------------------------------------------------------------------ 概览
 export function useOverview(symbol = 'BTCUSDT', refetchInterval = 15000) {
@@ -34,12 +37,87 @@ export function useOverview(symbol = 'BTCUSDT', refetchInterval = 15000) {
 }
 
 // ------------------------------------------------------------------ 行情
+
+/**
+ * 把实时价格合并进最后一根 K 线，逻辑与服务端 `MarketService.syncDerivedIntervals` 保持一致：
+ * 同一周期内只更新 close/high/low，跨周期则追加新 K 线。
+ *
+ * 这样任意周期（含 1h/4h/1d）都能秒级刷新，无需服务端广播多个周期的 K 线事件。
+ */
+function mergeLivePrice(
+  candles: Candle[],
+  interval: Timeframe,
+  price: number,
+  limit: number,
+): Candle[] {
+  const last = candles[candles.length - 1];
+  if (!last) return candles;
+
+  const step = TIMEFRAME_MS[interval];
+  const openTime = Math.floor(Date.now() / step) * step;
+
+  // 缺口超过一个周期说明断连或数据已过期，保持原样，交给重连后的补拉修正
+  if (openTime > last.time + step) return candles;
+
+  if (openTime > last.time) {
+    const next: Candle = {
+      time: openTime,
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+      volume: 0,
+    };
+    return [...candles, next].slice(-limit);
+  }
+
+  // 过期数据（openTime < last.time），忽略
+  if (openTime < last.time) return candles;
+
+  return [
+    ...candles.slice(0, -1),
+    {
+      ...last,
+      close: price,
+      high: Math.max(last.high, price),
+      low: Math.min(last.low, price),
+    },
+  ];
+}
+
+/**
+ * K 线：首次 REST 拉全量，之后由 WebSocket 秒级价格事件增量推进，**不再定时轮询**。
+ * 断线重连时补拉一次全量，填补断连期间的数据缺口。
+ */
 export function useCandles(symbol: string, interval: Timeframe, limit = 300) {
-  return useQuery<Candle[]>({
+  const query = useQuery<Candle[]>({
     queryKey: ['candles', symbol, interval, limit],
     queryFn: () => http.get('/market/candles', { params: { symbol, interval, limit } }),
-    refetchInterval: 30000,
+    refetchInterval: false,
+    staleTime: 60_000,
   });
+
+  const price = useRealtimeStore((s) => s.price);
+  const connected = useRealtimeStore((s) => s.connected);
+  const { refetch } = query;
+  const seenConnected = useRef(false);
+
+  // 仅「断线后重连」时补拉全量，修正断连期间增量推进产生的偏差。
+  // 首次连接不补拉，避免与挂载时的查询重复请求。
+  useEffect(() => {
+    if (!connected) return;
+    if (seenConnected.current) void refetch();
+    seenConnected.current = true;
+  }, [connected, refetch]);
+
+  const candles = useMemo(() => {
+    const base = query.data ?? [];
+    if (base.length === 0) return base;
+    if (!price || price.symbol !== symbol || !(price.price > 0)) return base;
+    return mergeLivePrice(base, interval, price.price, limit);
+  }, [query.data, price, symbol, interval, limit]);
+
+  return { ...query, data: candles };
 }
 
 export function useTicker(symbol: string): UseQueryResult<Ticker> {
