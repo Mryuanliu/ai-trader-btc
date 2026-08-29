@@ -58,7 +58,8 @@ export function AdminAgentConfig() {
 
   useEffect(() => {
     if (config) {
-      form.setFieldsValue(config);
+      // antd 的 RecursivePartial 对 Record<string, unknown> 字段推导过窄，这里断言回参数类型
+      form.setFieldsValue(config as Parameters<typeof form.setFieldsValue>[0]);
       setDirty(false);
     }
   }, [config, form]);

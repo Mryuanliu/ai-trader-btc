@@ -96,6 +96,10 @@ export interface DecisionRecord {
   llmModel: string | null;
   /** token 用量 */
   llmUsage: { prompt: number; completion: number; total: number } | null;
+  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
+  lane: DecisionLane;
+  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  strategyName?: string | null;
   /** LLM 不可用/解析失败时降级为纯指标 */
   degraded: boolean;
   degradeReason?: string | null;
@@ -111,6 +115,10 @@ export interface DecisionSummary {
   action: DecisionAction;
   confidence: number;
   reason: string;
+  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
+  lane: DecisionLane;
+  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  strategyName?: string | null;
   degraded: boolean;
   riskPassed: boolean;
   riskRejectedBy?: string | null;
@@ -124,6 +132,15 @@ export interface DecisionSummary {
   /** token 用量 */
   llmUsage?: { prompt: number; completion: number; total: number } | null;
 }
+
+/** 决策链路：llm=AI 直出决策；strategy=纯策略（零 LLM 参与）；hybrid=AI 提供上下文、策略执行（阶段 5） */
+export type DecisionLane = 'llm' | 'strategy' | 'hybrid';
+
+/** 仅 llm 链路生效：LLM 失败后的处理。hold=强制观望；strategy=降级到纯策略；skip=跳过本轮 */
+export type LlmFailurePolicy = 'hold' | 'strategy' | 'skip';
+
+/** 策略标识。开放字符串：策略是插件式集合，运行时合法性由 StrategyRegistry 校验 */
+export type StrategyName = 'trend_following' | (string & {});
 
 /** Agent 配置（前后端共用的可编辑部分） */
 export interface AgentConfigShape {
@@ -153,8 +170,19 @@ export interface AgentConfigShape {
    * 行情或 LLM 降级时的行为。
    * - hold：强制观望（默认，最安全）
    * - signal：沿用纯指标兜底信号，仍可能下单
+   *
+   * @deprecated 已废弃，由 llmFailurePolicy 承接「LLM 失败怎么办」的职责；
+   * strategy 链路完全忽略本字段。仅保留列以兼容存量数据。
    */
   degradedAction: 'hold' | 'signal';
+  /** 决策链路开关（hybrid 将在阶段 5 开放，配置层暂归一为 llm） */
+  decisionLane: DecisionLane;
+  /** 仅 llm 链路生效：LLM 失败后的行为，承接原 degradedAction 职责 */
+  llmFailurePolicy: LlmFailurePolicy;
+  /** strategy 链路使用的策略，由 StrategyRegistry 校验 */
+  strategyName: StrategyName;
+  /** 策略专属参数，由各策略 normalizeParams 校验合并 */
+  strategyParams: Record<string, unknown>;
   /** 模拟撮合滑点，单位 bps */
   slippageBps: number;
   /** 手续费率，单位 bps */
@@ -188,7 +216,12 @@ export const DEFAULT_AGENT_CONFIG: AgentConfigShape = {
   minOrderIntervalSec: 60,
   dailyLossLimit: 500,
   // 降级时强制观望：兜底的纯指标策略未经回测验证，不应接管真实资金
+  // @deprecated 由 llmFailurePolicy 承接
   degradedAction: 'hold',
+  decisionLane: 'llm',
+  llmFailurePolicy: 'hold',
+  strategyName: 'trend_following',
+  strategyParams: {},
   slippageBps: 5,
   feeRateBps: 10,
   // 单一标的持仓不超过总权益的 60%

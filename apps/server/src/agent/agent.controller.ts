@@ -2,9 +2,12 @@ import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@ne
 import {
   IsArray,
   IsBoolean,
+  IsIn,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -126,6 +129,28 @@ class UpdateAgentConfigDto implements Partial<AgentConfigShape> {
   @IsString()
   degradedAction?: AgentConfigShape['degradedAction'];
 
+  /** 决策链路开关（hybrid 暂不接受，service 层归一为 llm） */
+  @IsOptional()
+  @IsIn(['llm', 'strategy', 'hybrid'])
+  decisionLane?: AgentConfigShape['decisionLane'];
+
+  /** 仅 llm 链路生效：LLM 失败后的行为 */
+  @IsOptional()
+  @IsIn(['hold', 'strategy', 'skip'])
+  llmFailurePolicy?: AgentConfigShape['llmFailurePolicy'];
+
+  /** strategy 链路使用的策略 */
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[a-z][a-z0-9_]*$/)
+  strategyName?: string;
+
+  /** 策略专属参数 */
+  @IsOptional()
+  @IsObject()
+  strategyParams?: Record<string, unknown>;
+
   @IsOptional()
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(0)
@@ -229,6 +254,8 @@ export class AgentController {
       confidence: entity.confidence,
       reason: entity.reason,
       riskNotes: entity.riskNotes,
+      lane: entity.lane ?? 'llm',
+      strategyName: entity.strategyName ?? null,
       inputSnapshot: entity.inputSnapshot,
       prompt: entity.prompt,
       llmRaw: entity.llmRaw,

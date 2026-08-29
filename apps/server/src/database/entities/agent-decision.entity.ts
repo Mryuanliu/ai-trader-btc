@@ -1,4 +1,4 @@
-import { DecisionAction, DecisionInputSnapshot } from '@ai-trader/shared';
+import { DecisionAction, DecisionInputSnapshot, DecisionLane } from '@ai-trader/shared';
 import {
   Column,
   CreateDateColumn,
@@ -10,6 +10,7 @@ import {
 /** 一次完整决策链条记录 */
 @Entity('agent_decisions')
 @Index(['symbol', 'createdAt'])
+@Index(['lane', 'createdAt'])
 export class AgentDecisionEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -72,6 +73,14 @@ export class AgentDecisionEntity {
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   orderId: string | null;
+
+  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
+  @Column({ type: 'varchar', length: 16, default: 'llm' })
+  lane: DecisionLane;
+
+  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  strategyName: string | null;
 
   @Column({ default: 0 })
   latencyMs: number;

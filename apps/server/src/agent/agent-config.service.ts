@@ -81,6 +81,15 @@ export class AgentConfigService {
       minOrderIntervalSec: clampRiskValue('minOrderIntervalSec', entity.minOrderIntervalSec),
       dailyLossLimit: clampRiskValue('dailyLossLimit', entity.dailyLossLimit),
       degradedAction: entity.degradedAction === 'signal' ? 'signal' : 'hold',
+      // 链路四字段读时归一化：兜住历史脏数据，也防直接改库绕过写入校验。
+      // hybrid 在阶段 5 前不可达，直接改库置 hybrid 时读出 llm 比引擎抛错停摆更安全。
+      decisionLane: entity.decisionLane === 'strategy' ? 'strategy' : 'llm',
+      llmFailurePolicy:
+        entity.llmFailurePolicy === 'strategy' || entity.llmFailurePolicy === 'skip'
+          ? entity.llmFailurePolicy
+          : 'hold',
+      strategyName: entity.strategyName?.trim() || DEFAULT_AGENT_CONFIG.strategyName,
+      strategyParams: entity.strategyParams ?? {},
       slippageBps: clampRiskValue('slippageBps', entity.slippageBps),
       feeRateBps: clampRiskValue('feeRateBps', entity.feeRateBps),
       maxExposurePct: clampRiskValue('maxExposurePct', entity.maxExposurePct),
@@ -113,6 +122,10 @@ export class AgentConfigService {
       'minOrderIntervalSec',
       'dailyLossLimit',
       'degradedAction',
+      'decisionLane',
+      'llmFailurePolicy',
+      'strategyName',
+      'strategyParams',
       'slippageBps',
       'feeRateBps',
       'maxExposurePct',
@@ -147,6 +160,29 @@ export class AgentConfigService {
       if (key === 'degradedAction' && value !== 'hold' && value !== 'signal') {
         this.logger.warn(`配置项 degradedAction 非法值 ${String(value)}，回落为 hold`);
         value = 'hold';
+      }
+
+      // 链路四字段写入校验：非法值回落默认并留下 warn，而非让策略引擎拿到脏配置
+      if (key === 'decisionLane' && value !== 'llm' && value !== 'strategy') {
+        this.logger.warn(
+          `配置项 decisionLane=${String(value)} 尚未支持，回落为 llm（hybrid 将在阶段 5 提供）`,
+        );
+        value = 'llm';
+      }
+      if (key === 'llmFailurePolicy' && value !== 'hold' && value !== 'strategy' && value !== 'skip') {
+        this.logger.warn(`配置项 llmFailurePolicy 非法值 ${String(value)}，回落为 hold`);
+        value = 'hold';
+      }
+      if (key === 'strategyName' && (typeof value !== 'string' || !/^[a-z][a-z0-9_]*$/.test(value))) {
+        this.logger.warn(`配置项 strategyName 非法值 ${String(value)}，回落为 trend_following`);
+        value = 'trend_following';
+      }
+      if (
+        key === 'strategyParams' &&
+        (typeof value !== 'object' || value === null || Array.isArray(value))
+      ) {
+        this.logger.warn(`配置项 strategyParams 非法值，回落为 {}`);
+        value = {};
       }
 
       (row as unknown as Record<string, unknown>)[key] = value;
