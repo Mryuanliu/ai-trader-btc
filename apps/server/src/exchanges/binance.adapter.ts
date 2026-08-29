@@ -149,7 +149,9 @@ export class BinanceAdapter implements ExchangeAdapter {
     if (!this.hasCredentials) {
       throw new ExchangeError(this.code, 'NO_CREDENTIALS', '币安账户未配置 API Key');
     }
-    const query = buildQuery({ ...params, timestamp: Date.now(), recvWindow: 5000 });
+    // 本机时钟与币安服务器可能偏差数秒（实测 ~4.8s）：recvWindow 5000 几乎无余量，
+    // 会间歇性报 -1021。放宽到 30000 为代理链路延迟与时钟漂移留足余量
+    const query = buildQuery({ ...params, timestamp: Date.now(), recvWindow: 30_000 });
     const signature = hmacSha256Hex(this.apiSecret, query);
     const url = `${path}?${query}&signature=${signature}`;
     try {
