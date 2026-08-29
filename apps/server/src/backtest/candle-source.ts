@@ -48,14 +48,24 @@ export async function backfill(
   let cursor = from;
 
   while (cursor < to) {
-    const batch = await adapter.getKlines({
-      symbol,
-      interval,
-      startTime: cursor,
-      endTime: to,
-      limit: 1000,
-    });
-    if (batch.length === 0) break;
+    // 代理链路偶发 ECONNRESET：单批重试而不是让整个回填失败（此前一批失败即全盘报废）
+    let batch: Candle[] | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        batch = await adapter.getKlines({
+          symbol,
+          interval,
+          startTime: cursor,
+          endTime: to,
+          limit: 1000,
+        });
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+    if (!batch || batch.length === 0) break;
 
     await repo
       .createQueryBuilder()
