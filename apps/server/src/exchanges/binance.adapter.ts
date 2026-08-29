@@ -126,6 +126,26 @@ export class BinanceAdapter implements ExchangeAdapter {
   }
 
   // ---------------------------------------------------------------- 底层请求
+
+  /**
+   * 代理链路偶发 ECONNRESET/ETIMEDOUT（实测失败率 ~10%）：网络层错误统一重试。
+   * 仅对无响应的错误重试（response 已返回的 HTTP 错误是确定性结果，重试无意义）。
+   */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        const hasResponse = (err as { response?: unknown })?.response !== undefined;
+        if (hasResponse || attempt === 3) break;
+        await new Promise((r) => setTimeout(r, 500 * attempt));
+      }
+    }
+    throw lastErr;
+  }
+
   private async get<T>(
     client: AxiosInstance,
     path: string,
@@ -134,7 +154,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     const query = buildQuery(params);
     const url = query ? `${path}?${query}` : path;
     try {
-      const res = await client.get<T>(url);
+      const res = await this.withRetry(() => client.get<T>(url));
       return res.data;
     } catch (err) {
       throw this.wrapError(err, `${client.defaults.baseURL}${url}`);
@@ -155,7 +175,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     const signature = hmacSha256Hex(this.apiSecret, query);
     const url = `${path}?${query}&signature=${signature}`;
     try {
-      const res = await this.tradeHttp.request<T>({ method, url });
+      const res = await this.withRetry(() => this.tradeHttp.request<T>({ method, url }));
       return res.data;
     } catch (err) {
       throw this.wrapError(err, `${this.tradeHttp.defaults.baseURL}${url}`);
