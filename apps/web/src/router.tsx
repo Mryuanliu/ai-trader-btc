@@ -1,6 +1,9 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { useAuthStore } from '@/store/auth';
+import { LoginModal } from '@/components/AuthGate';
 import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
@@ -22,6 +25,9 @@ export function AppRoutes() {
   const isMobile = useIsMobile();
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // 后台接口全部挂了 JWT 守卫：未登录直接弹强制登录框（登录成功后刷新全部查询）
+  const hasToken = useAuthStore((s) => Boolean(s.token));
 
   useEffect(() => {
     const inMobile = location.pathname.startsWith('/m');
@@ -34,6 +40,7 @@ export function AppRoutes() {
   }, [isMobile, location.pathname, navigate]);
 
   return (
+    <>
     <Routes>
       <Route
         path="/"
@@ -57,5 +64,12 @@ export function AppRoutes() {
       </Route>
       <Route path="*" element={<Navigate to={isMobile ? '/m' : '/admin'} replace />} />
     </Routes>
+      <LoginModal
+        required
+        open={!hasToken}
+        onClose={() => {}}
+        onSuccess={() => queryClient.invalidateQueries()}
+      />
+    </>
   );
 }
