@@ -103,15 +103,8 @@ export class AgentConfigService {
       dailyLossLimit: clampRiskValue('dailyLossLimit', entity.dailyLossLimit),
       degradedAction: entity.degradedAction === 'signal' ? 'signal' : 'hold',
       // 链路字段读时归一化：兜住历史脏数据，也防直接改库绕过写入校验。
-      // hybrid 已在阶段 5 实现，非 strategy/hybrid 一律读为 llm。
-      decisionLane:
-        entity.decisionLane === 'strategy' || entity.decisionLane === 'hybrid'
-          ? entity.decisionLane
-          : 'llm',
-      llmFailurePolicy:
-        entity.llmFailurePolicy === 'strategy' || entity.llmFailurePolicy === 'skip'
-          ? entity.llmFailurePolicy
-          : 'hold',
+      // 'llm'（AI 直出买卖）链路已移除，存量脏值一律按 strategy（纯策略执行）处理。
+      decisionLane: entity.decisionLane === 'hybrid' ? 'hybrid' : 'strategy',
       strategyName: entity.strategyName?.trim() || DEFAULT_AGENT_CONFIG.strategyName,
       strategyParams: entity.strategyParams ?? {},
       // 出场规则读时归一化：比例值钳制到 (0,1]，非法回落 null（关闭）
@@ -149,7 +142,6 @@ export class AgentConfigService {
       'dailyLossLimit',
       'degradedAction',
       'decisionLane',
-      'llmFailurePolicy',
       'strategyName',
       'strategyParams',
       'exitRules',
@@ -190,13 +182,10 @@ export class AgentConfigService {
       }
 
       // 链路字段写入校验：非法值回落默认并留下 warn，而非让策略引擎拿到脏配置
-      if (key === 'decisionLane' && value !== 'llm' && value !== 'strategy' && value !== 'hybrid') {
-        this.logger.warn(`配置项 decisionLane 非法值 ${String(value)}，回落为 llm`);
-        value = 'llm';
-      }
-      if (key === 'llmFailurePolicy' && value !== 'hold' && value !== 'strategy' && value !== 'skip') {
-        this.logger.warn(`配置项 llmFailurePolicy 非法值 ${String(value)}，回落为 hold`);
-        value = 'hold';
+      // 'llm' 链路已移除，仅 strategy / hybrid 合法
+      if (key === 'decisionLane' && value !== 'strategy' && value !== 'hybrid') {
+        this.logger.warn(`配置项 decisionLane 非法值 ${String(value)}，回落为 strategy`);
+        value = 'strategy';
       }
       if (key === 'strategyName' && (typeof value !== 'string' || !/^[a-z][a-z0-9_]*$/.test(value))) {
         this.logger.warn(`配置项 strategyName 非法值 ${String(value)}，回落为 trend_following`);

@@ -11,6 +11,7 @@ import {
   ContextInsight,
   NEUTRAL_CONTEXT_INSIGHT,
   StrategyContext,
+  StrategyOutput,
   buildSignals,
   computeIndicators,
   mapInsightToParams,
@@ -21,9 +22,9 @@ import {
 import { Repository } from 'typeorm';
 import { AgentDecisionEntity } from '../database/entities';
 import { AgentConfigService } from './agent-config.service';
-import { LlmClient, LlmDecision, LlmResult } from './llm.client';
+import { LlmClient, LlmResult } from './llm.client';
 import { StrategyService } from './strategy.service';
-import { buildContextPrompt, buildUserPrompt } from './prompt';
+import { buildContextPrompt } from './prompt';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
 import { AccountService } from '../account/account.service';
@@ -51,16 +52,17 @@ const RETRY_BACKOFF_MAX_MS = 10 * 60 * 1000;
 
 /** 一次链路分派的产出：决策本体 + 归因元数据（落库字段来源） */
 interface LaneDecision {
-  /** 链路归属：strategy 链路记 'strategy'；llm 链路（含降级到策略）记 'llm' */
+  /** 链路归属：strategy=纯策略；hybrid=AI 上下文 + 策略执行 */
   lane: DecisionLane;
-  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  /** 实际产出决策的策略名（两条链路都由策略执行） */
   strategyName: string | null;
-  decision: LlmDecision;
+  /** 决策本体：统一由策略产出（AI 不再直出买卖指令） */
+  decision: StrategyOutput;
   degraded: boolean;
   degradeReason: string | null;
-  /** llm 链路才有：供落库 llmRaw/llmReasoning/llmModel/llmUsage */
+  /** hybrid 链路才有：供落库 llmRaw/llmReasoning/llmModel/llmUsage（记录上下文分析） */
   llmResult: LlmResult | null;
-  /** 仅 llm 链路构建；strategy 链路为空串。hybrid 链路存上下文 prompt */
+  /** strategy 链路为空串；hybrid 链路存上下文 prompt */
   prompt: string;
 
   /** 出场规则触发时为 true：卖出全部持仓（而非按 positionPct 部分卖出） */
@@ -317,77 +319,21 @@ export class AgentEngine {
    * 按配置的决策链路（decisionLane）产出决策。
    *
    * - strategy：纯策略链路，零 LLM 参与（不读 key、不发请求、零 token 成本）
-   * - llm：AI 决策，失败按 llmFailurePolicy 处理（hold / strategy / skip）
    * - hybrid：AI 输出上下文元参数（1 小时 TTL 缓存），纯函数映射为策略参数后
    *   由确定性策略执行；AI 失败/过期回落中性默认参数，交易不停摆
+   *
+   * 注：原 llm 链路（AI 直出 BUY/SELL/HOLD）已移除——不可回测、不可复现、失败不可预测。
+   * 两条链路都由确定性策略执行买卖，区别仅在于策略参数是否经 AI 元参数调节。
    */
   private async produceDecision(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
   ): Promise<LaneDecision> {
-    if (config.decisionLane === 'strategy') {
-      return this.buildStrategyLane(config, snapshot);
-    }
+    // 兼容存量数据中已废弃的 'llm' 值：按 strategy 处理（策略执行，零 LLM 直出）
     if (config.decisionLane === 'hybrid') {
       return this.buildHybridLane(config, snapshot);
     }
-
-    // ---- llm 链路 ----
-    const prompt = buildUserPrompt(snapshot);
-    const llmResult = await this.llm.decide(
-      config.systemPrompt,
-      prompt,
-      config.model,
-      config.temperature,
-      config.maxTokens,
-    );
-
-    if (llmResult.ok && llmResult.data) {
-      return {
-        lane: 'llm',
-        strategyName: null,
-        decision: llmResult.data,
-        degraded: false,
-        degradeReason: null,
-        llmResult,
-        prompt,
-      };
-    }
-
-    const degradeReason = llmResult.error ?? '模型不可用';
-    switch (config.llmFailurePolicy) {
-      case 'skip':
-        // 抛错 → runOnce catch → recordFailure 退避/熔断，本轮不落库
-        throw new Error(`LLM 不可用且 llmFailurePolicy=skip，已跳过本次决策：${degradeReason}`);
-
-      case 'strategy': {
-        // 降级到策略执行：链路归属仍记 llm，配合 degraded=true 与 strategyName 可唯一归因
-        const lane = await this.buildStrategyLane(config, snapshot);
-        return {
-          ...lane,
-          lane: 'llm',
-          degraded: true,
-          degradeReason: `LLM 失败降级到策略：${degradeReason}`,
-        };
-      }
-
-      case 'hold':
-      default:
-        return {
-          lane: 'llm',
-          strategyName: null,
-          llmResult,
-          prompt,
-          degraded: true,
-          degradeReason,
-          decision: {
-            action: 'HOLD',
-            confidence: 0,
-            reason: `模型不可用（${degradeReason}），按 llmFailurePolicy=hold 强制观望。`,
-            riskNotes: 'LLM 失败保守观望，未执行下单。',
-          },
-        };
-    }
+    return this.buildStrategyLane(config, snapshot);
   }
 
   /**
@@ -457,7 +403,7 @@ export class AgentEngine {
     };
   }
 
-  /** 构造纯策略链路的决策（strategy 链路本体，也供 llm 链路 llmFailurePolicy=strategy 降级复用） */
+  /** 构造纯策略链路的决策（strategy 链路本体，hybrid 链路也复用本方法执行买卖） */
   private async buildStrategyLane(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
@@ -547,7 +493,7 @@ export class AgentEngine {
   private async execute(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
-    decision: LlmDecision,
+    decision: StrategyOutput,
     decisionId: string,
     closeAll = false,
     positionMultiplier?: number,
@@ -669,7 +615,8 @@ export class AgentEngine {
       action: entity.action,
       confidence: entity.confidence,
       reason: entity.reason,
-      lane: entity.lane ?? 'llm',
+      // 存量数据可能残留已废弃的 'llm'（AI 直出链路），读时归一为 strategy
+      lane: entity.lane === 'hybrid' ? 'hybrid' : 'strategy',
       strategyName: entity.strategyName ?? null,
       degraded: entity.degraded,
       degradeReason: entity.degradeReason ?? null,

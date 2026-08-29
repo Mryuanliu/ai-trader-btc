@@ -242,7 +242,7 @@ export function useDecisions(params: {
 export interface LaneStats {
   total: number;
   degradedTotal: number;
-  lanes: { lane: 'llm' | 'strategy' | 'hybrid'; count: number; degraded: number; buys: number; sells: number; holds: number }[];
+  lanes: { lane: 'strategy' | 'hybrid'; count: number; degraded: number; buys: number; sells: number; holds: number }[];
 }
 
 export function useLaneStats() {

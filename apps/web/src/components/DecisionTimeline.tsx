@@ -84,7 +84,7 @@ export function DecisionTimeline({ record }: { record: DecisionRecord }) {
       key: 'llm',
       title: '模型调用',
       summary: record.degraded
-        ? `已降级为纯指标策略：${record.degradeReason ?? '模型不可用'}`
+        ? `AI 上下文回落默认参数：${record.degradeReason ?? '模型不可用'}（策略继续执行，不停摆）`
         : [
             `动作 ${record.action}`,
             `置信度 ${(record.confidence * 100).toFixed(0)}%`,

@@ -177,6 +177,38 @@ AI 输出：trendStrength=0.72, aggression=0.8, newsSentiment=+0.3
 
 ---
 
+### Q7（2026-08-30）：接入币安 U 本位合约，如何架构？
+
+**用户**：要做 BTCUSDT 合约、3~5 倍杠杆。明确要求：
+「合约下单也可以自行选策略，和现货可以保持一致，杠杆默认 5 倍，默认开启。
+应该新建独立的合约链路。整体链路要有公用部分也要有差异部分——
+**能力上独立，架构上关联，可以拓展，可插拔**。」
+
+**关键事实核实（已实测）**：
+- 币安 U 本位合约测试环境 REST baseurl = **`https://demo-fapi.binance.com`**，WS = `wss://demo-fstream.binance.com`
+- **合约 demo = 合约 testnet**（同一环境，官方把测试网域名就叫 demo-fapi），区别于现货 demo/testnet 两个环境
+- **实测验证**：用现有 binance demo key 直连 `demo-fapi.binance.com`，`/fapi/v1/time`、`/fapi/v2/account`、`/fapi/v2/positionRisk`、`/fapi/v1/income` 全部 HTTP 200 → **现货合约同一个 key 通用，无需单独合约 key**（前提是 demo 门户勾了"启用未来(合约)"权限）
+- 账号有 5000 USDT 虚拟资金；当前为全仓 cross、杠杆 20（方案用逐仓 isolated，下单时切换）
+
+**架构主张（回答用户"能力独立、架构关联"）**：
+- **纵向（决策链）公用，横向（市场能力）隔离**
+- L0 数据 / L1 AI上下文 / L2 信号 / L3 决策（策略插件）→ **完全共用**（合约复用现有 `StrategyRegistry`、`decisionLane` 三态、hybrid AI 元参数映射）
+- L4 执行 / L5 风控 / L6 持仓 → **各自独立实现**，通过 `MarketExecutor` 接口抽象可插拔
+- 新增第三个市场（如期权）只需实现 L4~L6 + register
+
+**决策语义映射**（策略输出不变，仍是 BUY/SELL/HOLD）：
+- 现货：BUY=买，SELL=卖（只能多）
+- 合约：无持仓时 BUY=**开多**、SELL=**开空**；有持仓时反向信号先平仓（`reduceOnly`）
+
+**AI 在合约上的增强**：复用 hybrid 链路（AI 元参数 → 策略参数）；
+额外把 `aggression`（激进度）映射为**杠杆调节**（保守降杠杆、激进加杠杆），
+保持"AI 不直接下达买卖指令"原则。
+
+**最终方案**：见 `docs/futures-phase1-plan.md`（重写为最终版 v-final，含 6 层架构、
+MarketExecutor 接口、公用/差异对照矩阵、8 个 Commit 划分）。
+
+---
+
 ## 3. 已经落地的相关工程事实（供新智能体参考）
 
 以下不是本方案新增，而是此前已完成、与本方案相关的基座能力：

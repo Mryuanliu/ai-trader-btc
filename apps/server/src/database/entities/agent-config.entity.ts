@@ -78,19 +78,15 @@ export class AgentConfigEntity {
   dailyLossLimit: number;
 
   /** 行情或 LLM 降级时的行为：hold 强制观望（默认）/ signal 沿用兜底信号
-   *  @deprecated 已废弃，由 llmFailurePolicy 承接；strategy 链路忽略本字段 */
+   *  @deprecated 已废弃，仅保留列以兼容存量数据，新代码不再读取 */
   @Column({ type: 'varchar', length: 16, default: DEFAULT_AGENT_CONFIG.degradedAction })
   degradedAction: 'hold' | 'signal';
 
-  /** 决策链路开关（hybrid 将在阶段 5 开放） */
+  /** 决策链路开关：strategy=纯策略（零 LLM）；hybrid=AI 上下文 + 策略执行 */
   @Column({ type: 'varchar', length: 16, default: DEFAULT_AGENT_CONFIG.decisionLane })
   decisionLane: AgentConfigShape['decisionLane'];
 
-  /** 仅 llm 链路生效：LLM 失败后的行为 */
-  @Column({ type: 'varchar', length: 16, default: DEFAULT_AGENT_CONFIG.llmFailurePolicy })
-  llmFailurePolicy: AgentConfigShape['llmFailurePolicy'];
-
-  /** strategy 链路使用的策略 */
+  /** 策略使用的策略名（两条链路都由策略执行买卖） */
   @Column({ type: 'varchar', length: 32, default: DEFAULT_AGENT_CONFIG.strategyName })
   strategyName: string;
 

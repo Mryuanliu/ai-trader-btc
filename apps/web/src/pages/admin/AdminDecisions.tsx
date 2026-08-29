@@ -27,13 +27,13 @@ const ACTIONS: { label: string; value: string }[] = [
 
 const LANES: { label: string; value: string }[] = [
   { label: '全部链路', value: 'ALL' },
-  { label: 'AI 决策', value: 'llm' },
   { label: '纯策略', value: 'strategy' },
   { label: '混合', value: 'hybrid' },
 ];
 
 const LANE_LABELS: Record<string, string> = {
-  llm: 'AI 决策',
+  // llm 链路已移除，仅用于存量历史记录的兼容展示
+  llm: 'AI 直出（已废弃）',
   strategy: '纯策略',
   hybrid: '混合',
 };
@@ -218,12 +218,9 @@ export function AdminDecisions() {
             {detail.data?.lane === 'strategy' ? (
               <Tag color="green">策略{detail.data.strategyName ? ` · ${detail.data.strategyName}` : ''}</Tag>
             ) : null}
-            {detail.data?.lane === 'llm' && detail.data.degraded ? (
-              detail.data.strategyName ? (
-                <Tag color="orange">降级策略</Tag>
-              ) : (
-                <Tag color="orange">失败观望</Tag>
-              )
+            {/* 降级标记（AI 上下文回落默认参数 / 出场规则等） */}
+            {detail.data?.degraded && !detail.data.degradeReason?.startsWith('出场规则触发') ? (
+              <Tag color="orange">降级{detail.data.strategyName ? ` · ${detail.data.strategyName}` : ''}</Tag>
             ) : null}
             {detail.data && !detail.data.degraded && detail.data.llmModel ? (
               <Tag color="geekblue">{detail.data.llmModel}</Tag>

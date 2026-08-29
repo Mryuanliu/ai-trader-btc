@@ -2,19 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { ContextInsight, DecisionAction } from '@ai-trader/shared';
+import { ContextInsight } from '@ai-trader/shared';
 import { isTruthy } from '../common/env.util';
 
-export const DecisionSchema = z.object({
-  action: z.enum(['BUY', 'SELL', 'HOLD']),
-  confidence: z.number().min(0).max(1),
-  reason: z.string().min(1),
-  riskNotes: z.string().optional(),
-});
-
-export type LlmDecision = z.infer<typeof DecisionSchema> & { action: DecisionAction };
-
-/** 阶段 5：AI 上下文分析输出（元参数，非买卖指令） */
+/**
+ * AI 上下文分析输出（元参数，非买卖指令）。
+ * 注：原让模型直出 BUY/SELL/HOLD 的 DecisionSchema 已移除——
+ * AI 不再下达买卖指令，只提供市场上下文，由策略执行（分层裁决）。
+ */
 export const ContextInsightSchema = z.object({
   regime: z.enum(['trending', 'ranging', 'volatile']),
   regimeConfidence: z.number().min(0).max(1),
@@ -26,7 +21,6 @@ export const ContextInsightSchema = z.object({
 
 export interface LlmResult {
   ok: boolean;
-  data?: LlmDecision;
   /** 模型正式回答（content） */
   raw: string | null;
   /**
@@ -69,84 +63,10 @@ export class LlmClient {
     return this.client;
   }
 
-  async decide(system: string, user: string, model: string, temperature: number, maxTokens: number): Promise<LlmResult> {
-    if (!this.available) {
-      return { ok: false, raw: null, error: '未配置 LLM_API_KEY，已降级为纯指标策略' };
-    }
-    if (Date.now() < this.cooldownUntil) {
-      return { ok: false, raw: null, error: '模型调用处于冷却期' };
-    }
-
-    const client = this.getClient();
-    if (!client) return { ok: false, raw: null, error: '模型客户端初始化失败' };
-
-    try {
-      const completion = await client.chat.completions.create({
-        model,
-        temperature,
-        max_tokens: maxTokens,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-      });
-      const message = completion.choices?.[0]?.message as unknown as Record<string, string>;
-      const raw = message?.content ?? '';
-      const reasoning = message?.reasoning_content ?? null;
-
-      // 推理模型可能只回思维链而把正文留空，这里做兜底提取
-      let parsed = this.parse(raw);
-      let source: 'content' | 'reasoning' = 'content';
-      if (!parsed && reasoning) {
-        parsed = this.parse(reasoning);
-        source = 'reasoning';
-      }
-
-      const usage = completion.usage
-        ? {
-            promptTokens: completion.usage.prompt_tokens ?? 0,
-            completionTokens: completion.usage.completion_tokens ?? 0,
-            totalTokens: completion.usage.total_tokens ?? 0,
-          }
-        : null;
-
-      if (!parsed) {
-        this.logger.warn(
-          `模型输出无法解析，已降级：content=${raw.slice(0, 120)} reasoning=${(reasoning ?? '').slice(0, 120)}`,
-        );
-        return {
-          ok: false,
-          raw,
-          reasoning,
-          model: completion.model ?? model,
-          usage,
-          error: '模型输出不是合法 JSON 决策',
-        };
-      }
-
-      this.logger.log(
-        `模型裁决：${parsed.action} 置信度 ${parsed.confidence}（来源=${source}，模型=${completion.model ?? model}，tokens=${usage?.totalTokens ?? '-'}）`,
-      );
-      return {
-        ok: true,
-        data: parsed,
-        raw,
-        reasoning,
-        model: completion.model ?? model,
-        usage,
-      };
-    } catch (err) {
-      // 失败后冷却 60s，避免每个决策周期都卡在超时上
-      this.cooldownUntil = Date.now() + 60_000;
-      const message = (err as Error).message;
-      this.logger.warn(`模型调用失败，进入 60s 冷却：${message}`);
-      return { ok: false, raw: null, error: message };
-    }
-  }
-
   /**
-   * 阶段 5 · hybrid 链路：让模型输出市场上下文元参数（非买卖指令）。
-   * 与 decide() 共享客户端与冷却机制；解析失败按 LlmResult.ok=false 处理。
+   * hybrid 链路：让模型输出市场上下文元参数（非买卖指令）。
+   * AI 不输出 BUY/SELL，只输出 regime/aggression/情绪等元参数，由策略执行买卖。
+   * 解析失败按 ok=false 处理，调用方回落到中性默认参数，策略继续运行。
    */
   async analyzeContext(
     system: string,
@@ -211,26 +131,6 @@ export class LlmClient {
         const json = JSON.parse(candidate);
         const result = ContextInsightSchema.safeParse(json);
         if (result.success) return result.data as ContextInsight;
-      } catch {
-        /* 继续尝试下一个候选 */
-      }
-    }
-    return null;
-  }
-
-  /** 容错解析：直接 JSON.parse，失败则截取第一个 JSON 代码块 */
-  private parse(raw: string): LlmDecision | null {
-    if (!raw) return null;
-    const trimmed = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-    const candidates = [trimmed];
-    const match = trimmed.match(/\{[\s\S]*\}/);
-    if (match) candidates.push(match[0]);
-
-    for (const candidate of candidates) {
-      try {
-        const json = JSON.parse(candidate);
-        const result = DecisionSchema.safeParse(json);
-        if (result.success) return result.data as LlmDecision;
       } catch {
         /* 继续尝试下一个候选 */
       }

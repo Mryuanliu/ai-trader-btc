@@ -27,7 +27,6 @@ import {
   strategyRegistry,
   type AgentConfigShape,
   type DecisionLane,
-  type LlmFailurePolicy,
   type RunMode,
 } from '@ai-trader/shared';
 import {
@@ -46,16 +45,11 @@ const MODE_OPTIONS: { label: string; value: RunMode }[] = [
   { label: '实盘', value: 'live' },
 ];
 
+// 注：原「AI 决策」（AI 直出 BUY/SELL）链路已移除——不可回测、不可复现。
+// 两条链路的买卖都由确定性策略执行，区别仅在于策略参数是否经 AI 元参数调节。
 const LANE_OPTIONS: { label: string; value: DecisionLane }[] = [
-  { label: 'AI 决策', value: 'llm' },
   { label: '纯策略', value: 'strategy' },
   { label: '混合', value: 'hybrid' },
-];
-
-const LLM_FAILURE_OPTIONS: { label: string; value: LlmFailurePolicy }[] = [
-  { label: '失败观望（推荐）', value: 'hold' },
-  { label: '失败降级到策略', value: 'strategy' },
-  { label: '失败跳过本轮', value: 'skip' },
 ];
 
 export function AdminAgentConfig() {
@@ -226,36 +220,27 @@ export function AdminAgentConfig() {
               <Form.Item
                 name="decisionLane"
                 label={
-                  <Tooltip title="llm=AI 直出决策；strategy=纯技术指标策略，零 LLM 成本；hybrid=AI 只输出市场状态元参数（1 小时缓存），映射为策略参数后由策略执行，AI 挂掉自动回落中性默认参数不停摆">
+                  <Tooltip title="strategy=纯技术指标策略，零 LLM 成本；hybrid=AI 只输出市场状态元参数（1 小时缓存），映射为策略参数后由策略执行，AI 挂掉自动回落中性默认参数不停摆。两条链路的买卖都由策略执行，AI 不直出买卖指令">
                     <span className="border-b border-dashed border-white/25">决策链路</span>
                   </Tooltip>
                 }
               >
                 <Segmented options={LANE_OPTIONS} />
               </Form.Item>
-              {laneValue !== 'llm' ? (
-                <Form.Item
-                  name="strategyName"
-                  label="策略"
-                  tooltip={laneValue === 'hybrid' ? 'hybrid 链路由该策略执行交易，AI 只调节其参数' : undefined}
-                >
-                  <Select
-                    options={strategyOptions.map((s) => ({
-                      label: `${s.label}（${s.name}）`,
-                      value: s.name,
-                    }))}
-                  />
-                </Form.Item>
-              ) : (
-                <Form.Item
-                  name="llmFailurePolicy"
-                  label="LLM 失败时的行为"
-                  tooltip="仅 AI 链路生效"
-                >
-                  <Select options={LLM_FAILURE_OPTIONS} />
-                </Form.Item>
-              )}
-              {laneValue !== 'llm' && currentStrategy?.paramSchema ? (
+              {/* 两条链路由策略执行，策略选择器始终显示 */}
+              <Form.Item
+                name="strategyName"
+                label="策略"
+                tooltip={laneValue === 'hybrid' ? 'hybrid 链路由该策略执行交易，AI 只调节其参数' : 'strategy 链路由该策略全权决策，零 LLM 参与'}
+              >
+                <Select
+                  options={strategyOptions.map((s) => ({
+                    label: `${s.label}（${s.name}）`,
+                    value: s.name,
+                  }))}
+                />
+              </Form.Item>
+              {currentStrategy?.paramSchema ? (
                 <>
                   <div className="mb-1 mt-2 text-[12px] text-subtle">策略参数</div>
                   <Row gutter={12}>

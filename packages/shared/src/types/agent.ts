@@ -96,11 +96,11 @@ export interface DecisionRecord {
   llmModel: string | null;
   /** token 用量 */
   llmUsage: { prompt: number; completion: number; total: number } | null;
-  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
+  /** 决策链路：strategy=纯策略；hybrid=AI 上下文 + 策略执行（存量可能有已废弃的 'llm'） */
   lane: DecisionLane;
-  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  /** 实际产出决策的策略名（两条链路都由策略执行） */
   strategyName?: string | null;
-  /** LLM 不可用/解析失败时降级为纯指标 */
+  /** 降级标记（如 AI 上下文不可用、出场规则触发等非本体决策） */
   degraded: boolean;
   degradeReason?: string | null;
   risk: DecisionRiskVerdict;
@@ -115,11 +115,11 @@ export interface DecisionSummary {
   action: DecisionAction;
   confidence: number;
   reason: string;
-  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
+  /** 决策链路：strategy=纯策略；hybrid=AI 上下文 + 策略执行（存量可能有已废弃的 'llm'） */
   lane: DecisionLane;
-  /** LLM 失败/出场规则触发等非本体决策的降级原因 */
+  /** AI 上下文不可用/出场规则触发等非本体决策的降级原因 */
   degradeReason?: string | null;
-  /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */
+  /** 实际产出决策的策略名 */
   strategyName?: string | null;
   degraded: boolean;
   riskPassed: boolean;
@@ -135,11 +135,15 @@ export interface DecisionSummary {
   llmUsage?: { prompt: number; completion: number; total: number } | null;
 }
 
-/** 决策链路：llm=AI 直出决策；strategy=纯策略（零 LLM 参与）；hybrid=AI 提供上下文、策略执行（阶段 5） */
-export type DecisionLane = 'llm' | 'strategy' | 'hybrid';
-
-/** 仅 llm 链路生效：LLM 失败后的处理。hold=强制观望；strategy=降级到纯策略；skip=跳过本轮 */
-export type LlmFailurePolicy = 'hold' | 'strategy' | 'skip';
+/**
+ * 决策链路。
+ * - strategy：纯策略决策，零 LLM 参与
+ * - hybrid：AI 仅提供市场上下文（元参数），由策略执行买卖（推荐）
+ *
+ * 注：原 'llm'（AI 直出 BUY/SELL/HOLD）链路已废弃移除——
+ * 不可回测、不可复现、成本高，且失败不可预测。存量数据中仍可能有 lane='llm' 的历史记录。
+ */
+export type DecisionLane = 'strategy' | 'hybrid';
 
 /** 策略标识。开放字符串：策略是插件式集合，运行时合法性由 StrategyRegistry 校验 */
 export type StrategyName = 'trend_following' | (string & {});
@@ -185,15 +189,13 @@ export interface AgentConfigShape {
    * - hold：强制观望（默认，最安全）
    * - signal：沿用纯指标兜底信号，仍可能下单
    *
-   * @deprecated 已废弃，由 llmFailurePolicy 承接「LLM 失败怎么办」的职责；
-   * strategy 链路完全忽略本字段。仅保留列以兼容存量数据。
+   * @deprecated 已彻底废弃，新代码不再读取；仅保留列以兼容存量数据。
+   * 两条链路（strategy/hybrid）都由策略执行买卖，不存在「LLM 失败怎么办」的问题。
    */
   degradedAction: 'hold' | 'signal';
-  /** 决策链路开关：llm=AI 直出决策；strategy=纯策略；hybrid=AI 上下文 + 策略执行 */
+  /** 决策链路开关：strategy=纯策略（零 LLM）；hybrid=AI 上下文 + 策略执行 */
   decisionLane: DecisionLane;
-  /** 仅 llm 链路生效：LLM 失败后的行为，承接原 degradedAction 职责 */
-  llmFailurePolicy: LlmFailurePolicy;
-  /** strategy 链路使用的策略，由 StrategyRegistry 校验 */
+  /** 策略使用的策略名，由 StrategyRegistry 校验（两条链路都用策略执行） */
   strategyName: StrategyName;
   /** 策略专属参数，由各策略 normalizeParams 校验合并 */
   strategyParams: Record<string, unknown>;
@@ -236,10 +238,11 @@ export const DEFAULT_AGENT_CONFIG: AgentConfigShape = {
   minOrderIntervalSec: 60,
   dailyLossLimit: 500,
   // 降级时强制观望：兜底的纯指标策略未经回测验证，不应接管真实资金
-  // @deprecated 由 llmFailurePolicy 承接
+  // @deprecated 仅保留列以兼容存量数据，新代码不再读取
   degradedAction: 'hold',
-  decisionLane: 'llm',
-  llmFailurePolicy: 'hold',
+  // 默认 hybrid：AI 只提供市场上下文（元参数），买卖由策略执行。
+  // AI 不可用时会回落中性默认参数，策略继续运行，不停摆。
+  decisionLane: 'hybrid',
   strategyName: 'trend_following',
   strategyParams: {},
   slippageBps: 5,

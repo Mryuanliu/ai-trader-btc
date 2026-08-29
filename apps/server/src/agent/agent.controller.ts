@@ -130,17 +130,12 @@ class UpdateAgentConfigDto implements Partial<AgentConfigShape> {
   @IsString()
   degradedAction?: AgentConfigShape['degradedAction'];
 
-  /** 决策链路开关（hybrid 暂不接受，service 层归一为 llm） */
+  /** 决策链路开关：strategy=纯策略；hybrid=AI 上下文 + 策略执行 */
   @IsOptional()
-  @IsIn(['llm', 'strategy', 'hybrid'])
+  @IsIn(['strategy', 'hybrid'])
   decisionLane?: AgentConfigShape['decisionLane'];
 
-  /** 仅 llm 链路生效：LLM 失败后的行为 */
-  @IsOptional()
-  @IsIn(['hold', 'strategy', 'skip'])
-  llmFailurePolicy?: AgentConfigShape['llmFailurePolicy'];
-
-  /** strategy 链路使用的策略 */
+  /** 策略使用的策略名（两条链路都由策略执行买卖） */
   @IsOptional()
   @IsString()
   @MaxLength(32)
@@ -245,7 +240,7 @@ export class AgentController {
       action,
       executedOnly: executedOnly === 'true',
       keyword,
-      lane: lane === 'llm' || lane === 'strategy' || lane === 'hybrid' ? lane : undefined,
+      lane: lane === 'strategy' || lane === 'hybrid' ? lane : undefined,
     });
   }
 
@@ -268,7 +263,8 @@ export class AgentController {
       confidence: entity.confidence,
       reason: entity.reason,
       riskNotes: entity.riskNotes,
-      lane: entity.lane ?? 'llm',
+      // 存量数据可能残留已废弃的 'llm'（AI 直出链路），读时归一为 strategy
+      lane: entity.lane === 'hybrid' ? 'hybrid' : 'strategy',
       strategyName: entity.strategyName ?? null,
       inputSnapshot: entity.inputSnapshot,
       prompt: entity.prompt,
