@@ -1,0 +1,12 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# pnpm 11 起用 allowBuilds 声明允许执行安装脚本的依赖
+# 也可直接执行：`pnpm approve-builds --all`
+allowBuilds:
+  esbuild: true
+  '@nestjs/core': true
+
+# 运行脚本前不自动触发 install，避免开发时反复校验依赖
+verifyDepsBeforeRun: false

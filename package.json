@@ -1,0 +1,22 @@
+{
+  "name": "ai-trader-btc",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "shared:build": "pnpm -F @ai-trader/shared build",
+    "dev": "pnpm shared:build && pnpm -r --parallel dev",
+    "dev:server": "pnpm shared:build && pnpm -F @ai-trader/server dev",
+    "dev:web": "pnpm shared:build && pnpm -F @ai-trader/web dev",
+    "build": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' build",
+    "start": "pnpm -F @ai-trader/server start:prod",
+    "typecheck": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' typecheck",
+    "db:init": "psql -d postgres -h localhost -f scripts/init-db.sql"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}
