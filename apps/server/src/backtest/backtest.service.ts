@@ -34,11 +34,29 @@ export interface BacktestRequestDto {
   autoBackfill?: boolean;
 }
 
+/** 回测执行进度（供前端轮询展示） */
+export interface BacktestProgress {
+  stage: 'loading' | 'backfill' | 'compute';
+  /** 0~100 */
+  pct: number;
+  detail: string;
+}
+
 @Injectable()
 export class BacktestService {
   private readonly logger = new Logger(BacktestService.name);
   /** 防止并发回测打爆 DB / 交易所 */
   private running = false;
+  /** 当前回测进度；空闲为 null */
+  private progress: BacktestProgress | null = null;
+
+  getProgress(): BacktestProgress | null {
+    return this.progress;
+  }
+
+  private setProgress(stage: BacktestProgress['stage'], pct: number, detail: string): void {
+    this.progress = { stage, pct: Math.round(pct), detail };
+  }
 
   constructor(
     @InjectRepository(MarketCandleEntity)
@@ -50,10 +68,15 @@ export class BacktestService {
       throw new BusinessException('BAD_REQUEST','已有回测在运行中，请稍后再试');
     }
     this.running = true;
+    this.progress = { stage: 'loading', pct: 0, detail: '加载 K 线…' };
     try {
-      return await this.doRun(dto);
+      const report = await this.doRun(dto);
+      this.progress = { stage: 'compute', pct: 100, detail: '完成' };
+      return report;
     } finally {
       this.running = false;
+      // 延迟清空：给前端最后一次轮询留 ~2s 读到 100%，之后空闲
+      setTimeout(() => (this.progress = null), 2000);
     }
   }
 
@@ -99,7 +122,10 @@ export class BacktestService {
       this.logger.log(
         `HTTP 回测：库内 ${symbol} ${interval} 仅 ${candles.length}/${expectedBars} 根，回填中…`,
       );
-      await backfill(this.candleRepo, symbol, interval, from, to);
+      this.setProgress('backfill', 0, `从交易所回填 0/${expectedBars} 根`);
+      await backfill(this.candleRepo, symbol, interval, from, to, (fetched, expected) => {
+        this.setProgress('backfill', (fetched / expected) * 100, `从交易所回填 ${fetched}/${expected} 根`);
+      });
       candles = await loadRange(this.candleRepo, symbol, interval, from, to);
     }
     if (candles.length <= config.warmupBars + 2) {
@@ -108,7 +134,10 @@ export class BacktestService {
       );
     }
 
-    const report = runBacktest(candles, strategy, config);
+    this.setProgress('compute', 0, `逐根回放 ${candles.length} 根 K 线`);
+    const report = await runBacktest(candles, strategy, config, (done, total) => {
+      this.setProgress('compute', (done / total) * 100, `逐根回放 ${done}/${total}`);
+    });
     // 大区间 1m 回测成交可能数万笔：HTTP 响应只带最近 2000 笔，避免响应体积失控
     const tradesTruncated = report.trades.length > MAX_TRADES;
     return {

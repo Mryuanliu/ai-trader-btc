@@ -41,12 +41,15 @@ export async function backfill(
   interval: Timeframe,
   from: number,
   to: number,
+  onProgress?: (fetched: number, expected: number) => void,
 ): Promise<number> {
   const adapter = new BinanceAdapter('live', '', '');
   const stepMs = intervalStepMs(interval);
   let inserted = 0;
   let cursor = from;
 
+  const expectedTotal = Math.max(1, Math.floor((to - from) / stepMs) + 1);
+  let fetchedTotal = 0;
   while (cursor < to) {
     // 代理链路偶发 ECONNRESET：单批重试而不是让整个回填失败（此前一批失败即全盘报废）
     let batch: Candle[] | null = null;
@@ -87,6 +90,8 @@ export async function backfill(
       .execute();
 
     inserted += batch.length;
+    fetchedTotal += batch.length;
+    onProgress?.(Math.min(fetchedTotal, expectedTotal), expectedTotal);
     const lastTime = batch.at(-1)!.time;
     if (lastTime <= cursor) break; // 防御：交易所返回未推进则退出
     cursor = lastTime + stepMs;

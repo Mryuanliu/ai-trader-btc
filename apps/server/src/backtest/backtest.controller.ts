@@ -25,4 +25,10 @@ export class BacktestController {
   run(@Body() dto: BacktestRequestDto) {
     return this.backtest.run(dto);
   }
+
+  /** 当前回测执行进度（轮询用；空闲返回 null） */
+  @Get('progress')
+  progress() {
+    return this.backtest.getProgress();
+  }
 }

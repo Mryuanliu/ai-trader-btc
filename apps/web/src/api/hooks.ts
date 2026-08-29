@@ -324,9 +324,25 @@ export function useBacktestStrategies() {
   });
 }
 
+export interface BacktestProgressDTO {
+  stage: 'loading' | 'backfill' | 'compute';
+  pct: number;
+  detail: string;
+}
+
 export function useRunBacktest() {
   return useMutation<BacktestReportDTO, Error, BacktestRequest>({
     mutationFn: (req) => http.post('/backtest/run', req),
+  });
+}
+
+/** 回测执行进度：仅在回测 pending 时轮询（后端计算分块让出事件循环，轮询才有响应） */
+export function useBacktestProgress(enabled: boolean) {
+  return useQuery<BacktestProgressDTO | null>({
+    queryKey: ['backtest-progress'],
+    queryFn: () => http.get('/backtest/progress'),
+    refetchInterval: 300,
+    enabled,
   });
 }
 

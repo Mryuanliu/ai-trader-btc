@@ -20,11 +20,17 @@ import type { BacktestConfig, BacktestReport, BacktestTrade, EquityPoint } from 
  * 成交口径：第 i 根收盘决策，以第 i+1 根开盘价成交（加滑点），
  * 无前视偏差且相对实盘偏保守。
  */
-export function runBacktest(
+/**
+ * 回测主函数（纯计算、确定性不变）。
+ * async + 分块让出事件循环：仅供 HTTP 服务运行时把进度回调与轮询请求调度进来，
+ * CLI/测试场景传或不传 onProgress 结果完全一致。
+ */
+export async function runBacktest(
   candles: Candle[],
   strategy: Strategy,
   config: BacktestConfig,
-): BacktestReport {
+  onProgress?: (done: number, total: number) => void,
+): Promise<BacktestReport> {
   const WINDOW = 200; // 与实盘 HISTORY_LIMIT 对齐
   const slippage = config.slippageBps / 10_000;
   const feeRate = config.feeRateBps / 10_000;
@@ -37,6 +43,7 @@ export function runBacktest(
     { time: candles[0]?.time ?? 0, equity: config.initialCapital, drawdownPct: 0 },
   ];
 
+  const totalBars = Math.max(1, candles.length - 1 - config.warmupBars);
   for (let i = config.warmupBars; i < candles.length - 1; i++) {
     // ---- 在第 i 根收盘时构造上下文并决策 ----
     const window = candles.slice(Math.max(0, i - WINDOW + 1), i + 1);
@@ -134,6 +141,12 @@ export function runBacktest(
       equity: Number(equity.toFixed(2)),
       drawdownPct: 0,
     });
+
+    // 每 500 根报告一次进度并让出事件循环（确定性不受影响：只是调度，不改计算顺序）
+    if (onProgress && (i - config.warmupBars) % 500 === 0) {
+      onProgress(i - config.warmupBars, totalBars);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 
   // 权益点回撤与成交后权益回填

@@ -6,6 +6,7 @@ import {
   DatePicker,
   Form,
   InputNumber,
+  Progress,
   Row,
   Select,
   Skeleton,
@@ -30,7 +31,12 @@ import {
   YAxis,
 } from 'recharts';
 import { TIMEFRAMES, TIMEFRAME_LABELS, type Timeframe } from '@ai-trader/shared';
-import { useBacktestStrategies, useRunBacktest, type BacktestReportDTO } from '@/api/hooks';
+import {
+  useBacktestProgress,
+  useBacktestStrategies,
+  useRunBacktest,
+  type BacktestReportDTO,
+} from '@/api/hooks';
 import { formatTime } from '@/utils/format';
 
 /** 参数 schema 的 properties 项（策略内置的简化 JSON Schema） */
@@ -63,6 +69,7 @@ export function AdminBacktest() {
   const [form] = Form.useForm<FormValues>();
   const strategies = useBacktestStrategies();
   const runBacktest = useRunBacktest();
+  const progress = useBacktestProgress(runBacktest.isPending);
   const [report, setReport] = useState<BacktestReportDTO | null>(null);
 
   const strategyName = Form.useWatch('strategyName', form);
@@ -248,7 +255,18 @@ export function AdminBacktest() {
         </Form>
       </Card>
 
-      {runBacktest.isPending ? <Skeleton active paragraph={{ rows: 6 }} /> : null}
+      {runBacktest.isPending ? (
+        <Card size="small" className="glass-card">
+          <Progress
+            percent={progress.data?.pct ?? 0}
+            status="active"
+            strokeColor="#F7931A"
+          />
+          <div className="mt-1 text-[12px] text-muted">
+            {progress.data?.detail ?? '正在启动回测…'}
+          </div>
+        </Card>
+      ) : null}
 
       {report && metrics ? (
         <>

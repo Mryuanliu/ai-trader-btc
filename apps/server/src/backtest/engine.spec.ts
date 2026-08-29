@@ -58,13 +58,13 @@ function newStrategy() {
 }
 
 describe('runBacktest · 出场规则（阶段4）', () => {
-  it('止损触发：亏损达到阈值时全仓卖出，优先于策略信号', () => {
+  it('止损触发：亏损达到阈值时全仓卖出，优先于策略信号', async () => {
     // crash 起点衔接 rising 终点（~176）并跌破金字塔加仓的成本均价，止损才能触发
     const candles = [
       ...rising(210, 150, 0.5, 1_700_000_000_000),
       ...crash(10, 176, 3, 1_700_000_000_000 + 210 * 300_000),
     ];
-    const report = runBacktest(candles, newStrategy(), config({ exitRules: { stopLossPct: 0.03 } }));
+    const report = await runBacktest(candles, newStrategy(), config({ exitRules: { stopLossPct: 0.03 } }));
 
     const buys = report.trades.filter((t) => t.side === 'BUY');
     expect(buys.length).toBeGreaterThanOrEqual(1);
@@ -75,10 +75,10 @@ describe('runBacktest · 出场规则（阶段4）', () => {
     expect(stopSell!.time).toBeGreaterThan(candles[210].time);
   });
 
-  it('止盈触发：盈利达到阈值时全仓卖出', () => {
+  it('止盈触发：盈利达到阈值时全仓卖出', async () => {
     // 上涨触发 BUY → 继续上涨达到止盈
     const candles = rising(320, 100, 2, 1_700_000_000_000);
-    const report = runBacktest(candles, newStrategy(), config({ exitRules: { takeProfitPct: 0.05 } }));
+    const report = await runBacktest(candles, newStrategy(), config({ exitRules: { takeProfitPct: 0.05 } }));
 
     const sells = report.trades.filter((t) => t.side === 'SELL');
     expect(sells.length).toBeGreaterThanOrEqual(1);
@@ -86,13 +86,13 @@ describe('runBacktest · 出场规则（阶段4）', () => {
     expect(sells.some((t) => t.decisionConfidence === 1)).toBe(true);
   });
 
-  it('未配置出场规则时行为不变（默认全关）', () => {
+  it('未配置出场规则时行为不变（默认全关）', async () => {
     const candles = [
       ...rising(210, 150, 0.5, 1_700_000_000_000),
       ...crash(10, 176, 3, 1_700_000_000_000 + 210 * 300_000),
     ];
-    const withExit = runBacktest(candles, newStrategy(), config({ exitRules: { stopLossPct: 0.03 } }));
-    const withoutExit = runBacktest(candles, newStrategy(), config());
+    const withExit = await runBacktest(candles, newStrategy(), config({ exitRules: { stopLossPct: 0.03 } }));
+    const withoutExit = await runBacktest(candles, newStrategy(), config());
     // 出场单与策略单的卖出量不同（全仓 vs positionPct 部分），成交序列必然不同
     expect(withExit.trades).not.toEqual(withoutExit.trades);
   });

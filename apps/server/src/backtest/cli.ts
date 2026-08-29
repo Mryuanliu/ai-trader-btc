@@ -97,7 +97,7 @@ async function main(): Promise<void> {
       `${new Date(candles.at(-1)!.time).toISOString()}），策略=${strategy.name}`,
   );
 
-  const report = runBacktest(candles, strategy, config);
+  const report = await runBacktest(candles, strategy, config);
 
   // 报告落盘（meta 不含生成时间戳，保证确定性可 diff）
   const outDir = resolve(process.cwd(), 'reports/backtest');
