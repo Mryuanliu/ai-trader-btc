@@ -7,7 +7,7 @@
 import 'dotenv/config';
 import { AppDataSource } from './data-source';
 import { AgentConfigEntity, ExchangeAccountEntity, NewsItemEntity } from './entities';
-import { DEFAULT_AGENT_CONFIG } from '@ai-trader/shared';
+import { DEFAULT_AGENT_CONFIG, EXCHANGE_CODES, EXCHANGE_LABELS } from '@ai-trader/shared';
 
 const SEED_NEWS = [
   {
@@ -69,10 +69,8 @@ async function main() {
 
   // 2. 交易所账户占位
   const accountRepo = AppDataSource.getRepository(ExchangeAccountEntity);
-  for (const [code, label] of [
-    ['binance', '币安 Binance'],
-    ['okx', '欧意 OKX'],
-  ] as const) {
+  for (const code of EXCHANGE_CODES) {
+    const label = EXCHANGE_LABELS[code];
     const exists = await accountRepo.findOne({ where: { exchange: code } });
     if (exists) {
       console.log(`· ${label} 账户记录已存在，跳过`);

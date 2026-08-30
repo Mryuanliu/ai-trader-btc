@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   ENVIRONMENT_LABELS,
   EXCHANGE_CODES,
+  EXCHANGE_LABELS,
   ExchangeCode,
   Environment,
 } from '@ai-trader/shared';
@@ -56,7 +57,15 @@ export class ExchangeAccountService implements OnModuleInit {
     await this.seedFromEnv();
   }
 
-  /** 解析账户环境：优先 BINANCE_ENV，未设置时回退到旧的 BINANCE_TESTNET 布尔推断 */
+  /**
+   * 环境变量前缀：`binance` -> `BINANCE`，`binance-futures` -> `BINANCE_FUTURES`。
+   * 直接 toUpperCase() 会得到含连字符的 `BINANCE-FUTURES`，读不到配置。
+   */
+  private envPrefixOf(code: ExchangeCode): string {
+    return code.toUpperCase().replace(/-/g, '_');
+  }
+
+  /** 解析账户环境：优先 XXX_ENV，未设置时回退到旧的 XXX_TESTNET 布尔推断 */
   private resolveEnvironment(prefix: string): Environment {
     const explicit = this.config.get<string>(`${prefix}_ENV`, '');
     if (explicit === 'demo' || explicit === 'testnet' || explicit === 'live') {
@@ -65,12 +74,32 @@ export class ExchangeAccountService implements OnModuleInit {
     return this.config.get<string>(`${prefix}_TESTNET`, 'true') !== 'false' ? 'testnet' : 'live';
   }
 
+  /**
+   * 合约账户未单独配置密钥时回退复用币安现货密钥。
+   *
+   * demo 环境已实测同一个 key 现货与合约通用；实盘若需权限隔离，
+   * 显式配置 BINANCE_FUTURES_API_KEY/SECRET 即可覆盖。
+   */
+  private resolveCredentials(code: ExchangeCode, prefix: string) {
+    let apiKey = this.config.get<string>(`${prefix}_API_KEY`, '') || '';
+    let apiSecret = this.config.get<string>(`${prefix}_API_SECRET`, '') || '';
+    const passphrase = this.config.get<string>(`${prefix}_PASSPHRASE`, '') || '';
+
+    if (code === 'binance-futures' && !apiKey && !apiSecret) {
+      apiKey = this.config.get<string>('BINANCE_API_KEY', '') || '';
+      apiSecret = this.config.get<string>('BINANCE_API_SECRET', '') || '';
+      if (apiKey && apiSecret) {
+        this.logger.log('合约账户未单独配置密钥，已回退复用币安现货密钥');
+      }
+    }
+
+    return { apiKey, apiSecret, passphrase };
+  }
+
   async seedFromEnv() {
     for (const code of EXCHANGE_CODES) {
-      const prefix = code.toUpperCase();
-      const apiKey = this.config.get<string>(`${prefix}_API_KEY`, '') || '';
-      const apiSecret = this.config.get<string>(`${prefix}_API_SECRET`, '') || '';
-      const passphrase = this.config.get<string>(`${prefix}_PASSPHRASE`, '') || '';
+      const prefix = this.envPrefixOf(code);
+      const { apiKey, apiSecret, passphrase } = this.resolveCredentials(code, prefix);
       const enabled = this.config.get<string>(`${prefix}_ENABLED`, 'false') === 'true';
       const environment = this.resolveEnvironment(prefix);
 
@@ -80,7 +109,7 @@ export class ExchangeAccountService implements OnModuleInit {
       if (!entity) {
         entity = this.repo.create({ exchange: code });
       }
-      entity.label = code === 'binance' ? '币安' : '欧意';
+      entity.label = EXCHANGE_LABELS[code];
       entity.environment = environment;
       entity.enabled = enabled;
       entity.apiKeyEnc = encryptSecret(apiKey, this.masterKey);
@@ -96,11 +125,11 @@ export class ExchangeAccountService implements OnModuleInit {
     for (const code of EXCHANGE_CODES) {
       const exists = await this.repo.findOne({ where: { exchange: code } });
       if (!exists) {
-        const environment = this.resolveEnvironment(code.toUpperCase());
+        const environment = this.resolveEnvironment(this.envPrefixOf(code));
         await this.repo.save(
           this.repo.create({
             exchange: code,
-            label: code === 'binance' ? '币安' : '欧意',
+            label: EXCHANGE_LABELS[code],
             environment,
             enabled: false,
             lastMessage: '未配置密钥，仅可用于公共行情',

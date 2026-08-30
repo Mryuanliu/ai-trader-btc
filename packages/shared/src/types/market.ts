@@ -1,5 +1,19 @@
 import type { Environment, ExchangeCode, Timeframe } from './common';
 
+/**
+ * 资金费率：永续合约每 8 小时（UTC 00/08/16）在多空之间结算一次。
+ * 正费率=多头付空头，负费率=空头付多头。回测需计入持仓期间的累计费率。
+ */
+export interface FundingRate {
+  symbol: string;
+  /** 结算时间（毫秒） */
+  fundingTime: number;
+  /** 费率，小数形式（0.0001 = 0.01%） */
+  rate: number;
+  /** 结算时的标记价格；部分接口不返回时为 undefined */
+  markPrice?: number;
+}
+
 /** 归一化 K 线，time 为毫秒开盘时间 */
 export interface Candle {
   time: number;

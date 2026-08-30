@@ -2,12 +2,21 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   ENVIRONMENT_LABELS,
-  EXCHANGE_CODES,
+  SPOT_EXCHANGE_CODES,
   ExchangeCode,
   Environment,
 } from '@ai-trader/shared';
 import { BinanceAdapter } from './binance.adapter';
+import { BinanceFuturesAdapter } from './binance-futures.adapter';
 import { OkxAdapter } from './okx.adapter';
+
+/**
+ * 已实现适配器的交易所集合。
+ *
+ * 加交易所码到 EXCHANGE_CODES 后，若尚未实现适配器就放进遍历，
+ * 会在 get() 里抛错并连带打断现货链路。此处作为能力白名单供 isSupported() 使用。
+ */
+const IMPLEMENTED_EXCHANGES: readonly ExchangeCode[] = ['binance', 'okx', 'binance-futures'];
 import { ExchangeAccountService } from './exchange-account.service';
 import { ExchangeAdapter, ExchangeError } from './adapter.interface';
 
@@ -21,16 +30,20 @@ export class ExchangeRegistry {
     private readonly config: ConfigService,
   ) {}
 
-  private get defaultEnvironment(): Environment {
+  /**
+   * 账户未落库时的兜底环境：非实盘一律落到模拟环境。
+   * 合约读 BINANCE_FUTURES_ENV，未显式配置时回退现货的 BINANCE_ENV。
+   */
+  private defaultEnvironmentOf(code: ExchangeCode): Environment {
     const mode = this.config.get<string>('APP_RUN_MODE', 'dry_run');
-    // 非实盘一律落到模拟环境；显式配置了 BINANCE_ENV 时以配置为准
-    if (mode !== 'live') {
-      const configured = this.config.get<string>('BINANCE_ENV', 'demo');
-      return configured === 'testnet' || configured === 'demo' || configured === 'live'
-        ? configured
-        : 'demo';
-    }
-    return 'live';
+    if (mode === 'live') return 'live';
+
+    const fallback = this.config.get<string>('BINANCE_ENV', 'demo');
+    const raw =
+      code === 'binance-futures'
+        ? this.config.get<string>('BINANCE_FUTURES_ENV', '') || fallback
+        : fallback;
+    return raw === 'testnet' || raw === 'demo' || raw === 'live' ? raw : 'demo';
   }
 
   /** 清除适配器缓存（密钥更新后调用） */
@@ -48,40 +61,61 @@ export class ExchangeRegistry {
     if (cached) return cached;
 
     const credentials = await this.accounts.getCredentials(code);
-    const environment = credentials?.environment ?? this.defaultEnvironment;
+    const environment = credentials?.environment ?? this.defaultEnvironmentOf(code);
+    const apiKey = credentials?.apiKey ?? '';
+    const apiSecret = credentials?.apiSecret ?? '';
 
-    const adapter: ExchangeAdapter =
-      code === 'binance'
-        ? new BinanceAdapter(environment, credentials?.apiKey ?? '', credentials?.apiSecret ?? '')
-        : new OkxAdapter(
-            environment,
-            credentials?.apiKey ?? '',
-            credentials?.apiSecret ?? '',
-            credentials?.passphrase ?? '',
-          );
+    // 必须显式 switch：若用 `code === 'binance' ? A : B` 的 else 兜底，
+    // 未覆盖的交易所码会静默落到别的适配器（拿 A 的密钥打 B 的接口），不报错但行为完全错误
+    let adapter: ExchangeAdapter;
+    switch (code) {
+      case 'binance':
+        adapter = new BinanceAdapter(environment, apiKey, apiSecret);
+        break;
+      case 'okx':
+        adapter = new OkxAdapter(environment, apiKey, apiSecret, credentials?.passphrase ?? '');
+        break;
+      case 'binance-futures':
+        adapter = new BinanceFuturesAdapter(environment, apiKey, apiSecret);
+        break;
+      default: {
+        const never: never = code;
+        throw new ExchangeError(never, 'UNSUPPORTED', `不支持的交易所: ${String(never)}`);
+      }
+    }
 
     this.cache.set(code, adapter);
     return adapter;
   }
 
-  /** 取第一个可用于公共行情的适配器 */
+  /** 取第一个可用于公共行情的适配器（仅现货：合约行情与现货存在基差，不作为默认数据源） */
   async getPublic(): Promise<ExchangeAdapter> {
-    for (const code of EXCHANGE_CODES) {
+    for (const code of SPOT_EXCHANGE_CODES) {
       const adapter = await this.get(code);
       return adapter;
     }
     return this.get('binance');
   }
 
-  /** 已启用且已配置密钥的交易所，用于真实下单 */
+  /** 已启用、已配置密钥且适配器支持下单的交易所，用于真实下单 */
   async getTradable(): Promise<ExchangeAdapter[]> {
     const views = await this.accounts.list();
     const enabled = views.filter((v) => v.enabled && v.configured);
     const result: ExchangeAdapter[] = [];
     for (const view of enabled) {
-      result.push(await this.get(view.exchange));
+      // 过滤掉尚未实现下单能力的适配器（如只读阶段的合约适配器），
+      // 否则会拿只读取器去下单而报出误导性错误
+      if (!this.isSupported(view.exchange)) continue;
+      const adapter = await this.get(view.exchange);
+      if (adapter.supportsTrading === false) continue;
+      result.push(adapter);
     }
     return result;
+  }
+
+  /** 该交易所码是否有对应适配器实现（防止新增交易所码后遍历时取到未实现的适配器） */
+  isSupported(code: ExchangeCode): boolean {
+    return IMPLEMENTED_EXCHANGES.includes(code);
   }
 
   /** 连通性探测：先打交易主机时间接口，有密钥再读余额 */

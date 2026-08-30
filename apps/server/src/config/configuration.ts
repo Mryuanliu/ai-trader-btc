@@ -32,6 +32,12 @@ export interface AppEnv {
   BINANCE_ENV: 'demo' | 'testnet' | 'live';
   /** 保留旧变量名做向后兼容，仅当 BINANCE_ENV 未显式设置时生效 */
   BINANCE_TESTNET: boolean;
+  /** 币安 U 本位合约账户（demo 环境可复用现货 key） */
+  BINANCE_FUTURES_ENABLED: boolean;
+  BINANCE_FUTURES_API_KEY: string;
+  BINANCE_FUTURES_API_SECRET: string;
+  /** 合约账户环境：demo=模拟盘(合约 demo 即 testnet) live=实盘 */
+  BINANCE_FUTURES_ENV: 'demo' | 'testnet' | 'live';
   HTTPS_PROXY: string;
   HTTP_PROXY: string;
   NO_PROXY: string;
@@ -81,6 +87,13 @@ export const envSchema = Joi.object({
   BINANCE_ENV: Joi.string().valid('demo', 'testnet', 'live').default('demo'),
   // 旧开关，仅用于 BINANCE_ENV 未显式配置时推断
   BINANCE_TESTNET: Joi.boolean().default(true),
+
+  // 币安 U 本位合约：留空时交易所账户层会自动回退复用 BINANCE_API_KEY/SECRET
+  // （demo 环境已实测同一 key 现货与合约通用），实盘可显式配置独立合约 key
+  BINANCE_FUTURES_ENABLED: Joi.boolean().default(false),
+  BINANCE_FUTURES_API_KEY: Joi.string().allow('').default(''),
+  BINANCE_FUTURES_API_SECRET: Joi.string().allow('').default(''),
+  BINANCE_FUTURES_ENV: Joi.string().valid('demo', 'testnet', 'live').default('demo'),
 
   HTTPS_PROXY: Joi.string().allow('').default(''),
   HTTP_PROXY: Joi.string().allow('').default(''),

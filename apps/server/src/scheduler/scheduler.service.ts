@@ -10,6 +10,8 @@ import { AccountService } from '../account/account.service';
 import { TradingService } from '../trading/trading.service';
 import { RiskService } from '../trading/risk.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
+import { FuturesEngine } from '../futures/futures-engine.service';
+import { FuturesConfigService } from '../futures/futures-config.service';
 
 @Injectable()
 export class SchedulerService {
@@ -32,6 +34,8 @@ export class SchedulerService {
     private readonly risk: RiskService,
     private readonly registry: ExchangeRegistry,
     private readonly config: ConfigService,
+    private readonly futures: FuturesEngine,
+    private readonly futuresConfig: FuturesConfigService,
   ) {}
 
   /** 主循环：模拟行情推进 + Agent 决策节流 + 周期性任务 */
@@ -61,6 +65,45 @@ export class SchedulerService {
     }
 
     await this.runAgentIfDue();
+    await this.runFuturesIfDue();
+  }
+
+  /**
+   * 合约链路调度：与现货**彼此独立**。
+   *
+   * 独立开关、独立配置、独立熔断计数器——关闭合约不影响现货，
+   * 合约连续失败进入熔断也不会牵连现货链路。
+   */
+  private async runFuturesIfDue() {
+    const entity = await this.futuresConfig.getEntity();
+    if (!entity.enabled || this.futures.isRunning) return;
+
+    const intervalMs = Math.max(30, entity.decisionIntervalSec) * 1000;
+    const lastRun = entity.lastRunAt ? entity.lastRunAt.getTime() : 0;
+    if (Date.now() - lastRun < intervalMs) return;
+
+    const gate = this.futures.shouldSkipScheduledRun();
+    if (gate.skip) {
+      this.throttledWarn('futures-backoff', gate.reason ?? '合约处于冷却期', 10 * 60_000);
+      return;
+    }
+
+    // 实盘同样不自动下单（与现货一致：需人工携带二次确认 Token）
+    if (entity.mode === 'live') {
+      this.throttledWarn(
+        'futures-live-skipped',
+        '合约实盘模式不支持自动下单：需通过前端手动下单并携带确认 Token',
+        10 * 60_000,
+      );
+      return;
+    }
+
+    try {
+      const summary = await this.futures.runOnce('schedule');
+      this.logger.log(`合约决策: ${summary.action}（置信度 ${summary.confidence}）`);
+    } catch (err) {
+      this.logger.error(`合约决策失败: ${(err as Error).message}`);
+    }
   }
 
   private async runAgentIfDue() {

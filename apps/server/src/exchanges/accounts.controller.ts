@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
-import { Environment, ExchangeCode } from '@ai-trader/shared';
+import { EXCHANGE_CODES, Environment, ExchangeCode } from '@ai-trader/shared';
 import { ExchangeAccountService, UpsertExchangeAccountInput } from './exchange-account.service';
 import { ExchangeRegistry } from './exchange-registry.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -25,7 +25,8 @@ export class AccountsController {
     @Param('exchange') exchange: string,
     @Body() body: UpsertExchangeAccountInput,
   ) {
-    if (exchange !== 'binance' && exchange !== 'okx') {
+    // 按枚举校验而非硬编码白名单：新增交易所后无需改动此处
+    if (!EXCHANGE_CODES.includes(exchange as ExchangeCode)) {
       throw new BusinessException('BAD_REQUEST', '不支持的交易所');
     }
     const saved = await this.accounts.upsert({
@@ -40,7 +41,7 @@ export class AccountsController {
   @UseGuards(JwtAuthGuard)
   @Post(':exchange/test')
   async test(@Param('exchange') exchange: string) {
-    if (exchange !== 'binance' && exchange !== 'okx') {
+    if (!EXCHANGE_CODES.includes(exchange as ExchangeCode)) {
       throw new BusinessException('BAD_REQUEST', '不支持的交易所');
     }
     this.registry.invalidate(exchange as ExchangeCode);

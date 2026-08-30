@@ -269,6 +269,12 @@ export interface BacktestRequest {
   exitRules?: { stopLossPct?: number | null; takeProfitPct?: number | null };
   warmupBars?: number;
   autoBackfill?: boolean;
+  /** 市场：spot=现货（默认）；futures=合约 */
+  market?: 'spot' | 'futures';
+  /** 合约杠杆 1~10 */
+  leverage?: number;
+  /** 合约回测附加 1x/3x/5x 杠杆对比 */
+  compareLeverage?: boolean;
 }
 
 export interface BacktestReportDTO {
@@ -284,6 +290,12 @@ export interface BacktestReportDTO {
     strategyParams: Record<string, unknown>;
     exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
     downsampled?: boolean;
+    /** 合约专属 */
+    leverage?: number;
+    stepSize?: number;
+    minNotional?: number;
+    totalFundingPaid?: number;
+    liquidationCount?: number;
   };
   metrics: {
     totalReturnPct: number;
@@ -305,6 +317,32 @@ export interface BacktestReportDTO {
     fee: number;
     equityAfter: number;
     decisionConfidence: number;
+    /** 合约专属 */
+    positionSide?: 'LONG' | 'SHORT';
+    reduceOnly?: boolean;
+    margin?: number;
+    notional?: number;
+  }[];
+  /** compareLeverage=true 时：1x/3x/5x 对比行 */
+  comparison?: {
+    leverage: number;
+    totalReturnPct: number;
+    annualizedReturnPct: number;
+    maxDrawdownPct: number;
+    sharpeRatio: number;
+    winRate: number;
+    profitFactor: number;
+    tradeCount: number;
+    liquidationCount: number;
+    totalFundingPaid: number;
+  }[];
+  /** 强平事件（合约） */
+  liquidations?: {
+    time: number;
+    price: number;
+    loss: number;
+    positionSide: 'LONG' | 'SHORT';
+    quantity: number;
   }[];
 }
 
@@ -450,6 +488,99 @@ export function useTestAccount() {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ['accounts'] });
     },
+  });
+}
+
+// ------------------------------------------------------------------ 合约（独立链路）
+export interface FuturesPositionDTO {
+  symbol: string;
+  market: 'futures';
+  quantity: number;
+  positionSide: 'LONG' | 'SHORT' | null;
+  entryPrice: number;
+  markPrice: number;
+  liquidationPrice: number;
+  leverage: number;
+  marginType: 'isolated' | 'cross';
+  isolatedMargin: number;
+  unrealizedPnl: number;
+  notional: number;
+  liquidationDistancePct: number | null;
+}
+
+export interface FuturesConfigDTO {
+  name: string;
+  enabled: boolean;
+  symbol: string;
+  timeframe: string;
+  decisionIntervalSec: number;
+  mode: string;
+  positionPct: number;
+  minConfidence: number;
+  leverage: number;
+  maxLeverage: number;
+  marginType: 'isolated' | 'cross';
+  liquidationBufferPct: number;
+  decisionLane: string;
+  strategyName: string;
+  strategyParams: Record<string, unknown>;
+  exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
+}
+
+export function useFuturesPositions() {
+  return useQuery<FuturesPositionDTO[]>({
+    queryKey: ['futures', 'positions'],
+    queryFn: () => http.get('/futures/positions'),
+    refetchInterval: 5000,
+  });
+}
+
+export function useFuturesMargin() {
+  return useQuery<{ available: number }>({
+    queryKey: ['futures', 'margin'],
+    queryFn: () => http.get('/futures/margin'),
+    refetchInterval: 5000,
+  });
+}
+
+export function useFuturesConfig() {
+  return useQuery<FuturesConfigDTO>({
+    queryKey: ['futures', 'config'],
+    queryFn: () => http.get('/futures/config'),
+    refetchInterval: 10000,
+  });
+}
+
+export function useUpdateFuturesConfig() {
+  const client = useQueryClient();
+  return useMutation<FuturesConfigDTO, Error, Record<string, unknown>>({
+    mutationFn: (patch) => http.patch('/futures/config', patch),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['futures', 'config'] });
+    },
+  });
+}
+
+export function useRunFuturesEngine() {
+  const client = useQueryClient();
+  return useMutation<
+    { action: string; confidence: number; lane: string; riskPassed: boolean; orderId: string | null },
+    Error,
+    void
+  >({
+    mutationFn: () => http.post('/futures/run'),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['futures', 'decisions'] });
+      void client.invalidateQueries({ queryKey: ['futures', 'positions'] });
+    },
+  });
+}
+
+export function useFuturesHealth() {
+  return useQuery<{ consecutiveFailures: number; nextRetryAt: number; tripped: boolean; running: boolean }>({
+    queryKey: ['futures', 'health'],
+    queryFn: () => http.get('/futures/health'),
+    refetchInterval: 10000,
   });
 }
 

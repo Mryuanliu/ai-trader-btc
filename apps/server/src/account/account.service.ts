@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { BalanceRow, TERMINAL_EMPTY_STATUSES } from '@ai-trader/shared';
+import { BalanceRow, SPOT_EXCHANGE_CODES, TERMINAL_EMPTY_STATUSES } from '@ai-trader/shared';
 import { Between, Repository } from 'typeorm';
 import { BalanceSnapshotEntity, OrderEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -34,7 +34,12 @@ export class AccountService {
     if (mode !== 'dry_run') {
       try {
         const rows: BalanceRow[] = [];
+        // 只统计现货交易所：合约钱包余额与现货 USDT 是同一笔资金的两个视图，
+        // 若一并计入会重复计算总权益，放大风控的可用额度判断
         for (const code of exchanges) {
+          if (!SPOT_EXCHANGE_CODES.includes(code as (typeof SPOT_EXCHANGE_CODES)[number])) {
+            continue;
+          }
           const adapter = await this.registry.get(code as never);
           if (!adapter.hasCredentials) continue;
           const balances = await adapter.getBalances();
@@ -79,6 +84,8 @@ export class AccountService {
       )
       .where('o.mode = :mode', { mode: 'dry_run' })
       .andWhere('o.status = :status', { status: 'FILLED' })
+      // 限定现货：合约成交走保证金模型，混入会把合约盈亏算进现货虚拟本金
+      .andWhere('o.market = :market', { market: 'spot' })
       .getRawOne<{ usdtDelta: string; btcDelta: string }>();
 
     let usdt = VIRTUAL_INITIAL_USDT + Number(row?.usdtDelta ?? 0);
@@ -193,6 +200,8 @@ export class AccountService {
       .andWhere('o.status NOT IN (:...excluded)', {
         excluded: [...TERMINAL_EMPTY_STATUSES],
       })
+      // 只统计现货：合约单不应占用现货的每日下单额度
+      .andWhere('o.market = :market', { market: 'spot' })
       .getCount();
   }
 }

@@ -8,6 +8,7 @@ import { NewsModule } from '../news/news.module';
 import { AccountModule } from '../account/account.module';
 import { TradingModule } from '../trading/trading.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
+import { FuturesModule } from '../futures/futures.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { ExchangesModule } from '../exchanges/exchanges.module';
     AccountModule,
     TradingModule,
     ExchangesModule,
+    FuturesModule,
   ],
   providers: [SchedulerService],
 })

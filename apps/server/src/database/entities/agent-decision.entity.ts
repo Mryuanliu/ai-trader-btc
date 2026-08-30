@@ -1,4 +1,10 @@
-import { DecisionAction, DecisionInputSnapshot, DecisionLane } from '@ai-trader/shared';
+import {
+  DecisionAction,
+  DecisionInputSnapshot,
+  DecisionLane,
+  DEFAULT_MARKET,
+  MarketType,
+} from '@ai-trader/shared';
 import {
   Column,
   CreateDateColumn,
@@ -21,6 +27,14 @@ export class AgentDecisionEntity {
 
   @Column({ length: 32 })
   symbol: string;
+
+  /**
+   * 市场类型：现货/合约。
+   * 两市场共用本表，不隔离会让合约决策混入现货决策列表与统计口径，
+   * 且二者的持仓语义（现货成本均价 vs 合约净持仓）不可互相解释。
+   */
+  @Column({ type: 'varchar', length: 8, default: DEFAULT_MARKET })
+  market: MarketType;
 
   @Column({ type: 'varchar', length: 8 })
   action: DecisionAction;

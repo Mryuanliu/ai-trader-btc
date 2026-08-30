@@ -81,8 +81,9 @@ export class RiskService {
       );
     }
 
+    // 限定现货：本服务是现货风控，合约单不应阻塞现货的下一单
     const lastOrder = await this.orderRepo.findOne({
-      where: { symbol: context.symbol },
+      where: { symbol: context.symbol, market: 'spot' },
       order: { createdAt: 'DESC' },
     });
     if (lastOrder && config.minOrderIntervalSec > 0) {

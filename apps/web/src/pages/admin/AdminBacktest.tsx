@@ -63,6 +63,9 @@ interface FormValues {
   feeRateBps?: number;
   warmupBars?: number;
   autoBackfill?: boolean;
+  market?: 'spot' | 'futures';
+  leverage?: number;
+  compareLeverage?: boolean;
 }
 
 export function AdminBacktest() {
@@ -105,6 +108,9 @@ export function AdminBacktest() {
         strategyName: current?.name,
         strategyParams: Object.keys(strategyParams).length ? strategyParams : undefined,
         exitRules,
+        market: values.market,
+        leverage: values.market === 'futures' ? values.leverage : undefined,
+        compareLeverage: values.market === 'futures' ? values.compareLeverage : undefined,
       },
       {
         onSuccess: (data) => {
@@ -141,12 +147,24 @@ export function AdminBacktest() {
             feeRateBps: 10,
             warmupBars: 120,
             autoBackfill: true,
+            market: 'spot',
+            leverage: 5,
           }}
         >
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="range" label="回测区间" rules={[{ required: true }]}>
                 <RangePicker showTime className="!w-full" />
+              </Form.Item>
+            </Col>
+            <Col span={4}>
+              <Form.Item name="market" label="市场">
+                <Select
+                  options={[
+                    { label: '现货', value: 'spot' },
+                    { label: '合约', value: 'futures' },
+                  ]}
+                />
               </Form.Item>
             </Col>
             <Col span={4}>
@@ -213,6 +231,23 @@ export function AdminBacktest() {
             </Col>
           </Row>
 
+          {form.getFieldValue('market') === 'futures' ? (
+            <Row gutter={12}>
+              <Col span={8}>
+                <Form.Item name="leverage" label="合约杠杆（倍数）">
+                  <Slider min={1} max={10} step={1} marks={{ 1: '1x', 5: '5x', 10: '10x' }} />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item name="compareLeverage" valuePropName="checked" label=" ">
+                  <Space>
+                    <Switch /> 附加 1x/3x/5x 杠杆对比
+                  </Space>
+                </Form.Item>
+              </Col>
+            </Row>
+          ) : null}
+
           <Row gutter={12}>
             <Col span={6}>
               <Form.Item name={['exitRules', 'stopLossPct']} label="止损（相对均价，留空关闭）">
@@ -270,7 +305,11 @@ export function AdminBacktest() {
 
       {report && metrics ? (
         <>
-          <Card title={`回测报告 · ${report.meta.strategyName}`} className="glass-card" size="small">
+          <Card
+            title={`回测报告 · ${report.meta.strategyName}${report.meta.leverage ? ` · ${report.meta.leverage}x 杠杆` : ''}`}
+            className="glass-card"
+            size="small"
+          >
             <Row gutter={[16, 12]}>
               <Col xs={8} md={4}>
                 <Statistic
@@ -310,6 +349,15 @@ export function AdminBacktest() {
               <Col xs={8} md={3}>
                 <Statistic title="交易次数" value={metrics.tradeCount} />
               </Col>
+              {report.meta.liquidationCount !== undefined ? (
+                <Col xs={8} md={3}>
+                  <Statistic
+                    title="强平次数"
+                    value={report.meta.liquidationCount}
+                    valueStyle={{ color: report.meta.liquidationCount > 0 ? '#f87171' : '#4ade80' }}
+                  />
+                </Col>
+              ) : null}
             </Row>
             <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-muted">
               <span>
@@ -321,6 +369,12 @@ export function AdminBacktest() {
               <span>
                 {report.meta.candleCount} 根K线 · warmup {report.meta.warmupBars} · 信号后下一根开盘价成交
               </span>
+              {report.meta.totalFundingPaid !== undefined ? (
+                <span>
+                  资金费 {report.meta.totalFundingPaid.toFixed(4)} USDT
+                  {report.meta.totalFundingPaid > 0 ? '（净支出）' : report.meta.totalFundingPaid < 0 ? '（净收入）' : ''}
+                </span>
+              ) : null}
               {report.meta.exitRules.stopLossPct != null || report.meta.exitRules.takeProfitPct != null ? (
                 <span>
                   出场：{report.meta.exitRules.stopLossPct != null ? `止损 ${(report.meta.exitRules.stopLossPct * 100).toFixed(1)}% ` : ''}
@@ -376,6 +430,29 @@ export function AdminBacktest() {
             </div>
           </Card>
 
+          {report.comparison && report.comparison.length > 0 ? (
+            <Card title="杠杆对比（同一策略同一数据，仅杠杆不同）" className="glass-card" size="small">
+              <Table
+                size="small"
+                rowKey="leverage"
+                pagination={false}
+                dataSource={report.comparison}
+                columns={[
+                  { title: '杠杆', dataIndex: 'leverage', width: 80, render: (v: number) => <b>{v}x</b> },
+                  { title: '总收益%', dataIndex: 'totalReturnPct', render: (v: number) => <span className={v >= 0 ? 'text-up' : 'text-down'}>{v.toFixed(2)}</span> },
+                  { title: '年化%', dataIndex: 'annualizedReturnPct', render: (v: number) => v.toFixed(2) },
+                  { title: '最大回撤%', dataIndex: 'maxDrawdownPct', render: (v: number) => <span className="text-down">{v.toFixed(2)}</span> },
+                  { title: '夏普', dataIndex: 'sharpeRatio', render: (v: number) => v.toFixed(2) },
+                  { title: '胜率%', dataIndex: 'winRate', render: (v: number) => (v * 100).toFixed(1) },
+                  { title: '盈亏比', dataIndex: 'profitFactor', render: (v: number) => (v === Infinity ? '∞' : v.toFixed(2)) },
+                  { title: '交易', dataIndex: 'tradeCount' },
+                  { title: '强平', dataIndex: 'liquidationCount', render: (v: number) => (v > 0 ? <Tag color="red">{v}</Tag> : v) },
+                  { title: '资金费', dataIndex: 'totalFundingPaid', render: (v: number) => v.toFixed(4) },
+                ]}
+              />
+            </Card>
+          ) : null}
+
           <Card title={`成交明细（${report.trades.length} 笔，最多展示最近 200 笔）`} className="glass-card" size="small">
             <Table
               size="small"
@@ -395,6 +472,17 @@ export function AdminBacktest() {
                   width: 80,
                   render: (v: 'BUY' | 'SELL') =>
                     v === 'BUY' ? <Tag color="green">买入</Tag> : <Tag color="red">卖出</Tag>,
+                },
+                {
+                  title: '持仓',
+                  dataIndex: 'positionSide',
+                  width: 80,
+                  render: (v: 'LONG' | 'SHORT' | undefined, row) =>
+                    row.reduceOnly ? (
+                      <Tag color="orange">平仓</Tag>
+                    ) : v ? (
+                      v === 'LONG' ? <Tag color="green">多头</Tag> : <Tag color="red">空头</Tag>
+                    ) : null,
                 },
                 {
                   title: '价格',

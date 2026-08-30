@@ -27,10 +27,14 @@ export class PositionService {
   ) {}
 
   /**
-   * 由成交明细推导指定标的的持仓。
+   * 由成交明细推导**现货**持仓。
    *
    * trade_fills 自身不含买卖方向，需与 orders 关联取 side。
    * 只统计已成交（FILLED / PARTIALLY_FILLED）的订单，未成交与已撤销不计入。
+   *
+   * 必须限定 o.market='spot'：现货与合约共用 orders/trade_fills 两张表，
+   * 同标的（BTCUSDT）的合约成交若混入，会凭空推导出一个不存在的现货持仓，
+   * 进而污染现货敞口风控与止损止盈判定。合约持仓请以交易所 positionRisk 为准。
    */
   async getPosition(symbol: string): Promise<PositionSnapshot> {
     this.market.ensureSymbol(symbol);
@@ -47,6 +51,7 @@ export class PositionService {
       // orders.id 是 uuid 而 fills.orderId 是 varchar，必须显式转型后才能关联
       .where('o.id::text = f."orderId"')
       .andWhere('f.symbol = :symbol', { symbol })
+      .andWhere('o.market = :market', { market: 'spot' })
       .andWhere('o.status IN (:...statuses)', {
         statuses: ['FILLED', 'PARTIALLY_FILLED'],
       })

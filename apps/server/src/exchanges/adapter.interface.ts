@@ -4,9 +4,11 @@ import {
   Environment,
   ExchangeCode,
   KlineQuery,
+  MarginType,
   OrderSide,
   OrderStatus,
   OrderType,
+  PositionSide,
   SymbolFilters,
   Ticker,
 } from '@ai-trader/shared';
@@ -25,6 +27,13 @@ export interface PlaceOrderInput {
   quantity: number;
   price?: number;
   clientOrderId?: string;
+  /**
+   * 持仓方向（仅合约有意义，现货适配器忽略）。
+   * 单向持仓模式下为 LONG/SHORT，用于让交易所校验开平方向。
+   */
+  positionSide?: PositionSide;
+  /** 只平仓单（反手信号的第一跳），仅合约有意义 */
+  reduceOnly?: boolean;
 }
 
 export interface CancelOrderInput {
@@ -70,6 +79,13 @@ export interface ExchangeAdapter {
   readonly environment: Environment;
   /** 是否配置了可用密钥（无密钥时仅能使用公共行情） */
   readonly hasCredentials: boolean;
+  /**
+   * 是否具备下单能力。缺省视为 true。
+   *
+   * 只读适配器（如仅打通行情/账户阶段的合约适配器）须显式置 false，
+   * 以便 ExchangeRegistry.getTradable() 将其排除，避免拿只读取器去下单。
+   */
+  readonly supportsTrading?: boolean;
 
   getServerTime(): Promise<number>;
   getTicker(symbol: string): Promise<Ticker>;
@@ -95,6 +111,20 @@ export interface ExchangeAdapter {
    * 与 K 线流相互独立，任一路断开都不影响另一路。
    */
   subscribeTicker(symbol: string, onQuote: (quote: PriceQuote) => void): () => void;
+}
+
+/**
+ * 合约交易所能力：在通用适配器之上追加杠杆与保证金模式设置。
+ * 现货适配器不实现这些，执行器通过 isFuturesAdapter 做能力收窄。
+ */
+export interface FuturesExchangeAdapter extends ExchangeAdapter {
+  setLeverage(symbol: string, leverage: number): Promise<void>;
+  setMarginType(symbol: string, marginType: MarginType): Promise<void>;
+}
+
+export function isFuturesAdapter(adapter: ExchangeAdapter): adapter is FuturesExchangeAdapter {
+  const a = adapter as FuturesExchangeAdapter;
+  return typeof a.setLeverage === 'function' && typeof a.setMarginType === 'function';
 }
 
 export class ExchangeError extends Error {

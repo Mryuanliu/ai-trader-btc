@@ -20,8 +20,8 @@ import {
 import { PlayCircleOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import {
   DEFAULT_AGENT_CONFIG,
-  EXCHANGE_CODES,
   EXCHANGE_LABELS,
+  SPOT_EXCHANGE_CODES,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
   strategyRegistry,
@@ -112,8 +112,10 @@ export function AdminAgentConfig() {
     Form.useWatch('strategyName', form) ?? config?.strategyName ?? DEFAULT_AGENT_CONFIG.strategyName;
   const currentStrategy = strategyOptions.find((s) => s.name === strategyFormValue);
 
+  // 现货 Agent 的下单通道只列现货交易所：合约是独立链路，
+  // 混选会让现货引擎拿合约账户去下单（当前合约适配器尚不支持交易）
   const exchangeOptions = useMemo(
-    () => EXCHANGE_CODES.map((code) => ({ label: EXCHANGE_LABELS[code], value: code })),
+    () => SPOT_EXCHANGE_CODES.map((code) => ({ label: EXCHANGE_LABELS[code], value: code })),
     [],
   );
 

@@ -8,23 +8,14 @@ import {
   DecisionInputSnapshot,
   DecisionLane,
   DecisionSummary,
-  ContextInsight,
-  NEUTRAL_CONTEXT_INSIGHT,
-  StrategyContext,
   StrategyOutput,
-  buildSignals,
-  computeIndicators,
-  mapInsightToParams,
-  normalizeInsight,
-  scoreSignals,
-  strategyRegistry,
+  computeSpotOrderQty,
+  evaluateExitRules,
 } from '@ai-trader/shared';
 import { Repository } from 'typeorm';
 import { AgentDecisionEntity } from '../database/entities';
 import { AgentConfigService } from './agent-config.service';
-import { LlmClient, LlmResult } from './llm.client';
-import { StrategyService } from './strategy.service';
-import { buildContextPrompt } from './prompt';
+import { DecisionCoreService, LaneDecision } from './decision-core.service';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
 import { AccountService } from '../account/account.service';
@@ -35,13 +26,6 @@ import { EventBusService } from '../common/events';
 
 const HISTORY_LIMIT = 200;
 
-/**
- * hybrid 链路：AI 上下文（insight）缓存有效期。
- * 上下文变化远慢于 5 分钟级 K 线，AI 调用降频到小时级可显著省 token；
- * 过期后下一轮重新调用，AI 失败期间沿用缓存，超期才回落中性参数。
- */
-const INSIGHT_TTL_MS = 60 * 60 * 1000;
-
 /** 连续失败达到该次数后熔断，停止自动调度直到冷却期结束 */
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 /** 熔断后的冷却时长：留足时间让下游（LLM / 交易所）恢复 */
@@ -50,35 +34,10 @@ const CIRCUIT_BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_BASE_MS = 30 * 1000;
 const RETRY_BACKOFF_MAX_MS = 10 * 60 * 1000;
 
-/** 一次链路分派的产出：决策本体 + 归因元数据（落库字段来源） */
-interface LaneDecision {
-  /** 链路归属：strategy=纯策略；hybrid=AI 上下文 + 策略执行 */
-  lane: DecisionLane;
-  /** 实际产出决策的策略名（两条链路都由策略执行） */
-  strategyName: string | null;
-  /** 决策本体：统一由策略产出（AI 不再直出买卖指令） */
-  decision: StrategyOutput;
-  degraded: boolean;
-  degradeReason: string | null;
-  /** hybrid 链路才有：供落库 llmRaw/llmReasoning/llmModel/llmUsage（记录上下文分析） */
-  llmResult: LlmResult | null;
-  /** strategy 链路为空串；hybrid 链路存上下文 prompt */
-  prompt: string;
-
-  /** 出场规则触发时为 true：卖出全部持仓（而非按 positionPct 部分卖出） */
-  closeAll?: boolean;
-
-  /** 仅 hybrid 链路：AI 激进度映射的仓位乘数（0.5~1.5），作用于开仓金额 */
-  positionMultiplier?: number;
-}
-
 @Injectable()
 export class AgentEngine {
   private readonly logger = new Logger(AgentEngine.name);
   private running = false;
-
-  /** hybrid 链路：缓存的 AI 上下文（元参数），带过期时间；重启后重新分析 */
-  private insightCache: { insight: ContextInsight; expiresAt: number } | null = null;
 
   /** 连续失败次数，成功后清零 */
   private consecutiveFailures = 0;
@@ -91,8 +50,7 @@ export class AgentEngine {
     @InjectRepository(AgentDecisionEntity)
     private readonly decisionRepo: Repository<AgentDecisionEntity>,
     private readonly agentConfig: AgentConfigService,
-    private readonly llm: LlmClient,
-    private readonly strategyService: StrategyService,
+    private readonly core: DecisionCoreService,
     private readonly positions: PositionService,
     private readonly market: MarketService,
     private readonly news: NewsService,
@@ -273,17 +231,19 @@ export class AgentEngine {
 
   private lastRiskVerdict: { passed: boolean; rejectedBy?: string; note?: string } | null = null;
 
+  /**
+   * 构造决策输入快照。
+   *
+   * 指标/信号/新闻由共享决策内核计算（L0~L3 现货与合约完全一致），
+   * 账户口径是现货的「USDT/BTC 可用余额」（合约引擎传可用保证金与净持仓）。
+   */
   private async buildSnapshot(
     config: AgentConfigShape,
     candles: Candle[],
   ): Promise<DecisionInputSnapshot> {
-    const indicators = computeIndicators(candles);
-    const signals = buildSignals(indicators, candles);
-    const indicatorScore = scoreSignals(signals);
     const ticker = this.market.getTicker(config.symbol);
     const recentNews = await this.news.getRecent(6);
     const balances = await this.accounts.getBalances(config.mode, config.enabledExchanges);
-    const balanceSource = balances.source;
 
     const quoteFree = balances.rows
       .filter((r) => r.asset === 'USDT')
@@ -292,14 +252,11 @@ export class AgentEngine {
       .filter((r) => r.asset === 'BTC')
       .reduce((acc, r) => acc + r.free, 0);
 
-    return {
+    return this.core.buildSnapshot({
       symbol: config.symbol,
       timeframe: config.timeframe,
-      ticker,
       candles,
-      indicators,
-      signals,
-      indicatorScore,
+      ticker,
       news: recentNews.map((n) => ({
         title: n.title,
         source: n.source,
@@ -310,9 +267,9 @@ export class AgentEngine {
         baseFree,
         mode: config.mode,
         environment: config.mode === 'live' ? 'live' : 'testnet',
-        source: balanceSource,
+        source: balances.source,
       },
-    };
+    });
   }
 
   /**
@@ -325,118 +282,31 @@ export class AgentEngine {
    * 注：原 llm 链路（AI 直出 BUY/SELL/HOLD）已移除——不可回测、不可复现、失败不可预测。
    * 两条链路都由确定性策略执行买卖，区别仅在于策略参数是否经 AI 元参数调节。
    */
+  /**
+   * 按配置的决策链路（decisionLane）产出决策。
+   *
+   * 实际计算全部委托给共享决策内核（L0~L3），现货与合约走同一份实现：
+   * 指标 → 信号 → 策略插件 → 决策。本方法只负责补齐现货的持仓快照。
+   */
   private async produceDecision(
     config: AgentConfigShape,
     snapshot: DecisionInputSnapshot,
   ): Promise<LaneDecision> {
-    // 兼容存量数据中已废弃的 'llm' 值：按 strategy 处理（策略执行，零 LLM 直出）
-    if (config.decisionLane === 'hybrid') {
-      return this.buildHybridLane(config, snapshot);
-    }
-    return this.buildStrategyLane(config, snapshot);
-  }
-
-  /**
-   * 阶段 5 · hybrid 链路：AI 只输出市场上下文元参数（regime/激进度/新闻情绪），
-   * 经纯函数 mapInsightToParams 映射为策略参数后由确定性策略执行。
-   *
-   * 停摆保护：AI 失败或输出不合法时不中断交易——优先沿用未过期的 insight 缓存，
-   * 否则回落 NEUTRAL_CONTEXT_INSIGHT（中性默认参数），degraded=true 留痕。
-   */
-  private async buildHybridLane(
-    config: AgentConfigShape,
-    snapshot: DecisionInputSnapshot,
-  ): Promise<LaneDecision> {
-    const prompt = buildContextPrompt(snapshot);
-    const cached = this.insightCache;
-    let insight: ContextInsight;
-    let degraded = false;
-    let degradeReason: string | null = null;
-    let llmResult: LlmResult | null = null;
-
-    if (cached && cached.expiresAt > Date.now()) {
-      insight = cached.insight;
-    } else {
-      const result = await this.llm.analyzeContext(
-        config.systemPrompt,
-        prompt,
-        config.model,
-        config.temperature,
-        config.maxTokens,
-      );
-      if (result.ok && result.insight) {
-        insight = normalizeInsight(result.insight);
-        this.insightCache = { insight, expiresAt: Date.now() + INSIGHT_TTL_MS };
-        llmResult = result;
-      } else {
-        // 缓存已过期但 AI 失败：超期缓存仍比中性默认更贴近当前市场，优先沿用
-        if (cached) {
-          insight = cached.insight;
-          degraded = true;
-          degradeReason = `AI 上下文调用失败，沿用上次分析（已超期）：${result.error ?? '未知原因'}`;
-        } else {
-          insight = NEUTRAL_CONTEXT_INSIGHT;
-          degraded = true;
-          degradeReason = `AI 上下文不可用，使用中性默认参数继续运行：${result.error ?? '未知原因'}`;
-        }
-        llmResult = result;
-      }
-    }
-
-    // 阈值基准 = 策略默认参数与用户 strategyParams 合并后的当前入场阈值
-    const baseParams = strategyRegistry.getOrDefault(config.strategyName).strategy.defaultParams;
-    const mapped = mapInsightToParams(insight, config.strategyName, {
-      ...baseParams,
-      ...config.strategyParams,
-    });
-    // 用户配置的 strategyParams 为基底，AI 映射参数覆盖同名项（AI 只调元参数，不碰其余配置）
-    const params = { ...config.strategyParams, ...mapped };
-    const lane = await this.buildStrategyLane(config, snapshot, params);
-    return {
-      ...lane,
-      lane: 'hybrid',
-      degraded: lane.degraded || degraded,
-      degradeReason: lane.degradeReason ?? degradeReason,
-      prompt,
-      positionMultiplier: mapped.positionMultiplier,
-      llmResult,
-    };
-  }
-
-  /** 构造纯策略链路的决策（strategy 链路本体，hybrid 链路也复用本方法执行买卖） */
-  private async buildStrategyLane(
-    config: AgentConfigShape,
-    snapshot: DecisionInputSnapshot,
-    paramsOverride?: Record<string, unknown>,
-  ): Promise<LaneDecision> {
-    // 策略上下文补持仓快照（阶段 4 出场规则的前置）；buildSnapshot 的其余数据保持同构复用
     const position = await this.positions.getPosition(config.symbol);
-    const context: Omit<StrategyContext, 'params'> = {
-      symbol: snapshot.symbol,
-      timeframe: snapshot.timeframe,
-      candles: snapshot.candles,
-      indicators: snapshot.indicators,
-      signals: snapshot.signals,
-      indicatorScore: snapshot.indicatorScore,
-      ticker: snapshot.ticker,
+    return this.core.produceDecision(
+      {
+        decisionLane: config.decisionLane,
+        strategyName: config.strategyName,
+        strategyParams: config.strategyParams,
+        systemPrompt: config.systemPrompt,
+        model: config.model,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        insightCacheKey: 'spot',
+      },
+      snapshot,
       position,
-      account: { quoteFree: snapshot.account.quoteFree, baseFree: snapshot.account.baseFree },
-    };
-    const { output, strategyName, fellBack } = this.strategyService.evaluate(
-      config.strategyName,
-      context,
-      paramsOverride ?? config.strategyParams,
     );
-    return {
-      lane: 'strategy',
-      strategyName,
-      decision: output,
-      // 配置了不存在的策略名 → 记录降级原因，而非静默回退
-      degraded: fellBack,
-      degradeReason: fellBack ? `策略 ${config.strategyName} 不存在，已回退 ${strategyName}` : null,
-      llmResult: null,
-      prompt: '',
-    };
   }
 
   /**
@@ -457,33 +327,29 @@ export class AgentEngine {
     const price = snapshot.ticker.price || snapshot.indicators.lastClose;
     if (!(price > 0)) return null;
 
-    const pnlPct = (price - position.avgCost) / position.avgCost;
+    // 现货只有多头（side=null），出场判定与合约共用同一纯函数
+    const exit = evaluateExitRules({
+      entryPrice: position.avgCost,
+      price,
+      side: null,
+      exitRules: config.exitRules,
+    });
+    if (!exit.triggered) return null;
 
-    let trigger: string | null = null;
-    if (stopLossPct != null && pnlPct <= -stopLossPct) {
-      trigger =
-        `止损触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
-        `亏损 ${(pnlPct * 100).toFixed(2)}%，达到 -${(stopLossPct * 100).toFixed(2)}% 阈值`;
-    } else if (takeProfitPct != null && pnlPct >= takeProfitPct) {
-      trigger =
-        `止盈触发：现价 ${price.toFixed(2)} 较持仓均价 ${position.avgCost.toFixed(2)} ` +
-        `盈利 ${(pnlPct * 100).toFixed(2)}%，达到 +${(takeProfitPct * 100).toFixed(2)}% 阈值`;
-    }
-    if (!trigger) return null;
-
-    this.logger.warn(`出场规则触发 → 全仓卖出：${trigger}`);
+    this.logger.warn(`出场规则触发 → 全仓卖出：${exit.reason}`);
     return {
       lane: 'strategy',
       strategyName: null,
       degraded: true,
-      degradeReason: `出场规则触发（优先级高于策略/模型信号）：${trigger}`,
+      degradeReason: `出场规则触发（优先级高于策略/模型信号）：${exit.reason}`,
       llmResult: null,
       prompt: '',
       closeAll: true,
       decision: {
+        // 现货恒为卖出；合约由 FuturesEngine 按方向取 exit.closeAction
         action: 'SELL',
         confidence: 1,
-        reason: `出场规则触发：${trigger}。按出场规则全仓卖出。`,
+        reason: `出场规则触发：${exit.reason}。按出场规则全仓卖出。`,
         riskNotes: '出场规则属于持仓层能力，两条链路均生效，优先级高于开仓信号。',
       },
     };
@@ -527,18 +393,18 @@ export class AgentEngine {
     }
 
     const side = decision.action === 'BUY' ? 'BUY' : 'SELL';
-    // 出场规则触发（closeAll）时卖出全部持仓，常规决策仍按 positionPct 部分卖出
-    // hybrid 链路的 AI 激进度映射为开仓乘数（0.5~1.5），仅放大/收缩开仓，卖出不受影响
-    const buyMultiplier =
-      decision.action === 'BUY' && positionMultiplier != null
-        ? Math.min(1.5, Math.max(0.5, positionMultiplier))
-        : 1;
-    const quantity =
-      side === 'BUY'
-        ? (snapshot.account.quoteFree * config.positionPct * buyMultiplier) / price
-        : closeAll
-          ? snapshot.account.baseFree
-          : snapshot.account.baseFree * config.positionPct;
+    // 数量公式下沉到 shared 的纯函数，与 SpotExecutor 共用同一实现：
+    // 出场规则触发（closeAll）时卖出全部持仓，常规决策仍按 positionPct 部分卖出；
+    // hybrid 链路的 AI 激进度映射为开仓乘数（0.5~1.5），仅放大/收缩开仓，卖出不受影响。
+    const quantity = computeSpotOrderQty({
+      action: decision.action,
+      quoteFree: snapshot.account.quoteFree,
+      baseFree: snapshot.account.baseFree,
+      positionPct: config.positionPct,
+      price,
+      positionMultiplier,
+      closeAll,
+    });
 
     if (!(quantity > 0)) {
       this.lastRiskVerdict = {

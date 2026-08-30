@@ -14,6 +14,8 @@ import { AccountModule } from './account/account.module';
 import { AgentConfigModule } from './agent/agent-config.module';
 import { AgentModule } from './agent/agent.module';
 import { TradingModule } from './trading/trading.module';
+import { FuturesModule } from './futures/futures.module';
+import { ExecutionModule } from './execution/execution.module';
 import { AuthModule } from './auth/auth.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
@@ -48,6 +50,8 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     NewsModule,
     AgentConfigModule,
     TradingModule,
+    FuturesModule,
+    ExecutionModule,
     AgentModule,
     OverviewModule,
     BacktestModule,

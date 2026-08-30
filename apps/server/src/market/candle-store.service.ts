@@ -1,13 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Candle, Timeframe } from '@ai-trader/shared';
+import { Candle, DEFAULT_MARKET, MarketType, Timeframe } from '@ai-trader/shared';
 import { In, Repository } from 'typeorm';
 import { MarketCandleEntity } from '../database/entities';
 
 const MAX_BUFFER = 1500;
 
-function key(symbol: string, interval: Timeframe): string {
-  return `${symbol}:${interval}`;
+/**
+ * 内存缓冲键纳入 market：现货与合约同标的 K 线必须分开缓存，
+ * 否则合约行情会覆盖现货缓冲，污染现货指标与回测。
+ */
+function key(symbol: string, interval: Timeframe, market: MarketType): string {
+  return `${market}:${symbol}:${interval}`;
 }
 
 /**
@@ -25,18 +29,23 @@ export class CandleStoreService {
     private readonly repo: Repository<MarketCandleEntity>,
   ) {}
 
-  get(symbol: string, interval: Timeframe, limit = 300): Candle[] {
-    const rows = this.buffers.get(key(symbol, interval)) ?? [];
+  get(symbol: string, interval: Timeframe, limit = 300, market: MarketType = DEFAULT_MARKET): Candle[] {
+    const rows = this.buffers.get(key(symbol, interval, market)) ?? [];
     return rows.slice(-limit);
   }
 
-  has(symbol: string, interval: Timeframe): boolean {
-    return (this.buffers.get(key(symbol, interval))?.length ?? 0) > 0;
+  has(symbol: string, interval: Timeframe, market: MarketType = DEFAULT_MARKET): boolean {
+    return (this.buffers.get(key(symbol, interval, market))?.length ?? 0) > 0;
   }
 
   /** 写入一根 K 线（同 openTime 覆盖，新的追加），返回是否闭合了新周期 */
-  upsert(symbol: string, interval: Timeframe, candle: Candle): { closed: boolean; isNew: boolean } {
-    const k = key(symbol, interval);
+  upsert(
+    symbol: string,
+    interval: Timeframe,
+    candle: Candle,
+    market: MarketType = DEFAULT_MARKET,
+  ): { closed: boolean; isNew: boolean } {
+    const k = key(symbol, interval, market);
     let rows = this.buffers.get(k);
     if (!rows) {
       rows = [];
@@ -61,9 +70,14 @@ export class CandleStoreService {
     return { closed: false, isNew };
   }
 
-  replaceAll(symbol: string, interval: Timeframe, candles: Candle[]) {
+  replaceAll(
+    symbol: string,
+    interval: Timeframe,
+    candles: Candle[],
+    market: MarketType = DEFAULT_MARKET,
+  ) {
     this.buffers.set(
-      key(symbol, interval),
+      key(symbol, interval, market),
       candles.slice(-MAX_BUFFER).sort((a, b) => a.time - b.time),
     );
   }
@@ -76,9 +90,11 @@ export class CandleStoreService {
 
     const rows: Partial<MarketCandleEntity>[] = [];
     for (const [k, candle] of entries) {
-      const [symbol, interval] = k.split(':');
+      // key 形如 `market:symbol:interval`
+      const [market, symbol, interval] = k.split(':');
       rows.push({
         symbol,
+        market: market as MarketType,
         interval: interval as Timeframe,
         openTime: candle.time,
         open: candle.open,
@@ -89,7 +105,9 @@ export class CandleStoreService {
       });
     }
     try {
-      await this.repo.upsert(rows, ['symbol', 'interval', 'openTime']);
+      // 冲突键必须与唯一索引 (symbol, market, interval, openTime) 一致，
+      // 否则合约 K 线写入会与现货互相覆盖
+      await this.repo.upsert(rows, ['symbol', 'market', 'interval', 'openTime']);
       return rows.length;
     } catch (err) {
       this.logger.error(`K 线落库失败: ${(err as Error).message}`);
@@ -97,11 +115,16 @@ export class CandleStoreService {
     }
   }
 
-  async persistAll(symbol: string, interval: Timeframe) {
-    const candles = this.get(symbol, interval, MAX_BUFFER);
+  async persistAll(
+    symbol: string,
+    interval: Timeframe,
+    market: MarketType = DEFAULT_MARKET,
+  ) {
+    const candles = this.get(symbol, interval, MAX_BUFFER, market);
     if (candles.length === 0) return;
     const rows = candles.map((c) => ({
       symbol,
+      market,
       interval,
       openTime: c.time,
       open: c.open,
@@ -111,16 +134,21 @@ export class CandleStoreService {
       volume: c.volume,
     }));
     try {
-      await this.repo.upsert(rows, ['symbol', 'interval', 'openTime']);
+      await this.repo.upsert(rows, ['symbol', 'market', 'interval', 'openTime']);
     } catch (err) {
       this.logger.error(`K 线全量落库失败: ${(err as Error).message}`);
     }
   }
 
   /** 从数据库装载历史 K 线 */
-  async load(symbol: string, interval: Timeframe, limit = 300): Promise<Candle[]> {
+  async load(
+    symbol: string,
+    interval: Timeframe,
+    limit = 300,
+    market: MarketType = DEFAULT_MARKET,
+  ): Promise<Candle[]> {
     const rows = await this.repo.find({
-      where: { symbol, interval },
+      where: { symbol, interval, market },
       order: { openTime: 'ASC' },
       take: limit,
     });
@@ -134,13 +162,17 @@ export class CandleStoreService {
     }));
   }
 
-  async count(symbol: string, interval: Timeframe): Promise<number> {
-    return this.repo.count({ where: { symbol, interval } });
+  async count(
+    symbol: string,
+    interval: Timeframe,
+    market: MarketType = DEFAULT_MARKET,
+  ): Promise<number> {
+    return this.repo.count({ where: { symbol, interval, market } });
   }
 
-  async clear(symbol: string, interval: Timeframe) {
-    await this.repo.delete({ symbol, interval });
-    this.buffers.delete(key(symbol, interval));
+  async clear(symbol: string, interval: Timeframe, market: MarketType = DEFAULT_MARKET) {
+    await this.repo.delete({ symbol, interval, market });
+    this.buffers.delete(key(symbol, interval, market));
   }
 
   async deleteSymbols(symbols: string[]) {

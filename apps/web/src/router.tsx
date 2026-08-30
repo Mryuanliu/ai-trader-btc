@@ -14,6 +14,7 @@ import { AdminOrders } from '@/pages/admin/AdminOrders';
 import { AdminAccounts } from '@/pages/admin/AdminAccounts';
 import { AdminRisk } from '@/pages/admin/AdminRisk';
 import { AdminBacktest } from '@/pages/admin/AdminBacktest';
+import { AdminFutures } from '@/pages/admin/AdminFutures';
 import { MobileHome } from '@/pages/mobile/MobileHome';
 import { MobileTrade } from '@/pages/mobile/MobileTrade';
 import { MobileOrders } from '@/pages/mobile/MobileOrders';
@@ -61,6 +62,7 @@ export function AppRoutes() {
         <Route path="accounts" element={<AdminAccounts />} />
         <Route path="risk" element={<AdminRisk />} />
         <Route path="backtest" element={<AdminBacktest />} />
+        <Route path="futures" element={<AdminFutures />} />
       </Route>
       <Route path="*" element={<Navigate to={isMobile ? '/m' : '/admin'} replace />} />
     </Routes>

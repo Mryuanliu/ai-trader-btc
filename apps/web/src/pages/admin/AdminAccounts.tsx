@@ -16,6 +16,8 @@ import {
   ENVIRONMENTS,
   ENVIRONMENT_LABELS,
   EXCHANGE_LABELS,
+  MARKET_LABELS,
+  marketOfExchange,
   type Environment,
   type ExchangeCode,
 } from '@ai-trader/shared';
@@ -110,7 +112,10 @@ export function AdminAccounts() {
             value={active}
             onChange={(v) => setActive(v as ExchangeCode)}
             options={(data ?? []).map((a) => ({
-              label: `${EXCHANGE_LABELS[a.exchange]}${a.configured ? ' · 已配置' : ''}`,
+              // 标注市场类型，便于区分现货账户与合约账户
+              label: `${EXCHANGE_LABELS[a.exchange]} · ${MARKET_LABELS[marketOfExchange(a.exchange)]}${
+                a.configured ? ' · 已配置' : ''
+              }`,
               value: a.exchange,
             }))}
           />

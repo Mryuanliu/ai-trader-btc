@@ -84,3 +84,117 @@ export function computePosition(
 
   return pos;
 }
+
+// ---------------------------------------------------------------------------
+// 合约净持仓模型（与现货的关键差异：可做空，净持仓可正可负）
+// ---------------------------------------------------------------------------
+
+/** 合约持仓状态：净持仓语义，数量为负表示空头 */
+export interface FuturesPositionState {
+  symbol: string;
+  /** 净持仓：正=多头，负=空头，0=无持仓 */
+  netQty: number;
+  /** 开仓加权均价；无持仓时为 0 */
+  entryPrice: number;
+  /** 已实现盈亏（平仓兑现，手续费已扣） */
+  realizedPnl: number;
+  /** 累计手续费 */
+  totalFee: number;
+}
+
+export function emptyFuturesPosition(symbol: string): FuturesPositionState {
+  return { symbol, netQty: 0, entryPrice: 0, realizedPnl: 0, totalFee: 0 };
+}
+
+/** 数量绝对值小于该阈值视为已平净（消除浮点残留） */
+const FLAT_EPSILON = 1e-12;
+
+/**
+ * 把一笔成交应用到合约净持仓上（**先平后反手**语义）。
+ *
+ * - 同向：加权均价加仓
+ * - 反向不超过持仓：全部平掉，兑现已实现盈亏（多头 (卖-买)×量，空头 (买-卖)×量）
+ * - 反向超过持仓：先按原均价平掉全部，剩余量以成交价反手开新仓
+ *
+ * 手续费在本函数内计入已实现盈亏与 totalFee；调用方勿再重复扣减。
+ * 纯函数：返回新状态，不改入参。
+ */
+export function applyFuturesFill(
+  state: FuturesPositionState,
+  fill: PositionFill,
+): FuturesPositionState {
+  const qty = Number(fill.quantity);
+  const price = Number(fill.price);
+  const fee = Number(fill.fee) || 0;
+  if (!(qty > 0) || !(price > 0)) return { ...state };
+
+  const out: FuturesPositionState = {
+    ...state,
+    realizedPnl: state.realizedPnl,
+    totalFee: state.totalFee + fee,
+  };
+
+  const dir = fill.side === 'BUY' ? 1 : -1;
+  const holding = Math.abs(out.netQty) > FLAT_EPSILON ? out.netQty : 0;
+
+  if (holding === 0) {
+    // 无持仓：直接开仓
+    out.netQty = dir * qty;
+    out.entryPrice = price;
+    return out;
+  }
+
+  const sameDir = Math.sign(dir) === Math.sign(holding);
+  if (sameDir) {
+    // 同向加仓：加权均价
+    const absOld = Math.abs(holding);
+    const absNew = absOld + qty;
+    out.entryPrice = (out.entryPrice * absOld + price * qty) / absNew;
+    out.netQty = holding + dir * qty;
+    return out;
+  }
+
+  // 反向：先平掉与持仓重叠的部分
+  const closeQty = Math.min(qty, Math.abs(holding));
+  const holdSign = Math.sign(holding);
+  const feeShare = (fee * closeQty) / qty;
+  out.realizedPnl += holdSign * (price - out.entryPrice) * closeQty - feeShare;
+  out.netQty = holding + dir * closeQty;
+
+  const remain = qty - closeQty;
+  if (remain > FLAT_EPSILON) {
+    // 反向超过持仓：剩余数量反手开新仓
+    out.netQty = dir * remain;
+    out.entryPrice = price;
+    return out;
+  }
+  // 恰好全部平掉：净持仓算术上已归零，钳掉浮点残留并把均价清零
+  if (Math.abs(out.netQty) <= FLAT_EPSILON) {
+    out.netQty = 0;
+    out.entryPrice = 0;
+  }
+  return out;
+}
+
+/**
+ * 由成交序列推导合约净持仓（fills 必须按成交时间升序）。
+ * 回测与测试用；实盘持仓以交易所 positionRisk 为权威。
+ */
+export function computeFuturesPosition(
+  symbol: string,
+  fills: PositionFill[],
+  markPrice: number,
+): FuturesPositionState & { unrealizedPnl: number; notional: number } {
+  let state = emptyFuturesPosition(symbol);
+  for (const fill of fills) state = applyFuturesFill(state, fill);
+
+  const unrealizedPnl = state.netQty !== 0 && markPrice > 0
+    ? state.netQty * (markPrice - state.entryPrice)
+    : 0;
+
+  return {
+    ...state,
+    unrealizedPnl,
+    notional: Math.abs(state.netQty) * markPrice,
+  };
+}

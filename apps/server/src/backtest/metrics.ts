@@ -52,6 +52,11 @@ export function computeMetrics(params: {
   /** 回放跨度内的第一根收盘价，用于 buy&hold 基准 */
   firstClose: number;
   lastClose: number;
+  /**
+   * 回合盈亏序列覆盖值；不传时按现货口径（一买一卖配对）推导。
+   * 合约回测传 buildFuturesRoundTrips 的结果（空头回合方向相反）。
+   */
+  roundTripsOverride?: number[];
 }): import('./types').BacktestMetrics {
   const { equityCurve, trades, initialCapital, interval, firstClose, lastClose } = params;
 
@@ -74,8 +79,8 @@ export function computeMetrics(params: {
     if (prev > 0) returns.push(equityCurve[i].equity / prev - 1);
   }
 
-  // 一次「完整回合」= 一买一卖，用于胜率/盈亏比
-  const roundTrips = buildRoundTrips(trades);
+  // 一次「完整回合」= 一开一平，用于胜率/盈亏比
+  const roundTrips = params.roundTripsOverride ?? buildRoundTrips(trades);
   const wins = roundTrips.filter((pnl) => pnl > 0);
   const losses = roundTrips.filter((pnl) => pnl < 0);
   const grossProfit = wins.reduce((a, b) => a + b, 0);
@@ -98,6 +103,27 @@ export function computeMetrics(params: {
   };
 }
 
+/**
+ * 合约绩效汇总。
+ *
+ * 与现货的唯一差异是回合配对：空头回合「先卖开、后买平」，盈亏方向相反，
+ * 复用现货的「一买一卖」配对会把空头盈利算成亏损。曲线类指标（收益/回撤/夏普）
+ * 与市场无关，直接复用 computeMetrics，只覆盖回合序列。
+ */
+export function computeFuturesMetrics(params: {
+  equityCurve: EquityPoint[];
+  trades: import('./types').FuturesBacktestTrade[];
+  initialCapital: number;
+  interval: string;
+  firstClose: number;
+  lastClose: number;
+}): import('./types').BacktestMetrics {
+  return computeMetrics({
+    ...params,
+    roundTripsOverride: buildFuturesRoundTrips(params.trades),
+  });
+}
+
 /** 由成交序列配对出完整回合的盈亏（USDT）。开头未平的买入不入胜率统计 */
 function buildRoundTrips(trades: BacktestTrade[]): number[] {
   const pnls: number[] = [];
@@ -110,6 +136,32 @@ function buildRoundTrips(trades: BacktestTrade[]): number[] {
       const buyCost = open.quantity * open.price + open.fee;
       const sellProceeds = trade.quantity * trade.price - trade.fee;
       pnls.push(sellProceeds - buyCost);
+      open = null;
+    }
+  }
+  return pnls;
+}
+
+/**
+ * 合约回合配对：开仓单（reduceOnly=false）与最近的平仓单（reduceOnly=true）配对。
+ *
+ * 盈亏 = 方向 × (平仓价 − 开仓价) × 数量 − 双边手续费
+ * 方向：多头 +1（低买高卖盈利），空头 −1（高卖低买盈利）。
+ * 同向加仓不单独配对——成本与均价已在持仓状态里加权，胜率统计以首仓口径为准。
+ */
+export function buildFuturesRoundTrips(trades: import('./types').FuturesBacktestTrade[]): number[] {
+  const pnls: number[] = [];
+  let open: import('./types').FuturesBacktestTrade | null = null;
+  for (const trade of trades) {
+    if (!open) {
+      if (!trade.reduceOnly) open = trade;
+      continue;
+    }
+    if (trade.reduceOnly) {
+      const dir = open.positionSide === 'SHORT' ? -1 : 1;
+      const closedQty = Math.min(open.quantity, trade.quantity);
+      const pnl = dir * (trade.price - open.price) * closedQty - (open.fee + trade.fee);
+      pnls.push(pnl);
       open = null;
     }
   }

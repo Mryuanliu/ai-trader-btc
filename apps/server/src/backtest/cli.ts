@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { Repository } from 'typeorm';
 import { AppDataSource } from '../database/data-source';
-import { MarketCandleEntity } from '../database/entities';
+import { FundingRateEntity, MarketCandleEntity } from '../database/entities';
 import { strategyRegistry, type Timeframe } from '@ai-trader/shared';
-import { backfill, loadRange } from './candle-source';
+import { backfill, loadRange, backfillFunding, loadFundingRange } from './candle-source';
 import { runBacktest } from './engine';
-import type { BacktestConfig } from './types';
+import { runFuturesBacktest } from './futures-engine';
+import type { BacktestConfig, FuturesBacktestConfig } from './types';
 
 /**
  * 回测 CLI。
@@ -43,6 +45,25 @@ async function main(): Promise<void> {
   const from = ts(String(args.from ?? '2026-06-01'));
   const to = ts(String(args.to ?? new Date().toISOString().slice(0, 10)));
   if (!(from < to)) throw new Error('--from 必须早于 --to');
+  const market = args.market === 'futures' ? 'futures' : 'spot';
+
+  const strategyName = String(args.strategy ?? 'trend_following');
+  const exitRules =
+    args['stop-loss'] || args['take-profit']
+      ? {
+          stopLossPct: args['stop-loss'] ? Number(args['stop-loss']) : null,
+          takeProfitPct: args['take-profit'] ? Number(args['take-profit']) : null,
+        }
+      : undefined;
+
+  await AppDataSource.initialize();
+  const repo = AppDataSource.getRepository(MarketCandleEntity);
+
+  if (market === 'futures') {
+    await runFuturesCli({ symbol, interval, from, to, args, strategyName, exitRules, repo });
+    await AppDataSource.destroy();
+    return;
+  }
 
   const config: BacktestConfig = {
     symbol,
@@ -54,20 +75,11 @@ async function main(): Promise<void> {
     feeRateBps: Number(args.fee ?? 10),
     positionPct: Number(args['position-pct'] ?? 0.1),
     minConfidence: Number(args['min-confidence'] ?? 0.6),
-    strategyName: String(args.strategy ?? 'trend_following'),
+    strategyName,
     strategyParams: args.params ? JSON.parse(String(args.params)) : undefined,
-    exitRules:
-      args['stop-loss'] || args['take-profit']
-        ? {
-            stopLossPct: args['stop-loss'] ? Number(args['stop-loss']) : null,
-            takeProfitPct: args['take-profit'] ? Number(args['take-profit']) : null,
-          }
-        : undefined,
+    exitRules,
     warmupBars: Number(args.warmup ?? 120),
   };
-
-  await AppDataSource.initialize();
-  const repo = AppDataSource.getRepository(MarketCandleEntity);
 
   let candles = await loadRange(repo, symbol, interval, from, to);
   // 稀疏检测：库内根数明显少于区间应有根数时回填（仅按 warmup 判断会在大区间小库时漏填）
@@ -126,3 +138,124 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+/** 合约回测 CLI：--market=futures [--leverage=5] [--compare-leverage] */
+async function runFuturesCli(input: {
+  symbol: string;
+  interval: Timeframe;
+  from: number;
+  to: number;
+  args: Record<string, string | boolean>;
+  strategyName: string;
+  exitRules: BacktestConfig['exitRules'];
+  repo: Repository<MarketCandleEntity>;
+}): Promise<void> {
+  const { symbol, interval, from, to, args, strategyName, exitRules, repo } = input;
+  const fundingRepo = AppDataSource.getRepository(FundingRateEntity);
+  const { strategy, fellBack } = strategyRegistry.getOrDefault(strategyName);
+  if (fellBack) console.warn(`策略 ${strategyName} 不存在，使用 ${strategy.name}`);
+
+  const leverage = Math.min(10, Math.max(1, Math.round(Number(args.leverage ?? 5))));
+  const cfg: FuturesBacktestConfig = {
+    symbol,
+    interval,
+    from,
+    to,
+    initialCapital: Number(args.capital ?? 10_000),
+    slippageBps: Number(args.slippage ?? 5),
+    feeRateBps: Number(args.fee ?? 10),
+    positionPct: Number(args['position-pct'] ?? 0.1),
+    minConfidence: Number(args['min-confidence'] ?? 0.6),
+    strategyName: strategy.name,
+    strategyParams: args.params ? JSON.parse(String(args.params)) : undefined,
+    exitRules,
+    warmupBars: Number(args.warmup ?? 120),
+    leverage,
+    stepSize: Number(args['step-size'] ?? 0.0001),
+    minNotional: Number(args['min-notional'] ?? 50),
+  };
+
+  // 数据：fapi 回填 + 资金费回填（失败按零费率继续）
+  let candles = await loadRange(repo, symbol, interval, from, to, 'futures');
+  const stepMs = intervalStepMs(interval);
+  const expectedBars = Math.floor((to - from) / stepMs) + 1;
+  if (candles.length < expectedBars * 0.9) {
+    console.log(`合约 K 线 ${candles.length}/${expectedBars} 根，回填 fapi…`);
+    await backfill(repo, symbol, interval, from, to, 'futures');
+    candles = await loadRange(repo, symbol, interval, from, to, 'futures');
+  }
+  if (candles.length <= cfg.warmupBars + 2) throw new Error(`合约 K 线不足（${candles.length} 根）`);
+
+  let fundingRates = await loadFundingRange(fundingRepo, symbol, from, to);
+  if (fundingRates.length < Math.floor((to - from) / (8 * 3_600_000)) * 0.9) {
+    try {
+      await backfillFunding(fundingRepo, symbol, from, to);
+      fundingRates = await loadFundingRange(fundingRepo, symbol, from, to);
+    } catch (err) {
+      console.warn(`资金费率回填失败，按零费率继续: ${(err as Error).message}`);
+      fundingRates = [];
+    }
+  }
+  cfg.fundingRates = fundingRates;
+
+  const runOne = (lev: number) => runFuturesBacktest(candles, strategy, { ...cfg, leverage: lev });
+
+  if (args['compare-leverage']) {
+    const levels = [1, 3, 5].filter((l) => l !== leverage);
+    const all = [
+      { leverage, report: await runOne(leverage) },
+      ...(await Promise.all(levels.map(async (l) => ({ leverage: l, report: await runOne(l) })))),
+    ].sort((a, b) => a.leverage - b.leverage);
+
+    console.log(`\n=== 合约回测 · 杠杆对比（${symbol} ${interval}，${strategy.name}）===`);
+    console.table(
+      all.map(({ leverage: l, report }) => ({
+        杠杆: `${l}x`,
+        总收益率: `${report.metrics.totalReturnPct}%`,
+        年化: `${report.metrics.annualizedReturnPct}%`,
+        最大回撤: `${report.metrics.maxDrawdownPct}%`,
+        夏普: report.metrics.sharpeRatio,
+        胜率: `${(report.metrics.winRate * 100).toFixed(1)}%`,
+        盈亏比: report.metrics.profitFactor === Infinity ? '∞' : report.metrics.profitFactor,
+        交易次数: report.metrics.tradeCount,
+        强平次数: report.meta.liquidationCount,
+        资金费: report.meta.totalFundingPaid,
+      })),
+    );
+
+    const outDir = resolve(process.cwd(), 'reports/backtest');
+    if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+    const name = `futures-compare-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-${strategy.name}.json`;
+    writeFileSync(resolve(outDir, name), JSON.stringify(all.map((r) => r.report), null, 2));
+    console.log(`对比报告已写入 reports/backtest/${name}`);
+    return;
+  }
+
+  const report = await runOne(leverage);
+  const outDir = resolve(process.cwd(), 'reports/backtest');
+  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+  const name = `futures-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-${strategy.name}-${interval}-${leverage}x.json`;
+  writeFileSync(resolve(outDir, name), JSON.stringify(report, null, 2));
+
+  console.log(`\n=== 合约回测（${symbol} ${interval}，${strategy.name}，${leverage}x）===`);
+  console.table({
+    总收益率: `${report.metrics.totalReturnPct}%`,
+    年化收益率: `${report.metrics.annualizedReturnPct}%`,
+    最大回撤: `${report.metrics.maxDrawdownPct}%`,
+    夏普比率: report.metrics.sharpeRatio,
+    胜率: `${(report.metrics.winRate * 100).toFixed(1)}%`,
+    盈亏比: report.metrics.profitFactor === Infinity ? '∞' : report.metrics.profitFactor,
+    交易次数: report.metrics.tradeCount,
+    强平次数: report.meta.liquidationCount,
+    资金费率: report.meta.totalFundingPaid,
+  });
+  console.log(`报告已写入 reports/backtest/${name}`);
+}
+
+function intervalStepMs(interval: Timeframe): number {
+  const match = /^(\d+)([mhd])$/.exec(interval);
+  if (!match) return 300_000;
+  const n = Number(match[1]);
+  const unitMs = { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]] ?? 60_000;
+  return n * unitMs;
+}

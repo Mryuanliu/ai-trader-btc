@@ -1,11 +1,66 @@
-/** 支持的交易所 */
-export const EXCHANGE_CODES = ['binance', 'okx'] as const;
+/**
+ * 支持的交易所。
+ *
+ * `binance-futures` 是币安 U 本位合约，与现货 `binance` 是两套独立账户与链路，
+ * 但共用同一套 API Key（demo 环境已实测通用）。
+ *
+ * 注意追加顺序：多处循环是「首个可用即返回」的短路逻辑，
+ * 新增交易所请**追加到数组末尾**，避免抢占现货链路的默认选择。
+ */
+export const EXCHANGE_CODES = ['binance', 'okx', 'binance-futures'] as const;
 export type ExchangeCode = (typeof EXCHANGE_CODES)[number];
 
 export const EXCHANGE_LABELS: Record<ExchangeCode, string> = {
   binance: '币安 Binance',
   okx: '欧意 OKX',
+  'binance-futures': '币安合约',
 };
+
+/**
+ * 市场类型：现货 / 合约（U 本位永续）。
+ * 系统按此维度隔离 K 线、执行、风控与持仓（L4~L6），而指标与策略层（L0~L3）完全共用。
+ */
+export const MARKETS = ['spot', 'futures'] as const;
+export type MarketType = (typeof MARKETS)[number];
+
+export const MARKET_LABELS: Record<MarketType, string> = {
+  spot: '现货',
+  futures: '合约',
+};
+
+export const DEFAULT_MARKET: MarketType = 'spot';
+
+/** 各交易所所属市场：新增交易所或市场只需在此登记 */
+export const EXCHANGE_MARKETS: Record<ExchangeCode, MarketType> = {
+  binance: 'spot',
+  okx: 'spot',
+  'binance-futures': 'futures',
+};
+
+/**
+ * 现货交易所集合。
+ *
+ * 现货行情拉取、余额读取、Agent 可选交易所等处必须用它而非 EXCHANGE_CODES：
+ * 遍历全部交易所会把合约账户也纳进来，导致合约钱包余额与现货 USDT 重复计入总权益。
+ */
+export const SPOT_EXCHANGE_CODES = ['binance', 'okx'] as const;
+
+export function marketOfExchange(code: ExchangeCode): MarketType {
+  return EXCHANGE_MARKETS[code] ?? DEFAULT_MARKET;
+}
+
+export function isSpotExchange(code: ExchangeCode): boolean {
+  return marketOfExchange(code) === 'spot';
+}
+
+/**
+ * 合约最小名义价值的**保守兜底值**（USDT），仅在 exchangeInfo 取不到过滤器时使用。
+ *
+ * 真实门槛由交易所按标的下发且各不相同（实测合约 demo：BTCUSDT=50、ETHUSDT=20、多数=5），
+ * 一律优先以 `getSymbolFilters()` 返回的 minNotional 为准。
+ * 兜底取偏大的值更安全：宁可少下单，也不要发一个被交易所 -4164 拒绝的单。
+ */
+export const FUTURES_MIN_NOTIONAL = 100;
 
 /**
  * 账户环境：模拟盘（币安 Demo Mode） / 测试网 / 实盘
@@ -112,6 +167,12 @@ export const RISK_LIMITS = {
   feeRateBps: { min: 0, max: 100 },
   /** 单一标的持仓市值占总权益的上限（百分比），防止连续加仓导致过度集中 */
   maxExposurePct: { min: 5, max: 100 },
+  /** 合约开仓杠杆倍数。上限 10：再高则小幅波动即强平，与「回撤优先」原则冲突 */
+  leverage: { min: 1, max: 10 },
+  /** 杠杆硬上限（管理员可下调，但不允许配出超过此值的天花板） */
+  maxLeverage: { min: 1, max: 20 },
+  /** 距强平价低于该比例时禁止加仓（0.15 = 15%） */
+  liquidationBufferPct: { min: 0.01, max: 0.5 },
 } as const;
 
 /** 由成交明细推导的持仓快照 */
@@ -133,6 +194,36 @@ export interface PositionSnapshot {
   totalSold: number;
   /** 累计手续费 */
   totalFee: number;
+}
+
+/**
+ * 合约持仓快照：净持仓可正可负，以交易所 positionRisk 为权威（不落库推导）。
+ *
+ * 与现货 PositionSnapshot 的关键差异：
+ * - quantity 可为负（空头），现货恒为非负
+ * - 有强平价与保证金概念，现货无
+ * - 名义价值 = |quantity| × markPrice，而非 quantity × price
+ */
+export interface FuturesPositionSnapshot {
+  symbol: string;
+  /** 净持仓数量：正=多头，负=空头，0=无持仓 */
+  quantity: number;
+  entryPrice: number;
+  markPrice: number;
+  /** 强平价；无持仓或无强平风险时交易所返回 0 */
+  liquidationPrice: number;
+  leverage: number;
+  marginType: 'isolated' | 'cross';
+  /** 逐仓模式下该仓位的保证金；全仓模式下为 0 */
+  isolatedMargin: number;
+  unrealizedPnl: number;
+  /** 名义价值 = |quantity| × markPrice */
+  notional: number;
+  /**
+   * 距强平价的百分比（方向感知：多头看下跌空间，空头看上涨空间）。
+   * 无持仓或强平价为 0 时为 null，表示无强平风险。
+   */
+  liquidationDistancePct: number | null;
 }
 
 export type RiskLimitKey = keyof typeof RISK_LIMITS;
