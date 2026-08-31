@@ -1,9 +1,8 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth';
-import { LoginModal } from '@/components/AuthGate';
+import { LoginPage } from '@/pages/LoginPage';
 import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
@@ -21,14 +20,23 @@ import { MobileOrders } from '@/pages/mobile/MobileOrders';
 import { MobileAgent } from '@/pages/mobile/MobileAgent';
 import { useIsMobile } from '@/hooks/useBreakpoint';
 
+/** 受保护路由：未登录跳登录页，登录后回到原本要访问的地址 */
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const hasToken = useAuthStore((s) => Boolean(s.token));
+  const location = useLocation();
+
+  if (!hasToken) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  return children;
+}
+
 /** 同一套应用按屏幕宽度切换移动钱包视图与 PC 后台视图 */
 export function AppRoutes() {
   const isMobile = useIsMobile();
   const location = useLocation();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  // 后台接口全部挂了 JWT 守卫：未登录直接弹强制登录框（登录成功后刷新全部查询）
-  const hasToken = useAuthStore((s) => Boolean(s.token));
 
   useEffect(() => {
     const inMobile = location.pathname.startsWith('/m');
@@ -41,19 +49,33 @@ export function AppRoutes() {
   }, [isMobile, location.pathname, navigate]);
 
   return (
-    <>
     <Routes>
       <Route
         path="/"
         element={<Navigate to={isMobile ? '/m' : '/admin'} replace />}
       />
-      <Route path="/m" element={<MobileLayout />}>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="/m"
+        element={
+          <ProtectedRoute>
+            <MobileLayout />
+          </ProtectedRoute>
+        }
+      >
         <Route index element={<MobileHome />} />
         <Route path="trade" element={<MobileTrade />} />
         <Route path="orders" element={<MobileOrders />} />
         <Route path="agent" element={<MobileAgent />} />
       </Route>
-      <Route path="/admin" element={<AdminLayout />}>
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute>
+            <AdminLayout />
+          </ProtectedRoute>
+        }
+      >
         <Route index element={<AdminOverview />} />
         <Route path="agent" element={<AdminAgentConfig />} />
         <Route path="decisions" element={<AdminDecisions />} />
@@ -66,12 +88,5 @@ export function AppRoutes() {
       </Route>
       <Route path="*" element={<Navigate to={isMobile ? '/m' : '/admin'} replace />} />
     </Routes>
-      <LoginModal
-        required
-        open={!hasToken}
-        onClose={() => {}}
-        onSuccess={() => queryClient.invalidateQueries()}
-      />
-    </>
   );
 }

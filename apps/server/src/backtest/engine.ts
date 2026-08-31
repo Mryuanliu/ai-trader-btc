@@ -3,6 +3,7 @@ import {
   Strategy,
   StrategyContext,
   buildSignals,
+  strategyRegistry,
   computeIndicators,
   computePosition,
   scoreSignals,
@@ -48,7 +49,10 @@ export async function runBacktest(
     // ---- 在第 i 根收盘时构造上下文并决策 ----
     const window = candles.slice(Math.max(0, i - WINDOW + 1), i + 1);
     const indicators = computeIndicators(window);
-    const signals = buildSignals(indicators, window);
+    // 按策略声明的 RSI 语义构造信号（B3），必须与实盘同口径，否则回测结论无效
+    const signals = buildSignals(indicators, window, {
+      rsiMode: strategyRegistry.rsiModeOf(config.strategyName),
+    });
     const indicatorScore = scoreSignals(signals);
     const price = candles[i].close;
 

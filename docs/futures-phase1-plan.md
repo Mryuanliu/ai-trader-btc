@@ -301,6 +301,34 @@ leverage = clamp(round(baseLeverage × (0.6 + aggression × 0.8)), 1, maxLeverag
 - 端到端验证：合约 demo 策略自动下单跑通
 - 输出现货 vs 3x vs 5x 对比表与结论
 
+> ### ⚠️ Commit 8 实际状态（2026-08-30 更新）
+>
+> **未完成**，由用户接管自行验证。已完成的验收项与遗留项如下：
+>
+> **已完成**：
+> 1. ✅ 三包 `typecheck` 全过、`vitest` 全绿（shared 83 / server 22 tests，含现货回归断言）
+> 2. ✅ 迁移幂等、现货 K 线完好、现货回测无回归
+> 3. ✅ 四类方向语义真机验证（开多/平多/开空/平空，见 Commit 3 记录）
+> 4. ✅ 合约风控（杠杆钳制 / minNotional / 强平距离）
+> 5. ✅ 策略可插拔、hybrid 链路在合约生效并落库 `market='futures'`
+> 6. ✅ 回测 CLI/HTTP 输出 1x/3x/5x 对比表
+>
+> **遗留**：「③ 合约 demo 策略**自动下单**跑通」未获端到端证明。
+>
+> **阻塞原因（重要，避免重复踩坑）**：demo 实时行情持续震荡，`trend_following`
+> 的 `indicatorScore` 最高仅 **0.65**，从未触及 `entryThreshold=0.85`，决策持续 HOLD。
+> 曾尝试切换 `mean_reversion` / `breakout`、调低 `minConfidence` 至 0.05，均仍 HOLD。
+>
+> **两个曾误判的事实**（已澄清）：
+> - 合约引擎取 K 线走 `adapter.getKlines()` **实时拉币安 fapi**，既不读内存缓冲也不读 DB
+>   → **往 DB 灌测试 K 线对合约引擎完全无效**。
+> - 合约引擎**有自动调度**（`scheduler.runFuturesIfDue`，5s tick + `decisionIntervalSec=300`），
+>   `mode !== 'live'` 时会自动下单；不需要手动 `/run` 才触发。
+>
+> **根因归属转移**：不开单的真正原因已定位为**策略层缺陷**（阈值 0.85 六信号体系下数学上不可达
+> + RSI 语义冲突导致多空偏置），而非合约链路问题。分析见 **`docs/strategy-enhancement-plan.md`**。
+> 建议在该方案的 **B 期（修缺陷）** 完成后，再回来做本项验收——届时可自然产出开仓信号。
+
 ---
 
 ## 七、验收标准

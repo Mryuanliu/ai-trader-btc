@@ -1,5 +1,7 @@
 import {
+  BlockingReasonCode,
   DecisionAction,
+  DecisionDiagnostics,
   DecisionInputSnapshot,
   DecisionLane,
   DEFAULT_MARKET,
@@ -42,11 +44,34 @@ export class AgentDecisionEntity {
   @Column({ type: 'float8', default: 0 })
   confidence: number;
 
+  /**
+   * 接近度 0~1：当前倾向已达到触发所需的百分比。
+   * 观望时仍有效——proximity=0.76 表示「已达 76%，还差 24%」，
+   * 用于区分「差一点就开仓」与「差得远」，解决 HOLD 时 confidence 恒为 0 的信息丢失问题。
+   */
+  @Column({ type: 'float8', nullable: true })
+  proximity: number | null;
+
   @Column({ type: 'text', default: '' })
   reason: string;
 
   @Column({ type: 'text', nullable: true })
   riskNotes: string | null;
+
+  /**
+   * 阻塞原因码：为什么没开单/没下单（可枚举，便于聚合 Top 统计）。
+   * 仅在不产生 BUY/SELL 或被拦截时有值。见 BlockingReasonCode。
+   */
+  @Index()
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  blockingReason: BlockingReasonCode | null;
+
+  /**
+   * 决策诊断详情：信号贡献度、达标差距、触发阈值等。
+   * jsonb 存储，仅在决策落库时计算，不进热路径。
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  diagnostics: DecisionDiagnostics | null;
 
   /** 输入快照：行情、指标、信号、新闻、账户 */
   @Column({ type: 'jsonb' })
@@ -88,8 +113,12 @@ export class AgentDecisionEntity {
   @Column({ type: 'varchar', length: 64, nullable: true })
   orderId: string | null;
 
-  /** 决策链路：llm=AI 决策；strategy=纯策略决策（llm 链路降级到策略时仍记 llm） */
-  @Column({ type: 'varchar', length: 16, default: 'llm' })
+  /**
+   * 决策链路：strategy=纯策略；hybrid=AI 上下文 + 策略执行。
+   * 注：原 'llm'（AI 直出买卖）链路已移除，默认值同步改为 strategy。
+   * 存量数据若残留 'llm'，读取时归一为 strategy（见 agent-engine/agent.controller）。
+   */
+  @Column({ type: 'varchar', length: 16, default: 'strategy' })
   lane: DecisionLane;
 
   /** 策略链路（或 llm 链路降级到策略）下实际产出决策的策略名 */

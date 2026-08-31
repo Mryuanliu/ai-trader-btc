@@ -89,9 +89,19 @@ export class DecisionCoreService {
     ticker: DecisionInputSnapshot['ticker'];
     news: DecisionInputSnapshot['news'];
     account: DecisionInputSnapshot['account'];
+    /**
+     * 将执行决策的策略名（B3）。用于按策略语义构造信号——
+     * 趋势策略需要 RSI 读作动能，均值回归策略需要读作超买超卖。
+     * 不传时回落 'reversion'（与 buildSignals 默认一致，零回归）。
+     */
+    strategyName?: string | null;
   }): DecisionInputSnapshot {
     const indicators = computeIndicators(input.candles);
-    const signals = buildSignals(indicators, input.candles);
+    // 按策略声明的语义构造信号，避免 RSI 两种相反解读混用造成的方向反转
+    const rsiMode = input.strategyName
+      ? strategyRegistry.rsiModeOf(input.strategyName)
+      : 'reversion';
+    const signals = buildSignals(indicators, input.candles, { rsiMode });
     const indicatorScore = scoreSignals(signals);
 
     return {

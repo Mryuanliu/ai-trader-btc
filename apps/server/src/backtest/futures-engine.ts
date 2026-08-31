@@ -4,6 +4,7 @@ import {
   Strategy,
   StrategyContext,
   buildSignals,
+  strategyRegistry,
   computeIndicators,
   emptyFuturesPosition,
   applyFuturesFill,
@@ -126,7 +127,10 @@ export async function runFuturesBacktest(
     // ---- 3. 第 i 根收盘决策 ----
     const window = candles.slice(Math.max(0, i - WINDOW + 1), i + 1);
     const indicators = computeIndicators(window);
-    const signals = buildSignals(indicators, window);
+    // 按策略声明的 RSI 语义构造信号（B3），与现货回测、实盘保持同口径
+    const signals = buildSignals(indicators, window, {
+      rsiMode: strategyRegistry.rsiModeOf(config.strategyName),
+    });
     const indicatorScore = scoreSignals(signals);
     const price = bar.close;
 

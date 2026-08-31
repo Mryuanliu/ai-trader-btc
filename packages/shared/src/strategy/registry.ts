@@ -1,3 +1,4 @@
+import type { RsiMode } from '../indicators/signals';
 import type { Strategy } from './types';
 
 export interface StrategyLookup {
@@ -38,6 +39,16 @@ export class StrategyRegistry {
       throw new Error('StrategyRegistry 未注册 trend_following，请检查 strategy/index.ts');
     }
     return { strategy: fallback, fellBack: true, requestedName: name };
+  }
+
+  /**
+   * 取指定策略要求的 RSI 语义（B3）。
+   *
+   * 策略未声明或不存在时回落 'reversion'，与 buildSignals 的默认一致，
+   * 保证任何策略都不会因缺少声明而崩溃。
+   */
+  rsiModeOf(name: string): RsiMode {
+    return this.getOrDefault(name).strategy.rsiMode ?? 'reversion';
   }
 
   list(): {

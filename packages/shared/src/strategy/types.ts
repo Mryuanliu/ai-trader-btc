@@ -1,6 +1,8 @@
 import type { PositionSnapshot, Timeframe } from '../types/common';
+import type { RsiMode } from '../indicators/signals';
 import type { Candle, Ticker } from '../types/market';
 import type { IndicatorSnapshot, Signal } from '../types/agent';
+import type { DecisionDiagnostics } from '../decision-diagnostics';
 
 /**
  * 策略输入的只读上下文。
@@ -28,12 +30,26 @@ export interface StrategyContext {
   params: Record<string, unknown>;
 }
 
-/** 策略输出（映射为决策记录） */
+/**
+ * 策略输出（映射为决策记录）
+ *
+ * 语义约定：
+ * - `confidence`：**开仓信号强度**，仅当 action≠HOLD 时有意义（参与 minConfidence 拦截）。
+ *   观望时为 0，避免误用。
+ * - `proximity`：**接近度** 0~1，表示「当前倾向已达到触发所需的百分比」。
+ *   观望时仍携带信息量——proximity=0.76 即「已达 76%，还差 24%」。
+ *   新增此字段而非改 confidence，是为了不破坏 minConfidence 拦截与回测仓位口径（零风险增量）。
+ * - `diagnostics`：结构化归因（阻塞原因码 + 信号贡献），用于「为什么没开单」的下钻排查。
+ */
 export interface StrategyOutput {
   action: 'BUY' | 'SELL' | 'HOLD';
   confidence: number;
   reason: string;
   riskNotes?: string;
+  /** 接近度 0~1：|score| / entryThreshold（观望时仍有效，表达「差多少」） */
+  proximity?: number;
+  /** 观望/拒单时的结构化归因 */
+  diagnostics?: DecisionDiagnostics;
 }
 
 /** 策略契约：新增一个策略 = 实现本接口 + 在 strategy/index.ts 注册 */
@@ -52,4 +68,13 @@ export interface Strategy {
    */
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown>;
   evaluate(ctx: StrategyContext): StrategyOutput;
+  /**
+   * 该策略要求的 RSI 语义（B3）。
+   * - 'reversion'（默认）：超买看跌、超卖看涨 —— 适合均值回归/高抛低吸
+   * - 'trend'：高 RSI 代表动能强、看涨 —— 适合趋势跟随/追涨杀跌
+   *
+   * 引擎构造信号时按此应用，避免「趋势策略在超买区反而收到看跌票」的语义反转
+   * （实测 RSI>=70 时旧实现 794 次全判 bearish，与 RSI 55~70 的 bullish 方向相反）。
+   */
+  readonly rsiMode?: RsiMode;
 }

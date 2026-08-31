@@ -250,6 +250,23 @@ export class AgentController {
     return this.engine.laneStats();
   }
 
+  /**
+   * 决策诊断：回答「为什么没开单」。
+   * 排障顺序：先看 Top 原因聚合，再看单条明细（nearMisses）。
+   * @param windowHours 统计时间窗（默认 24h，上限 30 天）
+   * @param market 市场过滤（spot/futures），不传则全市场
+   */
+  @Get('decisions/diagnostics')
+  async diagnostics(
+    @Query('windowHours') windowHours?: string,
+    @Query('market') market?: string,
+  ) {
+    return this.engine.diagnostics({
+      windowHours: windowHours ? Number(windowHours) : 24,
+      market: market === 'spot' || market === 'futures' ? market : undefined,
+    });
+  }
+
   /** 决策链条详情：行情 → 指标信号 → Prompt → 模型输出 → 风控 → 下单结果 */
   @Get('decisions/:id')
   async detail(@Param('id') id: string): Promise<DecisionRecord> {
@@ -261,6 +278,10 @@ export class AgentController {
       symbol: entity.symbol,
       action: entity.action,
       confidence: entity.confidence,
+      // 接近度与结构化归因：让单条 HOLD 可下钻（差多少、谁拖后腿）
+      proximity: entity.proximity ?? null,
+      blockingReason: entity.blockingReason ?? null,
+      diagnostics: entity.diagnostics ?? null,
       reason: entity.reason,
       riskNotes: entity.riskNotes,
       // 存量数据可能残留已废弃的 'llm'（AI 直出链路），读时归一为 strategy

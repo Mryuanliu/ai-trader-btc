@@ -8,6 +8,7 @@ import {
   DecisionInputSnapshot,
   DecisionLane,
   DecisionSummary,
+  MarketType,
   StrategyOutput,
   computeSpotOrderQty,
   evaluateExitRules,
@@ -166,8 +167,12 @@ export class AgentEngine {
           symbol: config.symbol,
           action: decision.action,
           confidence: decision.confidence,
+          // 接近度 + 结构化归因：让每一条 HOLD 都可解释（知道差多少、谁拖后腿）
+          proximity: decision.proximity ?? null,
           reason: decision.reason,
           riskNotes: decision.riskNotes ?? null,
+          blockingReason: decision.diagnostics?.code ?? null,
+          diagnostics: decision.diagnostics ?? null,
           inputSnapshot: snapshot,
           prompt: laneResult.prompt,
           llmRaw: laneResult.llmResult?.raw ?? null,
@@ -257,6 +262,8 @@ export class AgentEngine {
       timeframe: config.timeframe,
       candles,
       ticker,
+      // 按策略语义构造信号（B3）：趋势策略的 RSI 读作动能，避免方向反转
+      strategyName: config.strategyName,
       news: recentNews.map((n) => ({
         title: n.title,
         source: n.source,
@@ -541,7 +548,8 @@ export class AgentEngine {
       .getRawMany<{ lane: string | null; count: string; degraded: string; buys: string; sells: string; holds: string }>();
 
     const lanes = rows.map((r) => ({
-      lane: (r.lane ?? 'llm') as DecisionLane,
+      // 存量可能残留已废弃的 'llm'，读时归一为 strategy
+      lane: (r.lane === 'hybrid' ? 'hybrid' : 'strategy') as DecisionLane,
       count: Number(r.count),
       degraded: Number(r.degraded ?? 0),
       buys: Number(r.buys ?? 0),
@@ -553,6 +561,164 @@ export class AgentEngine {
       degradedTotal: lanes.reduce((acc, l) => acc + l.degraded, 0),
       lanes,
     };
+  }
+
+  /**
+   * 决策诊断聚合（策略增强方案 A 期）：回答「为什么没开单」。
+   *
+   * 借鉴 EasyQuant Blocking Reasons 的排障顺序：**先看 Top 原因聚合，再看单条明细**。
+   * 某个原因码长期霸榜 Top1，说明是系统性问题而非个案。
+   *
+   * 四类输出：
+   * 1. topReasons —— 阻塞原因码 Top 排行（含占比）
+   * 2. proximityBuckets —— 接近度分布，识别「差一点就开仓」的堆积区间
+   * 3. nearMisses —— 最接近触发的若干条观望，供直接下钻
+   * 4. signalStats —— 各信号投票率（弃权/多/空），暴露「信号不表态」问题
+   */
+  async diagnostics(options: { windowHours?: number; market?: MarketType } = {}) {
+    const windowHours = Math.max(1, Math.min(24 * 30, Number(options.windowHours) || 24));
+    const since = new Date(Date.now() - windowHours * 3600_000);
+
+    // ① 阻塞原因 Top
+    //
+    // 关键：阻塞可能发生在**两个不同层级**，必须都统计，否则会归因到错误的层：
+    //   - 策略层：blockingReason（如 SIGNAL_NONE = 信号未达阈值）
+    //   - 风控层：riskRejectedBy（如 MAX_ORDER_AMOUNT = 金额超限被拒）
+    // 「信号正常触发但被风控拒单」是常见情况，只看 blockingReason 会误判成"信号没触发"。
+    // 用 COALESCE 取前者，为空时回落到映射后的风控码。
+    const reasonRows = await this.decisionRepo
+      .createQueryBuilder('d')
+      .select(
+        `COALESCE(d."blockingReason", CASE d."riskRejectedBy"
+           WHEN 'MIN_ORDER_INTERVAL' THEN 'RISK_INTERVAL'
+           WHEN 'MAX_ORDER_AMOUNT' THEN 'RISK_MAX_ORDER_AMOUNT'
+           WHEN 'MAX_DAILY_ORDERS' THEN 'RISK_MAX_DAILY_ORDERS'
+           WHEN 'DAILY_LOSS_LIMIT' THEN 'RISK_DAILY_LOSS'
+           WHEN 'MAX_DRAWDOWN' THEN 'RISK_DRAWDOWN'
+           WHEN 'INSUFFICIENT_BALANCE' THEN 'RISK_INSUFFICIENT_BALANCE'
+           WHEN 'MAX_EXPOSURE' THEN 'RISK_MAX_EXPOSURE'
+           WHEN 'LIVE_MODE_CONFIRM_REQUIRED' THEN 'RISK_CONFIRM_REQUIRED'
+           WHEN 'INVALID_QUANTITY' THEN 'RISK_MIN_NOTIONAL'
+           WHEN 'MIN_CONFIDENCE' THEN 'BELOW_MIN_CONFIDENCE'
+           WHEN 'MIN_QTY' THEN 'RISK_MIN_NOTIONAL'
+           WHEN 'NO_PRICE' THEN 'STALE_DATA'
+           WHEN 'RISK_MARGIN' THEN 'RISK_MARGIN'
+           WHEN 'LIQUIDATION_DIST' THEN 'RISK_LIQUIDATION_DIST'
+           WHEN 'LEVERAGE_CLAMPED' THEN 'RISK_LEVERAGE_CLAMPED'
+           WHEN 'BROKER_REJECTED' THEN 'BROKER_REJECTED'
+           ELSE NULL END)`,
+        'code',
+      )
+      .addSelect('COUNT(*)', 'count')
+      .where('d."createdAt" >= :since', { since })
+      .andWhere(
+        `(d."blockingReason" IS NOT NULL OR d."riskRejectedBy" IS NOT NULL)`,
+      )
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .groupBy('code')
+      .orderBy('COUNT(*)', 'DESC')
+      .getRawMany<{ code: string; count: string }>();
+
+    const blockedTotal = reasonRows.reduce((acc, r) => acc + Number(r.count), 0);
+    const topReasons = reasonRows.map((r) => ({
+      code: r.code,
+      count: Number(r.count),
+      share: blockedTotal === 0 ? 0 : Number((Number(r.count) / blockedTotal).toFixed(4)),
+    }));
+
+    // ② 接近度分布：0~1 分 5 桶，看观望决策堆积在哪个区间
+    const bucketRows = await this.decisionRepo
+      .createQueryBuilder('d')
+      .select(
+        `CASE
+           WHEN d.proximity IS NULL THEN 'unknown'
+           WHEN d.proximity < 0.2 THEN '0.0-0.2'
+           WHEN d.proximity < 0.4 THEN '0.2-0.4'
+           WHEN d.proximity < 0.6 THEN '0.4-0.6'
+           WHEN d.proximity < 0.8 THEN '0.6-0.8'
+           WHEN d.proximity < 1.0 THEN '0.8-1.0'
+           ELSE '1.0'
+         END`,
+        'bucket',
+      )
+      .addSelect('COUNT(*)', 'count')
+      .where('d."createdAt" >= :since', { since })
+      .andWhere("d.action = 'HOLD'")
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .groupBy('bucket')
+      .getRawMany<{ bucket: string; count: string }>();
+
+    const proximityBuckets = bucketRows.map((r) => ({ bucket: r.bucket, count: Number(r.count) }));
+
+    // ③ 最接近触发的观望（差一点就开仓的），供直接下钻
+    const nearMissRows = await this.decisionRepo
+      .createQueryBuilder('d')
+      // 注意：字段必须写 'd.createdAt'（不带引号），带引号会导致 TypeORM 无法映射、返回 undefined
+      .select(['d.id', 'd.createdAt', 'd.action', 'd.proximity', 'd.blockingReason', 'd.diagnostics'])
+      .where('d."createdAt" >= :since', { since })
+      .andWhere("d.action = 'HOLD'")
+      .andWhere('d.proximity IS NOT NULL')
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .orderBy('d.proximity', 'DESC')
+      .take(20)
+      .getMany();
+
+    const nearMisses = nearMissRows.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt?.toISOString() ?? null,
+      proximity: r.proximity,
+      blockingReason: r.blockingReason,
+      score: r.diagnostics?.score ?? null,
+      requiredScore: r.diagnostics?.requiredScore ?? null,
+      contributions: r.diagnostics?.contributions ?? [],
+    }));
+
+    // ④ 信号投票率：从最近若干条带 diagnostics 的决策中统计各信号的中性/多/空占比。
+    //    直接暴露「信号长期不表态」问题（如 bollinger 约 80% 时间 neutral）。
+    const sampleRows = await this.decisionRepo
+      .createQueryBuilder('d')
+      .select(['d.diagnostics'])
+      .where('d."createdAt" >= :since', { since })
+      .andWhere('d.diagnostics IS NOT NULL')
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .orderBy('d."createdAt"', 'DESC')
+      .take(500)
+      .getMany();
+
+    const signalMap = new Map<string, { label: string; total: number; neutral: number; bullish: number; bearish: number }>();
+    for (const row of sampleRows) {
+      for (const c of row.diagnostics?.contributions ?? []) {
+        const cur = signalMap.get(c.name) ?? { label: c.label, total: 0, neutral: 0, bullish: 0, bearish: 0 };
+        cur.total += 1;
+        if (c.bias === 'neutral') cur.neutral += 1;
+        else if (c.bias === 'bullish') cur.bullish += 1;
+        else cur.bearish += 1;
+        signalMap.set(c.name, cur);
+      }
+    }
+    const signalStats = [...signalMap.entries()].map(([name, v]) => ({
+      name,
+      label: v.label,
+      total: v.total,
+      neutralRate: v.total === 0 ? 0 : Number((v.neutral / v.total).toFixed(4)),
+      bullishRate: v.total === 0 ? 0 : Number((v.bullish / v.total).toFixed(4)),
+      bearishRate: v.total === 0 ? 0 : Number((v.bearish / v.total).toFixed(4)),
+    }));
+
+    const total = await this.decisionRepo
+      .createQueryBuilder('d')
+      .where('d."createdAt" >= :since', { since })
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .getCount();
+
+    const holdTotal = await this.decisionRepo
+      .createQueryBuilder('d')
+      .where('d."createdAt" >= :since', { since })
+      .andWhere("d.action = 'HOLD'")
+      .andWhere(options.market ? 'd.market = :market' : '1=1', options.market ? { market: options.market } : {})
+      .getCount();
+
+    return { windowHours, total, holdTotal, topReasons, proximityBuckets, nearMisses, signalStats };
   }
 
   async recent(limit = 10): Promise<DecisionSummary[]> {

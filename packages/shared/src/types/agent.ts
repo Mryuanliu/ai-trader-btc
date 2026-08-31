@@ -1,4 +1,6 @@
 import type { Candle, Ticker } from './market';
+// 决策诊断类型（type-only 导入，编译后擦除，不会形成运行时循环依赖）
+import type { BlockingReasonCode, DecisionDiagnostics } from '../decision-diagnostics';
 import type {
   DecisionAction,
   Environment,
@@ -85,6 +87,12 @@ export interface DecisionRecord {
   symbol: string;
   action: DecisionAction;
   confidence: number;
+  /** 接近度 0~1：观望时表达「已达到触发所需的百分比」，解决 confidence 恒为 0 的信息丢失 */
+  proximity?: number | null;
+  /** 阻塞原因码：为什么没开单/没下单 */
+  blockingReason?: BlockingReasonCode | null;
+  /** 结构化诊断：信号贡献度、达标差距、触发阈值 */
+  diagnostics?: DecisionDiagnostics | null;
   reason: string;
   riskNotes?: string | null;
   inputSnapshot: DecisionInputSnapshot;

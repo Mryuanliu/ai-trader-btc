@@ -2,7 +2,11 @@
 
 一套 AI 驱动的比特币自动交易系统：后端 Nest.js + PostgreSQL 桥接**币安**与**欧意（OKX）**自动下单，前端为单套 Vite + antd 响应式应用，按屏幕宽度切换**移动端钱包视图**与 **PC 后台管理视图**。
 
-决策引擎采用「**技术指标信号 + LLM 终裁**」混合模式：指标先产出结构化信号，模型结合行情与新闻做最终裁决；模型不可用时自动降级为纯指标策略并标注。
+决策引擎采用「**指标信号 → 策略插件执行**」模式，链路分两态：`strategy`（纯策略，零 LLM）与 `hybrid`（AI 只输出市场状态元参数，映射为策略参数后仍由策略执行买卖）。
+
+> **AI 永不直接下达买卖指令。** 原 `llm` 链路（AI 直出 BUY/SELL/HOLD）因不可回测、不可复现、失败不可预测，已于 2026-08-30 彻底移除。这是不可违背的设计原则，详见 `docs/decision-lanes-plan.md`。
+
+交易侧支持**现货**与**合约（U 本位永续）**双市场：L0~L3（数据/AI 上下文/指标信号/策略决策）纵向共用，L4~L6（执行/风控/持仓）通过 `MarketExecutor` 接口横向隔离、可插拔。
 
 ---
 
@@ -187,8 +191,19 @@ NO_PROXY=localhost,127.0.0.1
 一次决策的完整生命周期，全部落 `agent_decisions` 表（JSONB 内嵌快照），后台可逐节点展开复盘：
 
 ```
-行情快照 → 指标信号 → 新闻上下文 → 组装 Prompt → 模型输出 → 风控裁决 → 下单结果
+行情快照 → 指标信号 → 策略插件产出决策 → 风控裁决 → 下单结果
+              ↑
+        （hybrid 链路）AI 上下文元参数 → 映射为策略参数
 ```
+
+**两条链路的买卖都由确定性策略插件执行**，区别仅在于策略参数是否经 AI 元参数调节：
+
+| 链路 | LLM | 行为 | 成本 |
+| --- | --- | --- | --- |
+| `strategy` | 无 | 纯策略，完全确定性、零成本 | 0 |
+| `hybrid` | 有 | AI 只输出市场状态（regime / 激进度 / 新闻情绪），经纯函数 `mapInsightToParams` 映射为策略参数，再由策略执行 | 1 小时缓存，低频 |
+
+> `hybrid` 链路的 AI **不输出买卖指令**，只输出元参数。AI 失败时优先沿用未过期缓存，否则回落 `NEUTRAL_CONTEXT_INSIGHT` 中性参数继续运行并标记 `degraded`，**不停摆**。
 
 **技术指标**（前后端共用 `packages/shared/src/indicators`，保证图表与信号口径一致）：
 
@@ -197,7 +212,11 @@ NO_PROXY=localhost,127.0.0.1
 - 波动：布林带(20,2)、ATR(14)
 - 量能：最新量 / 20 周期均量
 
-信号按权重合成 `-1 ~ +1` 的综合倾向，与行情、新闻一并交给模型裁决。模型输出经 **zod schema 强校验**（`action` / `confidence` / `reason` / `riskNotes`），解析失败或超时即降级。
+六项信号按权重合成 `-1 ~ +1` 的 `indicatorScore`，交由策略插件（trend_following / mean_reversion / breakout）产出 `BUY / SELL / HOLD`。
+
+**策略是插件式的**：实现 `Strategy` 接口并注册进 `StrategyRegistry` 即可，引擎与回测不感知具体策略。
+
+> ⚠️ **已知问题（2026-08-30 诊断，方案见 `docs/strategy-enhancement-plan.md`）**：当前 `trend_following` 默认 `entryThreshold=0.85` 在六信号体系下**数学上近乎不可达**，历史 386 条决策中 **BUY 0 次 / SELL 20 次 / HOLD 361 次**。优化策略前请先读该文档的根因分析。
 
 ---
 
@@ -231,10 +250,12 @@ NO_PROXY=localhost,127.0.0.1
    └─ AgentEngine.runOnce()
       │
       ├─ ① 行情快照：取 timeframe × 200 根 K 线 + Ticker
-      ├─ ② 指标信号：12 项指标 → 加权合成 -1~+1 倾向
+      ├─ ② 指标信号：12 项指标 → 六信号加权合成 -1~+1 倾向
       ├─ ③ 上下文：最新 6 条新闻 + 账户余额
-      ├─ ④ 组装 Prompt → LLM 裁决（zod 强校验）
-      │     └─ 失败 → 纯指标兜底 → degradedAction=hold → 强制 HOLD
+      ├─ ④ 策略插件产出 BUY/SELL/HOLD
+      │     ├─ strategy 链路：直接执行
+      │     └─ hybrid 链路：先取 AI 上下文元参数（1h 缓存）→ 映射为策略参数 → 再执行
+      │           └─ AI 失败 → 沿用缓存或回落中性参数 → degraded=true 留痕，不停摆
       ├─ ⑤ 决策落库 agent_decisions（含快照、Prompt、token 用量）
       │
       └─ ⑥ execute() —— 执行下单
@@ -302,9 +323,13 @@ NO_PROXY=localhost,127.0.0.1
 ### 失败退避与熔断
 
 Agent 连续失败时按指数退避重试（30s → 60s → 120s …），
-达到 5 次进入熔断，冷却 10 分钟后重试；状态通过 `/api/agent/config` 的 `health` 字段暴露。
-LLM 不可用时，默认 `degradedAction=hold` 会把决策强制降级为观望，
-不让未经验证的兜底策略接管真实资金。
+达到 5 次进入熔断，冷却 10 分钟后重试；状态通过 `/api/agent/config` 的 `health` 字段暴露，
+合约链路另有独立的 `/api/futures/health`。
+
+**现货与合约的失败计数器彼此独立**：合约连续失败或熔断都不会牵连现货，反之亦然。
+
+LLM 不可用时不会中断交易——`hybrid` 链路会沿用未过期的上下文缓存，
+否则回落中性默认参数继续运行并标记 `degraded=true` 与降级原因，保证留痕可审计。
 
 ---
 
@@ -325,18 +350,25 @@ AI-trader-btc/
     │       ├── market/         行情 WS、K 线缓冲落库、市场动向聚合、模拟行情源
     │       ├── news/           RSS 抓取去重、关键词打标、降级语料
     │       ├── agent/          信号合成、Prompt 组装、LLM 客户端、决策编排
+    │       │   └── decision-core.service.ts   ★ 共享决策内核（L0~L3，现货/合约共用）
+    │       ├── execution/      ★ MarketExecutor 抽象 + spot/futures 两个实现 + 注册表
+    │       ├── futures/        ★ 合约独立链路：配置/持仓/风控/下单/引擎/控制器
+    │       ├── backtest/       ★ 回测引擎（现货 + 合约）、指标度量、CLI、数据源
     │       ├── trading/        订单生命周期、风控守卫、dry-run/实盘路由
-    │       ├── account/        余额读取、虚拟账户、快照与今日盈亏
+    │       ├── account/       余额读取、虚拟账户、快照与今日盈亏
     │       ├── scheduler/      定时任务（行情恢复、新闻、决策、快照、探测）
     │       ├── gateway/        socket.io 实时推送
     │       └── overview/       聚合接口
     └── web/                    Vite + React + antd 响应式前端
-        └── src/
-            ├── layouts/        MobileLayout（顶价格条 + 底 TabBar）/ AdminLayout（侧栏 + 顶栏）
-            ├── components/     KlineChart、DecisionTimeline、OrderPanel、PriceTicker…
-            ├── pages/mobile/   钱包首页、交易、订单、Agent
-            └── pages/admin/    总览、Agent 配置、决策历史、新闻与市场、订单、账户、风控
-```
+            └── src/
+                ├── layouts/        MobileLayout（顶价格条 + 底 TabBar）/ AdminLayout（侧栏 + 顶栏）
+                ├── components/     KlineChart、DecisionTimeline、OrderPanel、PriceTicker…
+                ├── pages/mobile/   钱包首页、交易、订单、Agent
+                └── pages/admin/    总览、Agent 配置、决策历史、新闻与市场、订单、账户、风控、
+                                    回测、★ 合约面板
+    ```
+
+    > ★ 标记为合约接入阶段（Commit 1~7）新增，详见 `docs/futures-phase1-plan.md`。
 
 ---
 
@@ -411,11 +443,147 @@ pnpm -F @ai-trader/server migration:generate -- src/database/migrations/xxx  # �
 | GET | `/api/accounts` | 交易所账户（密钥掩码） | 是 |
 | POST | `/api/accounts/:exchange/test` | 连通性探测 | 是 |
 
+**回测**：
+
+| 方法 | 路径 | 说明 | 鉴权 |
+| --- | --- | --- | --- |
+| POST | `/api/backtest` | 运行回测（`market` / `leverage` / `compareLeverage`） | 是 |
+
+```bash
+# CLI 等价用法
+pnpm -F @ai-trader/server backtest -- --strategy=trend_following \
+  --interval=5m --from=2026-06-01 --to=2026-08-01
+pnpm -F @ai-trader/server backtest -- --market=futures --leverage=5 --compare-leverage
+```
+
+**合约（U 本位永续）**：
+
+| 方法 | 路径 | 说明 | 鉴权 |
+| --- | --- | --- | --- |
+| GET | `/api/futures/config` | 合约配置（开关/策略/杠杆/保证金模式） | 是 |
+| PATCH | `/api/futures/config` | 更新配置 | 是 |
+| POST | `/api/futures/toggle` | 独立开关（不影响现货） | 是 |
+| GET | `/api/futures/positions` | 持仓（含强平价、距强平 %） | 是 |
+| GET | `/api/futures/margin` | 可用保证金 | 是 |
+| POST | `/api/futures/order` | 手动下单（策略语义 BUY/SELL，自动翻译开平） | 是 |
+| GET | `/api/futures/orders` | 合约订单 | 是 |
+| POST | `/api/futures/run` | 手动触发一次合约决策 | 是 |
+| GET | `/api/futures/health` | 合约链路熔断状态 | 是 |
+| GET | `/api/futures/decisions` | 合约决策（按 market 隔离） | 是 |
+
+> ⚠️ 合约配置默认 `enabled=true` + `mode=testnet`，调度器每 300s 自动决策并可**真实下单**到币安合约 demo（`demo-fapi.binance.com`）。停止方式：`PATCH /api/futures/config {"enabled":false}` 或切回 `dry_run`。
+
 WebSocket 事件（`/realtime` 命名空间，`realtime` 事件名）：
 
 ```ts
 { type: 'price' | 'order' | 'decision' | 'risk' | 'news', payload: ..., ts: number }
 ```
+
+---
+
+---
+
+## 合约交易（U 本位永续）
+
+### 环境
+
+| | 现货 | 合约 |
+| --- | --- | --- |
+| REST | `demo-api.binance.com` | **`demo-fapi.binance.com`** |
+| WS | `demo-stream.binance.com` | **`demo-fstream.binance.com`** |
+| API Key | 现货 Key | **与现货同一个 Key 通用**（需 demo 门户勾选「启用未来(合约)」权限） |
+
+> **合约 demo = 合约 testnet**，是同一个环境（与现货 demo/testnet 分属两个环境不同）。
+
+### 分层架构
+
+```
+L0 数据        ┐
+L1 AI 上下文    │  现货与合约完全共用
+L2 指标信号     │  （StrategyRegistry、DecisionCoreService）
+L3 策略决策    ┘
+─────────────────────────────────────────
+L4 执行        ┐  各自独立，通过 MarketExecutor 接口抽象
+L5 风控        │  SpotExecutor / FuturesExecutor
+L6 持仓        ┘
+```
+
+新增市场（如期权）只需实现 L4~L6 并注册，L0~L3 无需改动。
+
+### 方向语义
+
+策略仍输出 `BUY / SELL / HOLD`，由 `resolveFuturesOrderIntent(action, netQty)` 结合净持仓翻译：
+
+| 净持仓 | BUY | SELL |
+| --- | --- | --- |
+| 0（空仓） | 开多 | 开空 |
+| 多 | 加多 | 平多（reduceOnly） |
+| 空 | 平空（reduceOnly） | 加空 |
+
+**反向信号只平仓不反手**——平完下一周期才开反向，避免单跳内留双倍仓位。
+
+### 合约风控（在通用风控之外）
+
+杠杆钳制（上限 10）、强平距离预警（默认 15%）、保证金校验、逐仓 `isolated`、`reduceOnly`、minNotional（各标的不同，以 `exchangeInfo` 为准，**勿硬编码 100**）。
+
+### 跨市场数据隔离（重要约定）
+
+现货与合约**共用 `orders` / `trade_fills` / `agent_decisions` 三张表**，靠 `market` 列区分。
+
+> **任何对这三张表的聚合查询都必须显式指定 `market`**，否则会跨市场污染。
+> 已踩过的坑：合约成交被推导成现货持仓，导致现货敞口风控与止损止盈全部失真。
+
+### 币安合约 API 踩坑记录（改合约代码前必看）
+
+1. `marginType` 值必须**大写**（`ISOLATED`/`CROSS`）。传小写 → `-1102「Mandatory parameter 'margintype' was not sent」`，**文案极具误导性**（实为值校验失败）。
+2. 账户默认**单向持仓**。单向模式下**禁止下发 `positionSide`**，否则 `-4061`；方向用 `side` + `reduceOnly` 表达。
+3. **POST /fapi/v1/order 响应不含 `avgPrice`/`cumQuote`**，成交价须回查 `GET /fapi/v1/order`。
+4. 幂等错误 `-4028`（杠杆无变化）、`-4046`（保证金模式无变化）应视为**成功**。
+
+---
+
+## 开发现状（2026-08-30）
+
+| 模块 | 状态 |
+| --- | --- |
+| 现货全链路（行情/决策/下单/风控/回测） | ✅ 完成 |
+| 决策链路两态（strategy / hybrid） | ✅ 完成（`llm` 直出链路已移除） |
+| 合约接入 Commit 1~7 | ✅ 完成（类型/迁移/适配器/执行器/引擎/回测/前端） |
+| 合约 Commit 8（端到端验收） | ⚠️ **未完成**，由用户自行验证 |
+| **策略诊断与增强** | 📋 **方案已就绪，待实施** |
+
+### 下一步：策略诊断与增强
+
+**当前策略存在严重缺陷**——历史 386 条决策中 **BUY 0 次 / SELL 20 次 / HOLD 361 次**，
+根因为阈值 `0.85` 在六信号体系下数学上近乎不可达，且 RSI 语义与趋势策略冲突导致多空偏置。
+
+完整根因分析与增强方案见 **`docs/strategy-enhancement-plan.md`**，分四期：
+
+| 期 | 目标 | 前置 |
+| --- | --- | --- |
+| **A** | 可观测：阻塞原因码 + 接近度 + 信号归因 | 无（**建议先做**） |
+| **B** | 修缺陷：阈值重校准 + 打分口径 + 多空对称 | A |
+| **C** | 验信号：IC 分析 + 权重反推 + 防过拟合 | B |
+| **D** | 强能力：regime 自适应 + 加密因子 + 元标注 | C |
+
+> **A→B 必须先做**，否则 C/D 是盲调。
+
+### 已知数据约束
+
+现货 5m 仅 **17,331 根（2 个月）**、1m 86,416 根；**15m 405 / 1h 327 / 4h 247 根（不足以统计检验）**；
+**合约 15m 仅 1,345 根（半个月）**。→ 机器学习类方法（元标注）当前必然过拟合，
+合约因子研究需先 `backfill` 到 ≥6 个月。
+
+### 其他文档
+
+| 文档 | 内容 |
+| --- | --- |
+| **`docs/DEV-HANDOVER.md`** | **开发交接：当前状态、下一步、环境速查（接着开发先看它）** |
+| `docs/futures-phase1-plan.md` | 合约接入方案（8 个 Commit） |
+| `docs/strategy-enhancement-plan.md` | **策略诊断与增强方案（下一步）** |
+| `docs/decision-lanes-plan.md` | 决策链路设计 |
+| `docs/decision-lanes-discussion.md` | 方案讨论记录（含 Q1~Q7 问答） |
+| `docs/binance-api/` | 币安 API 参考（可 grep 全量接口） |
 
 ---
 

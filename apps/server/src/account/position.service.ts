@@ -1,6 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { computePosition, PositionFill, PositionSnapshot } from '@ai-trader/shared';
+import {
+  computeFuturesRoundTrips,
+  computePosition,
+  computeSpotRoundTrips,
+  PositionFill,
+  PositionSnapshot,
+  RoundTripFill,
+} from '@ai-trader/shared';
 import { Repository } from 'typeorm';
 import { TradeFillEntity } from '../database/entities';
 import { MarketService } from '../market/market.service';
@@ -67,5 +74,56 @@ export class PositionService {
     }
 
     return computePosition(symbol, rows, currentPrice);
+  }
+
+  /**
+   * 回合盈亏：把「开仓 → 平仓」配对成一笔笔可展示的盈亏明细。
+   *
+   * 现货与合约分别用 computeSpotRoundTrips / computeFuturesRoundTrips，
+   * 口径与各自持仓模型（computePosition / applyFuturesFill）严格一致——
+   * 回合 netPnl 之和 === 持仓面板的 realizedPnl，两边不会对不上。
+   *
+   * @param market 市场类型（必传：现货/合约的成交不能混算）
+   * @param symbol 可选过滤交易对；不传则汇总该市场全部
+   */
+  async getRoundTrips(market: 'spot' | 'futures', symbol?: string) {
+    const rows = await this.fillRepo
+      .createQueryBuilder('f')
+      .innerJoin('orders', 'o', 'o.id::text = f."orderId"')
+      .select('o.side', 'side')
+      .addSelect('f.quantity', 'quantity')
+      .addSelect('f.price', 'price')
+      .addSelect('f.fee', 'fee')
+      .addSelect('f."filledAt"', 'filledAt')
+      .addSelect('f."orderId"', 'orderId')
+      .where('o.id::text = f."orderId"')
+      .andWhere('o.market = :market', { market })
+      .andWhere('o.status IN (:...statuses)', { statuses: ['FILLED', 'PARTIALLY_FILLED'] })
+      .andWhere(symbol ? 'f.symbol = :symbol' : '1=1', symbol ? { symbol } : {})
+      .orderBy('f."filledAt"', 'ASC')
+      .addOrderBy('f.id', 'ASC')
+      .take(MAX_FILLS)
+      .getRawMany<FillRow & { orderId: string }>();
+
+    const fills: RoundTripFill[] = rows.map((r) => ({
+      side: r.side,
+      quantity: Number(r.quantity),
+      price: Number(r.price),
+      fee: Number(r.fee) || 0,
+      time: new Date(r.filledAt).getTime(),
+      orderId: r.orderId,
+    }));
+
+    const { trips, summary } =
+      market === 'futures' ? computeFuturesRoundTrips(fills) : computeSpotRoundTrips(fills);
+
+    // 最近的回合排前面（前端列表按时间倒序展示更符合直觉）
+    return {
+      market,
+      symbol: symbol ?? 'ALL',
+      fillCount: fills.length,
+      trips: [...trips].reverse(),
+      summary,
+    };
   }
 }

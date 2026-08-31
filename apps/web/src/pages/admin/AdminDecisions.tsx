@@ -12,10 +12,12 @@ import {
   Table,
   Tag,
 } from 'antd';
+import { DownOutlined, UpOutlined } from '@ant-design/icons';
 import { DECISION_ACTION_LABELS, type DecisionAction, type DecisionSummary } from '@ai-trader/shared';
 import { useDecisionDetail, useDecisions, useLaneStats } from '@/api/hooks';
 import { ActionTag } from '@/components/OrderStatusTag';
 import { DecisionTimeline } from '@/components/DecisionTimeline';
+import { DecisionDiagnosticsPanel } from '@/components/DecisionDiagnosticsPanel';
 import { formatRelative, formatTime } from '@/utils/format';
 
 const ACTIONS: { label: string; value: string }[] = [
@@ -45,6 +47,7 @@ export function AdminDecisions() {
   const [keyword, setKeyword] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [llmOnly, setLlmOnly] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
 
   const { data, isLoading } = useDecisions({
     page,
@@ -61,6 +64,22 @@ export function AdminDecisions() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* 决策诊断：回答「为什么没开单」——先看 Top 原因聚合，再下钻单条 */}
+      <div className="glass-card p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-[13px] font-medium">决策诊断 · 为什么没开单</span>
+          <Button
+            type="text"
+            size="small"
+            onClick={() => setShowDiagnostics((v) => !v)}
+            icon={showDiagnostics ? <UpOutlined /> : <DownOutlined />}
+          >
+            {showDiagnostics ? '收起' : '展开'}
+          </Button>
+        </div>
+        {showDiagnostics ? <DecisionDiagnosticsPanel /> : null}
+      </div>
+
       {stats.data && stats.data.total > 0 ? (
         <div className="glass-card flex flex-wrap items-center gap-x-6 gap-y-2 p-3 text-[12px]">
           <span className="text-subtle">

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { App as AntApp, Button, Empty, Segmented, Space, Table, Tooltip } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import type { OrderDTO, OrderStatus } from '@ai-trader/shared';
-import { useCancelOrder, useOrders, useOverview } from '@/api/hooks';
+import { useCancelOrder, useOrders, useOverview, useRoundTrips } from '@/api/hooks';
 import { ModeTag, OrderStatusTag, SideTag } from '@/components/OrderStatusTag';
 import { OrderPanel } from '@/components/OrderPanel';
 import { useRequireAuth } from '@/components/AuthGate';
@@ -16,9 +16,27 @@ const FILTERS = [
   { label: 'Agent 单', value: 'AGENT' },
 ];
 
+/** 回合盈亏单元格：正绿负红，主行净盈亏、副行收益率 */
+function PnlCell({ netPnl, returnPct }: { netPnl: number; returnPct: number }) {
+  const color = netPnl > 0 ? 'text-up' : netPnl < 0 ? 'text-down' : 'text-subtle';
+  return (
+    <div className="flex flex-col items-end leading-tight">
+      <span className={`num ${color}`}>
+        {netPnl > 0 ? '+' : ''}
+        {formatUsd(netPnl)}
+      </span>
+      <span className={`num text-[10px] ${color}`}>
+        {returnPct > 0 ? '+' : ''}
+        {(returnPct * 100).toFixed(2)}%
+      </span>
+    </div>
+  );
+}
+
 export function AdminOrders() {
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState('ALL');
+  const [market, setMarket] = useState<'spot' | 'futures'>('spot');
   const [panel, setPanel] = useState<{ side: 'BUY' | 'SELL' } | null>(null);
   const { message } = AntApp.useApp();
   const cancel = useCancelOrder();
@@ -35,6 +53,17 @@ export function AdminOrders() {
   }, [filter, page]);
 
   const { data, isLoading } = useOrders(params);
+  // 回合盈亏：把「开仓→平仓」配对，平仓单才能显示赚了多少（开仓单本身无盈亏概念）
+  const { data: rt, isLoading: rtLoading } = useRoundTrips(market);
+
+  /** 平仓订单 ID → 该回合盈亏；开仓单查不到 → 显示 -- */
+  const pnlByOrder = useMemo(() => {
+    const m = new Map<string, { netPnl: number; returnPct: number }>();
+    for (const t of rt?.trips ?? []) {
+      if (t.closeOrderId) m.set(t.closeOrderId, { netPnl: t.netPnl, returnPct: t.returnPct });
+    }
+    return m;
+  }, [rt]);
 
   const quoteFree =
     overview?.balances?.filter((b) => b.asset === 'USDT').reduce((a, b) => a + b.free, 0) ?? 0;
@@ -45,6 +74,15 @@ export function AdminOrders() {
     <div className="flex flex-col gap-4">
       <div className="glass-card flex flex-wrap items-center justify-between gap-3 p-4">
         <Space wrap>
+          <Segmented
+            size="small"
+            value={market}
+            onChange={(v) => setMarket(v as 'spot' | 'futures')}
+            options={[
+              { label: '现货', value: 'spot' },
+              { label: '合约', value: 'futures' },
+            ]}
+          />
           <Segmented value={filter} onChange={(v) => { setFilter(String(v)); setPage(1); }} options={FILTERS} />
           <span className="muted-text">共 {data?.total ?? 0} 条</span>
         </Space>
@@ -65,6 +103,44 @@ export function AdminOrders() {
           </Tooltip>
         </Space>
       </div>
+
+      {rt && rt.summary.count > 0 ? (
+        <div className="glass-card flex flex-wrap items-center gap-x-8 gap-y-2 p-4">
+          <span className="text-[13px] font-medium">
+            {market === 'spot' ? '现货' : '合约'}回合盈亏
+          </span>
+          <div className="flex items-baseline gap-2">
+            <span className="text-[11px] text-muted">已实现净盈亏</span>
+            <span
+              className={`num text-[16px] font-semibold ${
+                rt.summary.totalNetPnl > 0 ? 'text-up' : rt.summary.totalNetPnl < 0 ? 'text-down' : ''
+              }`}
+            >
+              {rt.summary.totalNetPnl > 0 ? '+' : ''}
+              {formatUsd(rt.summary.totalNetPnl)}
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-[11px] text-muted">回合</span>
+            <span className="num">{rt.summary.count}</span>
+            <span className="num text-[11px] text-up">盈 {rt.summary.wins}</span>
+            <span className="num text-[11px] text-down">亏 {rt.summary.losses}</span>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-[11px] text-muted">胜率</span>
+            <span className="num">{(rt.summary.winRate * 100).toFixed(1)}%</span>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-[11px] text-muted">最佳</span>
+            <span className="num text-up">+{formatUsd(rt.summary.bestPnl)}</span>
+            <span className="text-[11px] text-muted ml-2">最差</span>
+            <span className="num text-down">{formatUsd(rt.summary.worstPnl)}</span>
+          </div>
+          <Tooltip title="与持仓页的已实现盈亏同口径；开仓手续费在现货已摊入成本、合约计入总费用">
+            <span className="text-[11px] text-muted underline decoration-dashed cursor-help">口径说明</span>
+          </Tooltip>
+        </div>
+      ) : null}
 
       <div className="glass-card p-4">
         <Table<OrderDTO>
@@ -128,6 +204,18 @@ export function AdminOrders() {
               width: 120,
               align: 'right',
               render: (v: number) => <span className="num text-white">{formatUsd(v)}</span>,
+            },
+            {
+              title: '回合盈亏',
+              key: 'roundTripPnl',
+              width: 110,
+              align: 'right',
+              render: (_, row) => {
+                // 只有平仓单有回合盈亏（配对到它的开仓成本）；开仓单显示 --
+                const hit = pnlByOrder.get(row.id);
+                if (!hit) return <span className="text-[11px] text-muted">--</span>;
+                return <PnlCell netPnl={hit.netPnl} returnPct={hit.returnPct} />;
+              },
             },
             {
               title: '来源',

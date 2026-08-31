@@ -253,6 +253,112 @@ export function useLaneStats() {
   });
 }
 
+// ------------------------------------------------------------------ 决策诊断（策略增强 A 期）
+
+/** 信号投票统计：各信号的中性/多/空占比，暴露「信号长期不表态」问题 */
+export interface SignalVoteStat {
+  name: string;
+  label: string;
+  total: number;
+  neutralRate: number;
+  bullishRate: number;
+  bearishRate: number;
+}
+
+/** 单个信号对综合倾向的贡献 */
+export interface SignalContribution {
+  name: string;
+  label: string;
+  bias: 'bullish' | 'bearish' | 'neutral';
+  weight: number;
+  signed: number;
+  note?: string;
+}
+
+/** 最接近触发的观望记录（差一点就开仓的） */
+export interface NearMiss {
+  id: string;
+  createdAt: string;
+  proximity: number | null;
+  blockingReason: string | null;
+  score: number | null;
+  requiredScore: number | null;
+  contributions: SignalContribution[];
+}
+
+/** 决策诊断聚合：回答「为什么没开单」 */
+export interface DecisionDiagnostics {
+  windowHours: number;
+  total: number;
+  holdTotal: number;
+  /** 阻塞原因 Top 排行（含占比） */
+  topReasons: { code: string; count: number; share: number }[];
+  /** 接近度分布：观望决策堆积在哪个区间 */
+  proximityBuckets: { bucket: string; count: number }[];
+  /** 最接近触发的观望，供下钻 */
+  nearMisses: NearMiss[];
+  /** 各信号投票率 */
+  signalStats: SignalVoteStat[];
+}
+
+// ------------------------------------------------------------------ 回合盈亏（订单页）
+
+/** 一个完整回合（开仓→平仓）的盈亏明细 */
+export interface RoundTrip {
+  direction: 'long' | 'short';
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  grossPnl: number;
+  fee: number;
+  netPnl: number;
+  returnPct: number;
+  openedAt: number;
+  closedAt: number;
+  closeOrderId?: string;
+}
+
+export interface RoundTripSummary {
+  count: number;
+  wins: number;
+  losses: number;
+  totalNetPnl: number;
+  winRate: number;
+  bestPnl: number;
+  worstPnl: number;
+}
+
+export interface RoundTripsResponse {
+  market: 'spot' | 'futures';
+  symbol: string;
+  fillCount: number;
+  trips: RoundTrip[];
+  summary: RoundTripSummary;
+}
+
+export function useRoundTrips(market: 'spot' | 'futures', symbol?: string) {
+  return useQuery<RoundTripsResponse>({
+    queryKey: ['round-trips', market, symbol ?? 'all'],
+    queryFn: () =>
+      http.get(
+        `/orders/round-trips?market=${market}` + (symbol ? `&symbol=${symbol}` : ''),
+      ),
+    refetchInterval: 30000,
+  });
+}
+
+export function useDecisionDiagnostics(windowHours = 24, market?: 'spot' | 'futures') {
+  return useQuery<DecisionDiagnostics>({
+    queryKey: ['decision-diagnostics', windowHours, market ?? 'all'],
+    queryFn: () =>
+      http.get(
+        `/agent/decisions/diagnostics?windowHours=${windowHours}` +
+          (market ? `&market=${market}` : ''),
+      ),
+    refetchInterval: 60000,
+  });
+}
+
 // ------------------------------------------------------------------ 回测（阶段 6）
 export interface BacktestRequest {
   symbol?: string;

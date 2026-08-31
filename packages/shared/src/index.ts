@@ -10,4 +10,6 @@ export * from './position';
 export * from './dto/api';
 export * from './indicators/core';
 export * from './indicators/signals';
+export * from './decision-diagnostics';
+export * from './analysis/ic';
 export * from './strategy';

@@ -152,8 +152,12 @@ export class FuturesEngine {
           symbol: cfg.symbol,
           action: decision.action,
           confidence: decision.confidence,
+          // 与现货同口径：接近度 + 结构化归因，让合约的每条 HOLD 也可解释
+          proximity: decision.proximity ?? null,
           reason: decision.reason,
           riskNotes: decision.riskNotes ?? null,
+          blockingReason: decision.diagnostics?.code ?? null,
+          diagnostics: decision.diagnostics ?? null,
           inputSnapshot: snapshot,
           prompt: laneResult.prompt,
           llmRaw: laneResult.llmResult?.raw ?? null,
@@ -229,6 +233,8 @@ export class FuturesEngine {
       timeframe: cfg.timeframe,
       candles,
       ticker,
+      // 按策略语义构造信号（B3）：与现货同口径
+      strategyName: cfg.strategyName,
       news: recentNews.map((n) => ({
         title: n.title,
         source: n.source,
