@@ -11,82 +11,91 @@ export interface PositionFill {
   fee: number;
 }
 
-/** 空持仓快照，数据缺失或无成交时返回 */
-export function emptyPosition(symbol: string): PositionSnapshot {
+// ---------------------------------------------------------------------------
+// Position Lot（订单级仓位单）
+// ---------------------------------------------------------------------------
+// 每笔开仓订单 = 一个 Lot，独立止盈止损、全量平仓后才算完结。
+// 1 开仓单 ↔ 1 Lot ↔ 1 平仓单，回合配对不再依赖 FIFO 启发式。
+
+export type LotDirection = 'LONG' | 'SHORT';
+export type LotStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
+/** 出场原因：信号出场（预留）/止损/止盈/手动/反手解除 */
+export type LotExitReason = 'SIGNAL' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'MANUAL' | 'REVERSE';
+
+/**
+ * strategy 链路 / AI 降级时的逐单止盈止损兜底值（用户确认：SL 2% / TP 4%，盈亏比 2:1）。
+ * hybrid 链路 AI 可逐单覆盖，但必须钳制到 [MIN_TP_SL, MAX_TP_SL] 防幻觉值。
+ */
+export const DEFAULT_LOT_STOP_LOSS_PCT = 0.02;
+export const DEFAULT_LOT_TAKE_PROFIT_PCT = 0.04;
+export const MIN_TP_SL_PCT = 0.005;
+export const MAX_TP_SL_PCT = 0.1;
+
+/** 把 AI/配置给出的止盈止损参数钳制到安全区间，非法值回落默认 */
+export function clampLotTpSl(input: {
+  stopLossPct?: number | null;
+  takeProfitPct?: number | null;
+}): { stopLossPct: number; takeProfitPct: number } {
+  const clamp = (v: number | null | undefined, d: number) => {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return d;
+    return Math.min(Math.max(v, MIN_TP_SL_PCT), MAX_TP_SL_PCT);
+  };
   return {
-    symbol,
-    quantity: 0,
-    avgCost: 0,
-    realizedPnl: 0,
-    unrealizedPnl: 0,
-    marketValue: 0,
-    totalBought: 0,
-    totalSold: 0,
-    totalFee: 0,
+    stopLossPct: clamp(input.stopLossPct, DEFAULT_LOT_STOP_LOSS_PCT),
+    takeProfitPct: clamp(input.takeProfitPct, DEFAULT_LOT_TAKE_PROFIT_PCT),
   };
 }
 
 /**
- * 由成交明细推导持仓，采用移动加权平均成本法。
+ * 逐 Lot 止盈止损判定（多头：跌破止损线/涨破止盈线；空头反向）。
+ * 纯函数：决策循环、合约引擎、回测引擎共用同一判定，保证实盘与回测口径一致。
  *
- * - 买入：数量增加，手续费计入成本（抬高均价）
- * - 卖出：按当前均价兑现已实现盈亏，成本等比例减少，均价不变
- *
- * 不新建持仓表：trade_fills 已是事实来源，推导即可满足成本价与盈亏计算，
- * 避免与主订单表产生双写一致性问题。
- *
- * @param fills 必须按成交时间升序传入
- * @param currentPrice 用于计算未实现盈亏与市值的现价
+ * @returns 触发类型；null = 未触发
  */
-export function computePosition(
-  symbol: string,
-  fills: PositionFill[],
-  currentPrice: number,
-): PositionSnapshot {
-  const pos = emptyPosition(symbol);
+export function checkLotExit(params: {
+  entryPrice: number;
+  direction: LotDirection;
+  stopLossPct: number;
+  takeProfitPct: number;
+  price: number;
+}): 'STOP_LOSS' | 'TAKE_PROFIT' | null {
+  const { entryPrice, direction, stopLossPct, takeProfitPct, price } = params;
+  if (!(entryPrice > 0) || !(price > 0)) return null;
 
-  let quantity = 0;
-  let avgCost = 0;
-
-  for (const fill of fills) {
-    const qty = Number(fill.quantity);
-    const price = Number(fill.price);
-    const fee = Number(fill.fee) || 0;
-    if (!(qty > 0) || !(price > 0)) continue;
-
-    if (fill.side === 'BUY') {
-      // 手续费摊入成本：买入 1 BTC @ 100，手续费 10，实际成本 110
-      const cost = qty * price + fee;
-      const newQty = quantity + qty;
-      avgCost = newQty > 0 ? (avgCost * quantity + cost) / newQty : 0;
-      quantity = newQty;
-      pos.totalBought += qty;
-    } else {
-      // 卖出数量不应超过持仓；超出部分按均价 0 处理，避免出现负成本
-      const soldQty = Math.min(qty, quantity > 0 ? quantity : qty);
-      const realized = (price - avgCost) * soldQty - fee;
-      pos.realizedPnl += realized;
-      quantity = Math.max(0, quantity - qty);
-      if (quantity <= 0) {
-        quantity = 0;
-        avgCost = 0;
-      }
-      pos.totalSold += qty;
-    }
-    pos.totalFee += fee;
+  if (direction === 'LONG') {
+    if (price <= entryPrice * (1 - stopLossPct)) return 'STOP_LOSS';
+    if (price >= entryPrice * (1 + takeProfitPct)) return 'TAKE_PROFIT';
+  } else {
+    if (price >= entryPrice * (1 + stopLossPct)) return 'STOP_LOSS';
+    if (price <= entryPrice * (1 - takeProfitPct)) return 'TAKE_PROFIT';
   }
+  return null;
+}
 
-  pos.quantity = quantity;
-  pos.avgCost = avgCost;
-  pos.marketValue = quantity * currentPrice;
-  // 未实现盈亏按现价与均价的差额计，尚未扣卖出侧手续费
-  pos.unrealizedPnl = quantity > 0 && currentPrice > 0 ? (currentPrice - avgCost) * quantity : 0;
-
-  return pos;
+/** Lot 结算：净盈亏（已扣双边手续费）与名义收益率 */
+export function settleLotPnl(params: {
+  direction: LotDirection;
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  entryFee: number;
+  exitFee: number;
+}): { realizedPnl: number; returnPct: number } {
+  const { direction, quantity, entryPrice, exitPrice, entryFee, exitFee } = params;
+  const gross =
+    direction === 'LONG'
+      ? (exitPrice - entryPrice) * quantity
+      : (entryPrice - exitPrice) * quantity;
+  const realizedPnl = gross - entryFee - exitFee;
+  const notional = entryPrice * quantity;
+  return {
+    realizedPnl: Number(realizedPnl.toFixed(8)),
+    returnPct: notional > 0 ? Number((realizedPnl / notional).toFixed(8)) : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// 合约净持仓模型（与现货的关键差异：可做空，净持仓可正可负）
+// 合约净持仓模型
 // ---------------------------------------------------------------------------
 
 /** 合约持仓状态：净持仓语义，数量为负表示空头 */
@@ -272,71 +281,6 @@ function summarize(trips: RoundTrip[]): RoundTripSummary {
   s.totalNetPnl = Number(s.totalNetPnl.toFixed(8));
   s.winRate = s.count === 0 ? 0 : Number((s.wins / s.count).toFixed(4));
   return s;
-}
-
-/**
- * 现货回合配对（单向做多）。
- *
- * 口径与 computePosition 完全一致：买入手续费摊入持有成本，
- * 卖出时 netPnl = (卖价 − 含费成本) × 量 − 卖出手续费。
- * 因此「各回合 netPnl 之和 === computePosition(...).realizedPnl」。
- *
- * 部分平仓会产生多个回合，每个回合的 entryPrice 为当时的含费均价。
- * 卖出数量超过持仓的部分（数据异常）按 computePosition 同样方式容忍处理，不生成回合。
- *
- * @param fills 必须按成交时间升序
- */
-export function computeSpotRoundTrips(fills: RoundTripFill[]): { trips: RoundTrip[]; summary: RoundTripSummary } {
-  const trips: RoundTrip[] = [];
-  let quantity = 0;
-  let avgCost = 0; // 含买入手续费的成本均价
-  let avgPrice = 0; // 不含费成交均价（用于拆分展示费用）
-  let openedAt = 0;
-
-  for (const fill of fills) {
-    const qty = Number(fill.quantity);
-    const price = Number(fill.price);
-    const fee = Number(fill.fee) || 0;
-    if (!(qty > 0) || !(price > 0)) continue;
-
-    if (fill.side === 'BUY') {
-      const cost = qty * price + fee;
-      const newQty = quantity + qty;
-      avgCost = newQty > 0 ? (avgCost * quantity + cost) / newQty : 0;
-      avgPrice = newQty > 0 ? (avgPrice * quantity + qty * price) / newQty : 0;
-      quantity = newQty;
-      if (openedAt === 0) openedAt = fill.time;
-    } else {
-      const soldQty = Math.min(qty, quantity);
-      if (soldQty > 0 && avgCost > 0) {
-        const gross = (price - avgPrice) * soldQty;
-        const buyFeeShare = (avgCost - avgPrice) * soldQty;
-        const net = (price - avgCost) * soldQty - fee; // 与 computePosition L67 逐字一致
-        trips.push({
-          direction: 'long',
-          qty: soldQty,
-          entryPrice: Number(avgCost.toFixed(8)),
-          exitPrice: price,
-          grossPnl: Number(gross.toFixed(8)),
-          fee: Number((buyFeeShare + fee).toFixed(8)),
-          netPnl: Number(net.toFixed(8)),
-          returnPct: Number((net / (avgCost * soldQty)).toFixed(6)),
-          openedAt,
-          closedAt: fill.time,
-          closeOrderId: fill.orderId,
-        });
-      }
-      quantity = Math.max(0, quantity - qty);
-      if (quantity <= 0) {
-        quantity = 0;
-        avgCost = 0;
-        avgPrice = 0;
-        openedAt = 0;
-      }
-    }
-  }
-
-  return { trips, summary: summarize(trips) };
 }
 
 /**

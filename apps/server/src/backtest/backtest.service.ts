@@ -2,19 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   strategyRegistry,
-  type Candle,
   type Timeframe,
-  type MarketType,
 } from '@ai-trader/shared';
 import { Repository } from 'typeorm';
 import { FundingRateEntity, MarketCandleEntity } from '../database/entities';
 import { BusinessException } from '../common/business.exception';
 import { backfill, loadRange, backfillFunding, loadFundingRange } from './candle-source';
-import { runBacktest } from './engine';
 import { runFuturesBacktest } from './futures-engine';
 import type {
-  BacktestConfig,
-  BacktestReport,
   FuturesBacktestConfig,
   FuturesBacktestReport,
   FuturesLeverageComparison,
@@ -45,9 +40,9 @@ export interface BacktestRequestDto {
   warmupBars?: number;
   /** 数据稀疏/缺失时是否自动从 Binance 公共 REST 回填（默认 true） */
   autoBackfill?: boolean;
-  /** 市场：spot=现货（默认，兼容存量调用）；futures=合约 */
-  market?: 'spot' | 'futures';
-  /** 合约杠杆 1~10（仅 market=futures 生效，默认 5） */
+  /** 兼容字段：仅接受 futures（本项目只做合约回测，现货回测已移除） */
+  market?: 'futures';
+  /** 合约杠杆 1~10（默认 5） */
   leverage?: number;
   /** 数量步进；不传按 symbol 兜底 BTCUSDT=0.0001 */
   stepSize?: number;
@@ -90,7 +85,7 @@ export class BacktestService {
 
   async run(
     dto: BacktestRequestDto,
-  ): Promise<BacktestReport | FuturesBacktestReport | FuturesLeverageComparison> {
+  ): Promise<FuturesBacktestReport | FuturesLeverageComparison> {
     if (this.running) {
       throw new BusinessException('BAD_REQUEST','已有回测在运行中，请稍后再试');
     }
@@ -109,85 +104,9 @@ export class BacktestService {
 
   private async doRun(
     dto: BacktestRequestDto,
-  ): Promise<BacktestReport | FuturesBacktestReport | FuturesLeverageComparison> {
-    const market: MarketType = dto.market === 'futures' ? 'futures' : 'spot';
-    if (market === 'futures') {
-      return this.doRunFutures(dto);
-    }
-    return this.doRunSpot(dto);
-  }
-
-  /** 现货回测（原逻辑原样保留，行为零变化） */
-  private async doRunSpot(dto: BacktestRequestDto): Promise<BacktestReport> {
-    const symbol = dto.symbol ?? 'BTCUSDT';
-    const interval = dto.interval ?? '5m';
-    const from = new Date(dto.from).getTime();
-    const to = new Date(dto.to).getTime();
-    if (!Number.isFinite(from) || !Number.isFinite(to)) {
-      throw new BusinessException('BAD_REQUEST','from/to 必须是合法日期（ISO 字符串）');
-    }
-    if (!(from < to)) throw new BusinessException('BAD_REQUEST','from 必须早于 to');
-
-    const stepMs = intervalStepMs(interval);
-    const expectedBars = Math.floor((to - from) / stepMs) + 1;
-    if (expectedBars > MAX_EXPECTED_BARS) {
-      throw new BusinessException('BAD_REQUEST',
-        `区间过大（约 ${expectedBars} 根，上限 ${MAX_EXPECTED_BARS}）。请缩短区间或改用更大周期`,
-      );
-    }
-
-    const { strategy, fellBack } = strategyRegistry.getOrDefault(dto.strategyName ?? 'trend_following');
-    if (fellBack) throw new BusinessException('BAD_REQUEST',`策略 ${dto.strategyName} 不存在`);
-
-    const config: BacktestConfig = {
-      symbol,
-      interval,
-      from,
-      to,
-      initialCapital: dto.initialCapital ?? 10_000,
-      slippageBps: dto.slippageBps ?? 5,
-      feeRateBps: dto.feeRateBps ?? 10,
-      positionPct: clamp(dto.positionPct ?? 0.1, 0.001, 1),
-      minConfidence: clamp(dto.minConfidence ?? 0.6, 0, 1),
-      strategyName: strategy.name,
-      strategyParams: dto.strategyParams,
-      exitRules: dto.exitRules,
-      warmupBars: dto.warmupBars ?? 120,
-    };
-
-    let candles = await loadRange(this.candleRepo, symbol, interval, from, to);
-    if (dto.autoBackfill !== false && candles.length < expectedBars * 0.9) {
-      this.logger.log(
-        `HTTP 回测：库内 ${symbol} ${interval} 仅 ${candles.length}/${expectedBars} 根，回填中…`,
-      );
-      this.setProgress('backfill', 0, `从交易所回填 0/${expectedBars} 根`);
-      await backfill(this.candleRepo, symbol, interval, from, to, 'spot', (fetched, expected) => {
-        this.setProgress('backfill', (fetched / expected) * 100, `从交易所回填 ${fetched}/${expected} 根`);
-      });
-      candles = await loadRange(this.candleRepo, symbol, interval, from, to);
-    }
-    if (candles.length <= config.warmupBars + 2) {
-      throw new BusinessException('BAD_REQUEST',
-        `K 线数据不足（${candles.length} 根，warmup ${config.warmupBars}），无法回测`,
-      );
-    }
-
-    this.setProgress('compute', 0, `逐根回放 ${candles.length} 根 K 线`);
-    const report = await runBacktest(candles, strategy, config, (done, total) => {
-      this.setProgress('compute', (done / total) * 100, `逐根回放 ${done}/${total}`);
-    });
-    // 大区间 1m 回测成交可能数万笔：HTTP 响应只带最近 2000 笔，避免响应体积失控
-    const tradesTruncated = report.trades.length > MAX_TRADES;
-    return {
-      ...report,
-      trades: tradesTruncated ? report.trades.slice(-MAX_TRADES) : report.trades,
-      equityCurve: downsample(report.equityCurve, MAX_CURVE_POINTS),
-      meta: {
-        ...report.meta,
-        downsampled: report.equityCurve.length > MAX_CURVE_POINTS,
-        tradesTruncated,
-      },
-    };
+  ): Promise<FuturesBacktestReport | FuturesLeverageComparison> {
+    // 仅合约：现货回测（runBacktest/engine.ts）已随现货链路移除
+    return this.doRunFutures(dto);
   }
 
   /**

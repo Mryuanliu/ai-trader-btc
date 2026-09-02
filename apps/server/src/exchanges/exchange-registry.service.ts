@@ -2,23 +2,21 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   ENVIRONMENT_LABELS,
-  SPOT_EXCHANGE_CODES,
   ExchangeCode,
   Environment,
 } from '@ai-trader/shared';
-import { BinanceAdapter } from './binance.adapter';
 import { BinanceFuturesAdapter } from './binance-futures.adapter';
-import { OkxAdapter } from './okx.adapter';
+import { ExchangeAccountService } from './exchange-account.service';
+import { ExchangeAdapter, ExchangeError } from './adapter.interface';
 
 /**
  * 已实现适配器的交易所集合。
  *
- * 加交易所码到 EXCHANGE_CODES 后，若尚未实现适配器就放进遍历，
- * 会在 get() 里抛错并连带打断现货链路。此处作为能力白名单供 isSupported() 使用。
+ * 仅合约模式下只有 `binance-futures`。加交易所码到 EXCHANGE_CODES 后，
+ * 若尚未实现适配器就放进遍历，会在 get() 里抛错并连带打断行情与交易链路。
+ * 此处作为能力白名单供 isSupported() 使用。
  */
-const IMPLEMENTED_EXCHANGES: readonly ExchangeCode[] = ['binance', 'okx', 'binance-futures'];
-import { ExchangeAccountService } from './exchange-account.service';
-import { ExchangeAdapter, ExchangeError } from './adapter.interface';
+const IMPLEMENTED_EXCHANGES: readonly ExchangeCode[] = ['binance-futures'];
 
 @Injectable()
 export class ExchangeRegistry {
@@ -65,16 +63,10 @@ export class ExchangeRegistry {
     const apiKey = credentials?.apiKey ?? '';
     const apiSecret = credentials?.apiSecret ?? '';
 
-    // 必须显式 switch：若用 `code === 'binance' ? A : B` 的 else 兜底，
+    // 必须显式 switch：若用 `code === 'binance-futures' ? A : B` 的 else 兜底，
     // 未覆盖的交易所码会静默落到别的适配器（拿 A 的密钥打 B 的接口），不报错但行为完全错误
     let adapter: ExchangeAdapter;
     switch (code) {
-      case 'binance':
-        adapter = new BinanceAdapter(environment, apiKey, apiSecret);
-        break;
-      case 'okx':
-        adapter = new OkxAdapter(environment, apiKey, apiSecret, credentials?.passphrase ?? '');
-        break;
       case 'binance-futures':
         adapter = new BinanceFuturesAdapter(environment, apiKey, apiSecret);
         break;
@@ -88,13 +80,14 @@ export class ExchangeRegistry {
     return adapter;
   }
 
-  /** 取第一个可用于公共行情的适配器（仅现货：合约行情与现货存在基差，不作为默认数据源） */
+  /**
+   * 取公共行情适配器。
+   *
+   * 仅合约模式下合约行情是**唯一**数据源（行情服务用它订阅 K 线/报价流），
+   * 不再存在「现货优先、合约有基差」的取舍。
+   */
   async getPublic(): Promise<ExchangeAdapter> {
-    for (const code of SPOT_EXCHANGE_CODES) {
-      const adapter = await this.get(code);
-      return adapter;
-    }
-    return this.get('binance');
+    return this.get('binance-futures');
   }
 
   /** 已启用、已配置密钥且适配器支持下单的交易所，用于真实下单 */

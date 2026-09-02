@@ -3,23 +3,27 @@ import clsx from 'clsx';
 import { Segmented, Skeleton } from 'antd';
 import { TrendingUp, Flame } from 'lucide-react';
 import { TIMEFRAMES, TIMEFRAME_LABELS, type Timeframe } from '@ai-trader/shared';
-import { useCandles, useMarketPulse, useOverview } from '@/api/hooks';
+import { useCandles, useMarketPulse, useOpenLots } from '@/api/hooks';
 import { KlineChart } from '@/components/KlineChart';
-import { OrderPanel } from '@/components/OrderPanel';
 import { StatCard } from '@/components/StatCard';
 import { formatPct, formatPrice } from '@/utils/format';
 
+/**
+ * 移动端行情页（合约专用）。
+ * 合约下单操作请到 PC 端「合约」页（移动端只读展示行情与当前持仓仓位单）。
+ */
 export function MobileTrade() {
   const [interval, setInterval] = useState<Timeframe>('5m');
-  const [panel, setPanel] = useState<{ side: 'BUY' | 'SELL' } | null>(null);
   const { data: candles = [], isLoading } = useCandles('BTCUSDT', interval, 200);
   const { data: pulse } = useMarketPulse('BTCUSDT');
-  const { data } = useOverview();
+  const { data: futuresLots = [] } = useOpenLots({ market: 'futures', symbol: 'BTCUSDT' });
 
-  const quoteFree =
-    data?.balances?.filter((b) => b.asset === 'USDT').reduce((a, b) => a + b.free, 0) ?? 0;
-  const baseFree =
-    data?.balances?.filter((b) => b.asset === 'BTC').reduce((a, b) => a + b.free, 0) ?? 0;
+  const longQty = futuresLots
+    .filter((l) => l.direction === 'LONG')
+    .reduce((a, l) => a + l.quantity, 0);
+  const shortQty = futuresLots
+    .filter((l) => l.direction === 'SHORT')
+    .reduce((a, l) => a + l.quantity, 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -80,30 +84,20 @@ export function MobileTrade() {
         </section>
       ) : null}
 
-      <section className="grid grid-cols-2 gap-3 pb-2">
-        <button
-          onClick={() => setPanel({ side: 'BUY' })}
-          className="h-14 rounded-2xl bg-btc-gradient text-[15px] font-semibold text-ink-900 shadow-glow active:scale-[0.98]"
-        >
-          买入 BTC
-        </button>
-        <button
-          onClick={() => setPanel({ side: 'SELL' })}
-          className="h-14 rounded-2xl border border-down/35 bg-down/12 text-[15px] font-semibold text-down active:scale-[0.98]"
-        >
-          卖出 BTC
-        </button>
+      <section className="glass-card p-4">
+        <span className="section-title">合约持仓（本地仓位单）</span>
+        <div className="mt-2 flex items-center justify-between text-[12px]">
+          <span className="muted-text">做多</span>
+          <span className="num text-up">{longQty.toFixed(6)} BTC</span>
+        </div>
+        <div className="mt-1 flex items-center justify-between text-[12px]">
+          <span className="muted-text">做空</span>
+          <span className="num text-down">{shortQty.toFixed(6)} BTC</span>
+        </div>
+        <p className="mt-3 text-[11px] text-muted">
+          合约开仓/平仓请到 PC 端「合约」页操作（每单独立止盈止损，全量平仓才算完结）
+        </p>
       </section>
-
-      <OrderPanel
-        open={Boolean(panel)}
-        onClose={() => setPanel(null)}
-        side={panel?.side ?? 'BUY'}
-        price={data?.ticker?.price ?? 0}
-        quoteFree={quoteFree}
-        baseFree={baseFree}
-        mode={data?.mode}
-      />
     </div>
   );
 }

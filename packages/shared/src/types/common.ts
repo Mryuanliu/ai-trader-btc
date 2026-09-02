@@ -1,18 +1,16 @@
 /**
  * 支持的交易所。
  *
- * `binance-futures` 是币安 U 本位合约，与现货 `binance` 是两套独立账户与链路，
- * 但共用同一套 API Key（demo 环境已实测通用）。
+ * 本项目**只做合约（U 本位永续）交易**，现货交易所（binance / okx）已于
+ * 2026-08-31 的「仅合约」重构中移除，故此处只剩 `binance-futures`。
  *
- * 注意追加顺序：多处循环是「首个可用即返回」的短路逻辑，
- * 新增交易所请**追加到数组末尾**，避免抢占现货链路的默认选择。
+ * 若将来要再加交易所：追加到数组末尾即可，`ExchangeCode` 是穷举联合类型，
+ * 所有 `Record<ExchangeCode, ...>` 映射缺项会在编译期报错，不会静默遗漏。
  */
-export const EXCHANGE_CODES = ['binance', 'okx', 'binance-futures'] as const;
+export const EXCHANGE_CODES = ['binance-futures'] as const;
 export type ExchangeCode = (typeof EXCHANGE_CODES)[number];
 
 export const EXCHANGE_LABELS: Record<ExchangeCode, string> = {
-  binance: '币安 Binance',
-  okx: '欧意 OKX',
   'binance-futures': '币安合约',
 };
 
@@ -28,29 +26,16 @@ export const MARKET_LABELS: Record<MarketType, string> = {
   futures: '合约',
 };
 
-export const DEFAULT_MARKET: MarketType = 'spot';
+/** 默认市场。仅合约模式下所有新数据都归合约，兜底值随之改为 futures */
+export const DEFAULT_MARKET: MarketType = 'futures';
 
 /** 各交易所所属市场：新增交易所或市场只需在此登记 */
 export const EXCHANGE_MARKETS: Record<ExchangeCode, MarketType> = {
-  binance: 'spot',
-  okx: 'spot',
   'binance-futures': 'futures',
 };
 
-/**
- * 现货交易所集合。
- *
- * 现货行情拉取、余额读取、Agent 可选交易所等处必须用它而非 EXCHANGE_CODES：
- * 遍历全部交易所会把合约账户也纳进来，导致合约钱包余额与现货 USDT 重复计入总权益。
- */
-export const SPOT_EXCHANGE_CODES = ['binance', 'okx'] as const;
-
 export function marketOfExchange(code: ExchangeCode): MarketType {
   return EXCHANGE_MARKETS[code] ?? DEFAULT_MARKET;
-}
-
-export function isSpotExchange(code: ExchangeCode): boolean {
-  return marketOfExchange(code) === 'spot';
 }
 
 /**

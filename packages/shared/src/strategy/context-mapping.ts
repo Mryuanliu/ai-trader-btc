@@ -1,4 +1,5 @@
 import type { StrategyName } from '../types/agent';
+import { DEFAULT_LOT_STOP_LOSS_PCT, DEFAULT_LOT_TAKE_PROFIT_PCT } from '../position';
 
 /**
  * 阶段 5 · AI 上下文层（分层裁决）的 AI 输出契约。
@@ -22,6 +23,14 @@ export interface ContextInsight {
   positionView: 'positive' | 'neutral' | 'negative';
   /** 不超过 80 字的判断说明（写入决策理由） */
   comment: string;
+  /**
+   * 建议止损比例（0.005~0.1，可选）。
+   * Lot 模型下 hybrid 链路的 AI 按市场状态逐单给止盈止损（用户拍板）；
+   * 不输出或非法时由引擎回落全局兜底（SL 2%/TP 4%）。
+   */
+  suggestedStopLossPct?: number;
+  /** 建议止盈比例（0.005~0.1，可选） */
+  suggestedTakeProfitPct?: number;
 }
 
 /** AI 中性默认输出：AI 挂掉/TTL 过期时策略用这套参数继续运行，不停摆 */
@@ -117,7 +126,7 @@ export function normalizeInsight(raw: unknown): ContextInsight {
     return Math.min(max, Math.max(min, v));
   };
   const regime = obj.regime === 'ranging' || obj.regime === 'volatile' ? obj.regime : 'trending';
-  return {
+  const result: ContextInsight = {
     regime,
     regimeConfidence: num(obj.regimeConfidence, 0, 0, 1),
     aggression: num(obj.aggression, 0.5, 0, 1),
@@ -127,6 +136,34 @@ export function normalizeInsight(raw: unknown): ContextInsight {
         ? obj.positionView
         : 'neutral',
     comment: typeof obj.comment === 'string' && obj.comment.trim() ? obj.comment.slice(0, 80) : '',
+  };
+  // TP/SL 建议为可选输出：缺失/非法时保持 undefined，由引擎用全局兜底
+  const rawSl = obj.suggestedStopLossPct;
+  const rawTp = obj.suggestedTakeProfitPct;
+  if (typeof rawSl === 'number' && Number.isFinite(rawSl) && rawSl > 0) {
+    result.suggestedStopLossPct = rawSl;
+  }
+  if (typeof rawTp === 'number' && Number.isFinite(rawTp) && rawTp > 0) {
+    result.suggestedTakeProfitPct = rawTp;
+  }
+  return result;
+}
+
+/**
+ * 从 AI 上下文提取逐单 TP/SL（hybrid 链路专用），并钳制到安全区间。
+ * AI 未输出或 strategy 链路（无 insight）返回 null → 调用方用全局兜底。
+ */
+export function extractLotTpSl(
+  insight: ContextInsight | null | undefined,
+): { stopLossPct: number; takeProfitPct: number } | null {
+  if (!insight) return null;
+  const hasSl = typeof insight.suggestedStopLossPct === 'number' && insight.suggestedStopLossPct > 0;
+  const hasTp =
+    typeof insight.suggestedTakeProfitPct === 'number' && insight.suggestedTakeProfitPct > 0;
+  if (!hasSl && !hasTp) return null;
+  return {
+    stopLossPct: hasSl ? (insight.suggestedStopLossPct as number) : DEFAULT_LOT_STOP_LOSS_PCT,
+    takeProfitPct: hasTp ? (insight.suggestedTakeProfitPct as number) : DEFAULT_LOT_TAKE_PROFIT_PCT,
   };
 }
 

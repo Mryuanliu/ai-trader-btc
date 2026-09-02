@@ -6,8 +6,8 @@ import {
   DecisionInputSnapshot,
   DecisionSummary,
   FuturesAgentConfigShape,
+  MAX_OPEN_LOTS_PER_DIRECTION,
   PositionSnapshot,
-  evaluateExitRules,
 } from '@ai-trader/shared';
 import { Repository } from 'typeorm';
 import { AgentDecisionEntity } from '../database/entities';
@@ -16,6 +16,7 @@ import { FuturesConfigService } from './futures-config.service';
 import { FuturesPositionService } from './futures-position.service';
 import { FuturesRiskService } from './futures-risk.service';
 import { FuturesTradingService } from './futures-trading.service';
+import { LotService } from '../account/lot.service';
 import { NewsService } from '../news/news.service';
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.adapter';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -57,6 +58,7 @@ export class FuturesEngine {
     private readonly core: DecisionCoreService,
     private readonly positions: FuturesPositionService,
     private readonly trading: FuturesTradingService,
+    private readonly lots: LotService,
     private readonly risk: FuturesRiskService,
     private readonly news: NewsService,
     private readonly registry: ExchangeRegistry,
@@ -132,11 +134,27 @@ export class FuturesEngine {
 
     try {
       const cfg = await this.futuresConfig.get();
+
+      // Lot 模型前提：真实交易必须处于双向持仓（多空 Lot 共存）。
+      // 幂等（已是 hedge 时零开销）；交易所拒绝（仍有持仓）会上抛 → 记为决策失败，
+      // 绝不静默降级到单向语义。
+      if (cfg.enabled && cfg.mode !== 'dry_run') {
+        await this.trading.ensureHedgeMode();
+      }
+
       const snapshot = await this.buildSnapshot(cfg);
 
-      // 出场规则优先级最高（方向感知）；其次才是策略/AI 决策
-      const exitResult = await this.checkExitRules(cfg, snapshot);
-      const laneResult = exitResult ?? (await this.produceDecision(cfg, snapshot));
+      // 出场优先：逐 Lot 止盈止损（Lot 模型下唯一的自动出场机制）。
+      // 触发则平掉全部命中 Lot 并直接结束本次决策，下个周期再评估开仓——
+      // 同一跳内「先平后开」会放大误判风险（与旧反手语义同样的保守理由）。
+      const exitSummary = await this.runLotExits(cfg, snapshot);
+      if (exitSummary) {
+        this.recordSuccess();
+        return exitSummary;
+      }
+
+      // 无 Lot 触发 → 策略/AI 决策只负责开新 Lot（BUY=开多 / SELL=开空）
+      const laneResult = await this.produceDecision(cfg, snapshot);
       const decision = laneResult.decision;
 
       this.logger.log(
@@ -181,7 +199,7 @@ export class FuturesEngine {
       );
       this.lastDecisionId = entity.id;
 
-      const result = await this.execute(cfg, decision, entity.id);
+      const result = await this.execute(cfg, decision, entity.id, laneResult);
       entity.riskPassed = result.risk?.passed ?? true;
       entity.riskRejectedBy = result.risk?.rejectedBy ?? null;
       entity.riskNote = result.risk?.note ?? null;
@@ -276,48 +294,93 @@ export class FuturesEngine {
   }
 
   /**
-   * 合约出场规则（方向感知）。
+   * 逐 Lot 止盈止损扫描（Lot 模型下唯一的自动出场机制）。
    *
-   * 与现货的唯一差异：空头持仓的盈亏随价格反向变动，
-   * 且平仓动作是 BUY 而不是 SELL。判定本身共用同一个纯函数。
+   * 与旧「净持仓级出场规则」的区别：
+   * - 每个 Lot 用自己的 entryPrice 与开仓时快照的 TP/SL 比例判定（AI 逐单可异）
+   * - 触发只平该 Lot（全量 reduceOnly），其余 Lot 不受影响
+   * - 每个被平 Lot 落一条决策记录（action=平仓方向），审计链完整
+   *
+   * @returns 有触发时返回最后一条平仓决策的 summary（本次决策到此为止，不再开新仓）
    */
-  private async checkExitRules(
+  private async runLotExits(
     cfg: FuturesAgentConfigShape,
     snapshot: DecisionInputSnapshot,
-  ): Promise<LaneDecision | null> {
-    const { stopLossPct, takeProfitPct } = cfg.exitRules ?? {};
-    if (stopLossPct == null && takeProfitPct == null) return null;
-
-    const position = await this.positions.toView(cfg.symbol);
-    if (!position || Math.abs(position.quantity) <= 0 || !(position.entryPrice > 0)) return null;
-
+  ): Promise<DecisionSummary | null> {
     const price = snapshot.ticker.price || snapshot.indicators.lastClose;
     if (!(price > 0)) return null;
 
-    const exit = evaluateExitRules({
-      entryPrice: position.entryPrice,
-      price,
-      side: position.positionSide,
-      exitRules: cfg.exitRules,
-    });
-    if (!exit.triggered || !exit.closeAction) return null;
+    const triggered = await this.lots.checkTpSl('futures', cfg.symbol, price);
+    if (triggered.length === 0) return null;
 
-    this.logger.warn(`合约出场规则触发 → 全平：${exit.reason}`);
-    return {
-      lane: 'strategy',
-      strategyName: null,
-      degraded: true,
-      degradeReason: `合约出场规则触发（优先级高于开仓信号）：${exit.reason}`,
-      llmResult: null,
-      prompt: '',
-      closeAll: true,
-      decision: {
-        action: exit.closeAction,
-        confidence: 1,
-        reason: `合约出场规则触发：${exit.reason}。按出场规则全部平仓。`,
-        riskNotes: '出场规则属于持仓层能力，优先级高于开仓信号，平仓动作按持仓方向取反。',
-      },
-    };
+    this.logger.warn(
+      `合约逐 Lot 出场触发 ${triggered.length} 笔：` +
+        triggered.map((t) => `${t.lot.id.slice(0, 8)}→${t.reason}`).join(', '),
+    );
+
+    let last: DecisionSummary | null = null;
+    for (const { lot, reason } of triggered) {
+      const startedAt = Date.now();
+      const closeAction = lot.direction === 'LONG' ? 'SELL' : 'BUY';
+      // 先落决策再下单，与开仓决策同一审计结构
+      let entity = await this.decisionRepo.save(
+        this.decisionRepo.create({
+          agentId: 'futures-default',
+          market: 'futures',
+          symbol: cfg.symbol,
+          action: closeAction,
+          confidence: 1,
+          reason: `仓位单止盈止损触发：${reason}（入场 ${Number(lot.entryPrice)}，现价 ${price}）`,
+          blockingReason: null,
+          diagnostics: {
+            code: `LOT_${reason}`,
+            lotId: lot.id,
+            entryPrice: Number(lot.entryPrice),
+            stopLossPct: Number(lot.stopLossPct),
+            takeProfitPct: Number(lot.takeProfitPct),
+          } as Record<string, unknown>,
+          inputSnapshot: snapshot,
+          prompt: '',
+          llmRaw: null,
+          llmReasoning: null,
+          llmModel: null,
+          llmUsage: null,
+          lane: 'strategy',
+          strategyName: null,
+          degraded: false,
+          degradeReason: null,
+          riskPassed: true,
+          orderId: null,
+          latencyMs: 0,
+        }),
+      );
+
+      try {
+        const result = await this.trading.placeOrder({
+          symbol: cfg.symbol,
+          action: closeAction,
+          type: 'MARKET',
+          source: 'agent',
+          decisionId: entity.id,
+          lotId: lot.id,
+          exitReason: reason,
+        });
+        entity.orderId = result.order?.id ?? null;
+        entity.riskPassed = result.risk?.passed ?? true;
+        entity.riskNote = result.risk?.note ?? null;
+        entity.latencyMs = Date.now() - startedAt;
+        entity = await this.decisionRepo.save(entity);
+        last = this.toSummary(entity);
+      } catch (err) {
+        // 单个 Lot 平仓失败不阻断其余 Lot，也不触发整体熔断退避——
+        // 下个决策周期 TP/SL 仍会再次触发重试
+        entity.riskNote = `Lot 平仓失败: ${(err as Error).message}`;
+        entity.latencyMs = Date.now() - startedAt;
+        await this.decisionRepo.save(entity);
+        this.logger.error(`Lot ${lot.id.slice(0, 8)} 平仓失败: ${(err as Error).message}`);
+      }
+    }
+    return last;
   }
 
   /**
@@ -330,6 +393,7 @@ export class FuturesEngine {
     cfg: FuturesAgentConfigShape,
     decision: { action: 'BUY' | 'SELL' | 'HOLD'; confidence: number },
     decisionId: string,
+    laneResult?: LaneDecision,
   ): Promise<{ orderId: string | null; risk?: { passed: boolean; rejectedBy?: string; note?: string } }> {
     if (decision.action === 'HOLD') {
       return { orderId: null, risk: { passed: true, note: '观望，无需下单' } };
@@ -340,6 +404,19 @@ export class FuturesEngine {
       return { orderId: null, risk: { passed: false, rejectedBy: 'MIN_CONFIDENCE', note } };
     }
 
+    // Lot 上限风控：每方向未完结 Lot ≤ MAX_OPEN_LOTS_PER_DIRECTION，
+    // 超出时忽略同向信号（不是平仓——出场只由逐 Lot TP/SL 或手动触发）
+    const openCount = await this.lots.countOpenByDirection(
+      'futures',
+      cfg.symbol,
+      decision.action === 'BUY' ? 'LONG' : 'SHORT',
+    );
+    if (openCount >= MAX_OPEN_LOTS_PER_DIRECTION) {
+      const note = `同向未完结仓位已达上限 ${MAX_OPEN_LOTS_PER_DIRECTION}，忽略 ${decision.action} 信号`;
+      await this.risk.record('reject', 'info', note, cfg.symbol, decisionId);
+      return { orderId: null, risk: { passed: false, rejectedBy: 'MAX_OPEN_LOTS', note } };
+    }
+
     try {
       const result = await this.trading.placeOrder({
         symbol: cfg.symbol,
@@ -347,6 +424,9 @@ export class FuturesEngine {
         type: 'MARKET',
         source: 'agent',
         decisionId,
+        // Lot 模型：新 Lot 的逐单 TP/SL 快照（hybrid AI 建议；未给则下单侧全局兜底）
+        stopLossPct: laneResult?.lotTpSl?.stopLossPct,
+        takeProfitPct: laneResult?.lotTpSl?.takeProfitPct,
       });
       return { orderId: result.order?.id ?? null, risk: result.risk };
     } catch (err) {

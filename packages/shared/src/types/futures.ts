@@ -1,4 +1,5 @@
 import { floorToStep } from './common';
+import type { LotDirection } from '../position';
 import type {
   DecisionAction,
   MarketType,
@@ -100,6 +101,39 @@ export function isHoldIntent(
   intent: FuturesOrderIntent,
 ): intent is Extract<FuturesOrderIntent, { kind: 'hold' }> {
   return intent.kind === 'hold';
+}
+
+// ---------------------------------------------------------------------------
+// Position Lot（hedge mode）语义
+// ---------------------------------------------------------------------------
+// 用户拍板（2026-08-31）：合约 BUY=开多、SELL=开空，每单独立止盈止损，
+// 多空 Lot 共存（锁仓）。反向信号不再平仓——出场只有两条路：
+// 逐 Lot TP/SL 触发（checkLotExit）或手动平仓（指定 lotId 全量平掉）。
+
+/** 每方向未完结 Lot 上限：超出时同向信号被忽略并记 blocking reason */
+export const MAX_OPEN_LOTS_PER_DIRECTION = 3;
+
+/**
+ * Lot 模型下的意图解析：动作只决定开仓方向，与当前净持仓无关。
+ *
+ * 与 resolveFuturesOrderIntent（净持仓语义）的区别：
+ * 不再看 currentQty 判断开/加/平——同一动作永远开新 Lot，
+ * 加仓=多一个 Lot，锁仓=多空 Lot 并存。旧函数保留给回测对照与切换前的历史语义。
+ */
+export function resolveFuturesOrderIntentLot(action: DecisionAction): FuturesOrderIntent {
+  if (action === 'HOLD') {
+    return { kind: 'hold', reason: '策略输出观望' };
+  }
+  return action === 'BUY'
+    ? { kind: 'open', side: 'BUY', positionSide: 'LONG', reduceOnly: false }
+    : { kind: 'open', side: 'SELL', positionSide: 'SHORT', reduceOnly: false };
+}
+
+/** 由 Lot 方向推导平仓意图：对冲该方向，全量 reduceOnly 平掉 */
+export function resolveLotCloseIntent(direction: LotDirection): FuturesOrderIntent {
+  return direction === 'LONG'
+    ? { kind: 'close', side: 'SELL', positionSide: 'LONG', reduceOnly: true }
+    : { kind: 'close', side: 'BUY', positionSide: 'SHORT', reduceOnly: true };
 }
 
 export interface FuturesSizingInput {
@@ -206,6 +240,8 @@ export interface FuturesAgentConfigShape {
   strategyName: StrategyName;
   strategyParams: Record<string, unknown>;
   exitRules: ExitRulesShape;
+  /** 最近一次运行时间（ISO 字符串）；尚未运行过为 null */
+  lastRunAt: string | null;
 }
 
 export const DEFAULT_FUTURES_AGENT_CONFIG: FuturesAgentConfigShape = {
@@ -228,6 +264,7 @@ export const DEFAULT_FUTURES_AGENT_CONFIG: FuturesAgentConfigShape = {
   strategyName: 'trend_following',
   strategyParams: {},
   exitRules: { stopLossPct: null, takeProfitPct: null },
+  lastRunAt: null,
 };
 
 /** 合约持仓视图（供前端展示；以交易所 positionRisk 为权威） */

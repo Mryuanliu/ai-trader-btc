@@ -26,6 +26,7 @@ export type BlockingReasonCode =
   // 决策层
   | 'BELOW_MIN_CONFIDENCE' // 达阈值但置信度不足
   | 'STRATEGY_FALLBACK' // 策略名不存在，已回退
+  | 'SPOT_LONG_ONLY' // 现货只做多：策略 SELL 被抑制（Lot 模型，出场靠逐单 TP/SL）
   // 风控层
   | 'RISK_MIN_NOTIONAL' // 名义价值/最小下单量不足
   | 'RISK_MAX_ORDER_AMOUNT' // 单笔金额超过上限

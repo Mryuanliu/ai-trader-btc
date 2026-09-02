@@ -54,10 +54,16 @@ export interface OverviewDTO {
     realizedPnlToday: number;
     /** 当前持仓的浮动盈亏：现货未平仓 + 合约未平仓（合约取自交易所 positionRisk） */
     unrealizedPnlToday: number;
-    /** 今日已实现盈亏是否有数据支撑（无成交时为 false，前端展示 --） */
+    /** 今日已实现盈亏是否有数据支撑（无成交无持仓时为 false，前端展示 --） */
     hasPnlBaseline: boolean;
+    /** 现货未终结订单数 */
     openOrders: number;
+    /** 现货今日已成交笔数 */
     filledToday: number;
+    /** 合约未终结订单数 */
+    futuresOpenOrders: number;
+    /** 合约今日已成交笔数 */
+    futuresFilledToday: number;
   };
   marketPulse: MarketPulse;
   recentOrders: RecentOrderItem[];
@@ -78,6 +84,18 @@ export interface RecentOrderItem {
   status: OrderStatus;
   exchange: ExchangeCode;
   mode: RunMode;
+  /** 市场：现货/合约。现货与合约共用订单表，展示时必须区分 */
+  market: MarketType;
+  /** 成交均价；未成交为 0 */
+  filledPrice: number;
+  /** 委托金额（USDT） */
+  quoteAmount: number;
+  /**
+   * 本单若是一笔回合的**平仓单**，给出该回合的净盈亏与收益率；
+   * 开仓单或未配对到回合的单为 null——开仓本身没有盈亏概念。
+   */
+  roundTripPnl: number | null;
+  roundTripReturnPct: number | null;
   createdAt: string;
 }
 
@@ -98,6 +116,40 @@ export interface PlaceOrderRequest {
   price?: number;
   /** 实盘下单需要的二次确认 token */
   confirmToken?: string;
+  /**
+   * 平仓目标 Lot：手动平仓时必须指定要全量平掉的仓位单（UI 列出未完结 Lot 供选择）。
+   * 不传时策略链路不允许 SELL/平仓方向（Lot 模型下策略只负责入场）。
+   */
+  lotId?: string;
+  /** 本单止盈止损（hybrid AI 逐单给参数；不传用全局兜底 SL 2%/TP 4%） */
+  stopLossPct?: number;
+  takeProfitPct?: number;
+}
+
+/** 仓位单（Lot）对外视图：订单页分组、持仓页列表共用 */
+export interface LotDTO {
+  id: string;
+  market: 'spot' | 'futures';
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  openOrderId: string;
+  closeOrderId: string | null;
+  quantity: number;
+  closedQuantity: number;
+  entryPrice: number;
+  entryFeeUsdt: number;
+  exitPrice: number | null;
+  exitFeeUsdt: number | null;
+  status: 'OPEN' | 'CLOSED' | 'CANCELLED';
+  stopLossPct: number;
+  takeProfitPct: number;
+  exitReason: string | null;
+  realizedPnl: number | null;
+  returnPct: number | null;
+  /** 浮动盈亏（OPEN 时按现价计算，CLOSED 时为 null） */
+  unrealizedPnl: number | null;
+  openedAt: string;
+  closedAt: string | null;
 }
 
 export interface ApiError {

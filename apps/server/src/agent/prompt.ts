@@ -74,13 +74,16 @@ export function buildContextPrompt(snapshot: DecisionInputSnapshot): string {
     '## 输出要求',
     '你是市场状态分析器，不是交易员。禁止输出任何买卖指令（BUY/SELL/HOLD）。',
     '只输出一个 JSON 对象，不要任何解释文字与代码块标记，结构如下：',
-    '{"regime":"trending|ranging|volatile","regimeConfidence":0.0~1.0,"aggression":0.0~1.0,"newsSentiment":-1.0~1.0,"positionView":"positive|neutral|negative","comment":"不超过 80 字的市场状态点评"}',
+    '{"regime":"trending|ranging|volatile","regimeConfidence":0.0~1.0,"aggression":0.0~1.0,"newsSentiment":-1.0~1.0,"positionView":"positive|neutral|negative","suggestedStopLossPct":0.005~0.1,"suggestedTakeProfitPct":0.005~0.1,"comment":"不超过 80 字的市场状态点评"}',
     '字段说明：',
     '- regime：当前市场状态。trending=趋势行情；ranging=震荡行情；volatile=高波动/极端行情。',
     '- regimeConfidence：对上述状态判断的置信度（0~1），不确定时给低值。',
     '- aggression：当前环境下建议的进攻程度（0=极度保守，1=极度激进）。参考趋势强度、波动率与信号一致性。',
     '- newsSentiment：近期新闻对 BTC 的综合情绪（-1 极度利空 ~ +1 极度利好），无新闻给 0。',
     '- positionView：持仓倾向，仅供人看，不参与策略映射（positive=适合持仓，neutral=中性，negative=建议减仓）。',
+    '- suggestedStopLossPct / suggestedTakeProfitPct：按当前波动率建议的止损/止盈比例（小数，0.005~0.1）。',
+    '  新开仓位将以此设置逐单出场；高波动时放宽（如 SL 0.03 / TP 0.06），缩量震荡时收紧（如 SL 0.01 / TP 0.02），',
+    '  并尽量保持止盈为止损的 1.5~2 倍（盈亏比优先）。不确定时省略这两个字段。',
     '- comment：用一句话说明判断依据。',
   ].join('\n');
 }

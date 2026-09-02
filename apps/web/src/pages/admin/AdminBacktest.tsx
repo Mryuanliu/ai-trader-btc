@@ -63,7 +63,6 @@ interface FormValues {
   feeRateBps?: number;
   warmupBars?: number;
   autoBackfill?: boolean;
-  market?: 'spot' | 'futures';
   leverage?: number;
   compareLeverage?: boolean;
 }
@@ -108,9 +107,9 @@ export function AdminBacktest() {
         strategyName: current?.name,
         strategyParams: Object.keys(strategyParams).length ? strategyParams : undefined,
         exitRules,
-        market: values.market,
-        leverage: values.market === 'futures' ? values.leverage : undefined,
-        compareLeverage: values.market === 'futures' ? values.compareLeverage : undefined,
+        // 仅合约回测：杠杆与杠杆对比恒生效
+        leverage: values.leverage,
+        compareLeverage: values.compareLeverage,
       },
       {
         onSuccess: (data) => {
@@ -147,7 +146,6 @@ export function AdminBacktest() {
             feeRateBps: 10,
             warmupBars: 120,
             autoBackfill: true,
-            market: 'spot',
             leverage: 5,
           }}
         >
@@ -155,16 +153,6 @@ export function AdminBacktest() {
             <Col span={8}>
               <Form.Item name="range" label="回测区间" rules={[{ required: true }]}>
                 <RangePicker showTime className="!w-full" />
-              </Form.Item>
-            </Col>
-            <Col span={4}>
-              <Form.Item name="market" label="市场">
-                <Select
-                  options={[
-                    { label: '现货', value: 'spot' },
-                    { label: '合约', value: 'futures' },
-                  ]}
-                />
               </Form.Item>
             </Col>
             <Col span={4}>
@@ -231,22 +219,20 @@ export function AdminBacktest() {
             </Col>
           </Row>
 
-          {form.getFieldValue('market') === 'futures' ? (
-            <Row gutter={12}>
-              <Col span={8}>
-                <Form.Item name="leverage" label="合约杠杆（倍数）">
-                  <Slider min={1} max={10} step={1} marks={{ 1: '1x', 5: '5x', 10: '10x' }} />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item name="compareLeverage" valuePropName="checked" label=" ">
-                  <Space>
-                    <Switch /> 附加 1x/3x/5x 杠杆对比
-                  </Space>
-                </Form.Item>
-              </Col>
-            </Row>
-          ) : null}
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="leverage" label="合约杠杆（倍数）">
+                <Slider min={1} max={10} step={1} marks={{ 1: '1x', 5: '5x', 10: '10x' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="compareLeverage" valuePropName="checked" label=" ">
+                <Space>
+                  <Switch /> 附加 1x/3x/5x 杠杆对比
+                </Space>
+              </Form.Item>
+            </Col>
+          </Row>
 
           <Row gutter={12}>
             <Col span={6}>

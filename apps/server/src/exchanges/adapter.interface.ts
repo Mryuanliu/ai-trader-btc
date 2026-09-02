@@ -59,7 +59,69 @@ export interface OrderResult {
   quantity: number;
   filledQuantity: number;
   filledPrice: number;
+  /**
+   * 本次成交实际被收取的手续费，折算为 USDT。
+   * 交易所不返回时（如下单响应用 RESULT 而非 FULL）为 undefined，
+   * 调用方不得把它当成 0——0 意味着"确认免费"，undefined 才是"未知"。
+   */
+  fee?: number;
+  feeAsset?: string;
+  /** 交易所原始扣费数量与计价资产（现货买入扣基础币时用于净到账修正） */
+  feeRaw?: number;
+  feeAssetRaw?: string;
   raw?: unknown;
+}
+
+/** 手续费以这些资产计价时可直接当作 USDT，无需折算 */
+const STABLE_FEE_ASSETS = new Set(['USDT', 'BUSD', 'USDC', 'FDUSD', 'TUSD', 'DAI']);
+
+/**
+ * 从下单响应的 fills[] 汇总手续费。
+ *
+ * 返回两组值：
+ * - fee/feeAsset：折算为 USDT 的手续费（供盈亏计算，非稳定币按成交价折算）
+ * - feeRaw/feeAssetRaw：交易所原始扣费（供净到账修正——
+ *   币安现货买入手续费默认从买入的基础币里扣除，
+ *   到账 = 下单量 − fee，quantity 若记全量会让本地推导持仓逐步虚增）
+ *
+ * 多笔 fill 计价资产混合时 feeRaw=0（无法安全修正，保守不动数量）。
+ * 取不到 fills 时返回 undefined（表示未知），而非 0。
+ */
+export function sumCommissionUsdt(
+  data: Record<string, any> | undefined | null,
+  fallbackPrice: number,
+): { fee: number; feeAsset: string; feeRaw: number; feeAssetRaw: string } | undefined {
+  const fills = Array.isArray(data?.fills) ? (data.fills as Record<string, any>[]) : [];
+  if (fills.length === 0) return undefined;
+
+  let totalUsdt = 0;
+  let rawTotal = 0;
+  let rawAsset: string | null = null;
+  let mixed = false;
+
+  for (const f of fills) {
+    const commission = Number(f?.commission ?? 0);
+    if (!(commission > 0)) continue;
+    const asset = String(f?.commissionAsset ?? 'USDT').toUpperCase();
+
+    if (STABLE_FEE_ASSETS.has(asset)) {
+      totalUsdt += commission;
+    } else if (fallbackPrice > 0) {
+      // 以基础币/BNB 等计价：按成交价折成 USDT，保持与持仓模型同币种
+      totalUsdt += commission * fallbackPrice;
+    }
+
+    if (rawAsset === null) rawAsset = asset;
+    else if (rawAsset !== asset) mixed = true;
+    rawTotal += commission;
+  }
+
+  return {
+    fee: totalUsdt,
+    feeAsset: 'USDT',
+    feeRaw: mixed ? 0 : rawTotal,
+    feeAssetRaw: mixed ? 'USDT' : (rawAsset ?? 'USDT'),
+  };
 }
 
 /**
@@ -117,9 +179,15 @@ export interface ExchangeAdapter {
  * 合约交易所能力：在通用适配器之上追加杠杆与保证金模式设置。
  * 现货适配器不实现这些，执行器通过 isFuturesAdapter 做能力收窄。
  */
+export type PositionMode = 'one-way' | 'hedge';
+
 export interface FuturesExchangeAdapter extends ExchangeAdapter {
   setLeverage(symbol: string, leverage: number): Promise<void>;
   setMarginType(symbol: string, marginType: MarginType): Promise<void>;
+  /** 读取持仓模式（单向/双向） */
+  getPositionMode?(): Promise<PositionMode>;
+  /** 切换持仓模式；Lot 多空共存要求 hedge。可选：个别交易所不支持时由调用方降级 */
+  setPositionMode?(dual: boolean): Promise<PositionMode>;
 }
 
 export function isFuturesAdapter(adapter: ExchangeAdapter): adapter is FuturesExchangeAdapter {

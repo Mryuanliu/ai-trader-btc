@@ -1,7 +1,6 @@
 import { Repository } from 'typeorm';
 import { Candle, FundingRate, MarketType } from '@ai-trader/shared';
 import { FundingRateEntity, MarketCandleEntity } from '../database/entities';
-import { BinanceAdapter } from '../exchanges/binance.adapter';
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.adapter';
 import type { Timeframe } from '@ai-trader/shared';
 
@@ -20,7 +19,7 @@ export async function loadRange(
   interval: Timeframe,
   from: number,
   to: number,
-  market: MarketType = 'spot',
+  market: MarketType = 'futures',
 ): Promise<Candle[]> {
   const rows = await repo
     .createQueryBuilder('c')
@@ -47,12 +46,11 @@ export async function backfill(
   interval: Timeframe,
   from: number,
   to: number,
-  market: MarketType = 'spot',
+  market: MarketType = 'futures',
   onProgress?: (fetched: number, expected: number) => void,
 ): Promise<number> {
-  // 按市场选择适配器：合约走 fapi（公共 K 线无需密钥），现货走 api
-  const adapter =
-    market === 'futures' ? new BinanceFuturesAdapter('live', '', '') : new BinanceAdapter('live', '', '');
+  // 仅合约模式：K 线一律走 fapi 公共 REST（无需密钥）
+  const adapter = new BinanceFuturesAdapter('live', '', '');
   const stepMs = intervalStepMs(interval);
   let inserted = 0;
   let cursor = from;

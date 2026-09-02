@@ -13,7 +13,7 @@ import { CandleStoreService } from './candle-store.service';
 import { SimulatedFeed } from './simulated-feed';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import { EventBusService } from '../common/events';
-import { SPOT_EXCHANGE_CODES } from '@ai-trader/shared';
+import { EXCHANGE_CODES } from '@ai-trader/shared';
 
 const HISTORY_COUNT: Record<Timeframe, number> = {
   '1m': 300,
@@ -104,8 +104,8 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
 
   /** 尝试用公共 REST 补齐所有周期历史 */
   async refreshFromExchange(symbol: string): Promise<boolean> {
-    // 仅现货：合约行情与现货存在基差，不能作为现货 K 线的数据源
-    for (const code of SPOT_EXCHANGE_CODES) {
+    // 仅合约模式下唯一数据源就是合约行情，直接遍历已实现的交易所
+    for (const code of EXCHANGE_CODES) {
       try {
         const adapter = await this.registry.get(code);
         for (const interval of TIMEFRAMES) {

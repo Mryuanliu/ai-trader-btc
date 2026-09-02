@@ -3,7 +3,6 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Layout, Menu, Button, Tooltip, Badge } from 'antd';
 import {
   DashboardOutlined,
-  SettingOutlined,
   NodeIndexOutlined,
   ReadOutlined,
   ProfileOutlined,
@@ -25,7 +24,6 @@ const { Sider, Header, Content } = Layout;
 
 const MENU = [
   { key: '/admin', icon: <DashboardOutlined />, label: '总览看板' },
-  { key: '/admin/agent', icon: <SettingOutlined />, label: 'Agent 配置' },
   { key: '/admin/decisions', icon: <NodeIndexOutlined />, label: '决策历史' },
   { key: '/admin/news', icon: <ReadOutlined />, label: '新闻与市场' },
   { key: '/admin/orders', icon: <ProfileOutlined />, label: '订单成交' },
@@ -133,7 +131,7 @@ export function AdminLayout() {
               status={data?.agentEnabled ? 'processing' : 'default'}
               text={
                 <span className="text-[12px] text-subtle">
-                  Agent {data?.agentEnabled ? '运行中' : '已停止'}
+                  合约 {data?.agentEnabled ? '运行中' : '已停止'}
                 </span>
               }
             />

@@ -10,13 +10,13 @@ export class RiskController {
     private readonly trading: TradingService,
   ) {}
 
-  /** 风控事件流水 */
+  /** 风控事件流水（含合约风控 FuturesRiskService 写入的事件） */
   @Get('events')
   async events(@Query('page') page?: string, @Query('pageSize') pageSize?: string) {
     return this.risk.list({ page: Number(page) || 1, pageSize: Number(pageSize) || 20 });
   }
 
-  /** 当前回撤与今日额度使用情况 */
+  /** 当前回撤与今日合约订单情况 */
   @UseGuards(JwtAuthGuard)
   @Get('status')
   async status() {

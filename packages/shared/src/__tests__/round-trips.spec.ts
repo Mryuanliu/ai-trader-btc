@@ -3,8 +3,6 @@ import {
   applyFuturesFill,
   computeFuturesPosition,
   computeFuturesRoundTrips,
-  computePosition,
-  computeSpotRoundTrips,
   emptyFuturesPosition,
   type RoundTripFill,
 } from '../position';
@@ -26,97 +24,6 @@ function fill(
   return { side, quantity, price, fee, time: T0 + offsetMin * 60_000, orderId };
 }
 
-describe('现货回合配对（computeSpotRoundTrips）', () => {
-  it('完整一买一卖：netPnl = (卖-含费成本)×量-卖出费，与 computePosition.realizedPnl 一致', () => {
-    const fills = [
-      fill('BUY', 1, 100, 1, 0, 'o1'), // 成本 101，均价 101
-      fill('SELL', 1, 110, 1, 10, 'o2'),
-    ];
-    const { trips, summary } = computeSpotRoundTrips(fills);
-
-    expect(trips).toHaveLength(1);
-    expect(trips[0].netPnl).toBeCloseTo(110 - 101 - 1, 8); // 8
-    expect(trips[0].grossPnl).toBeCloseTo(10, 8); // (110-100)×1
-    expect(trips[0].fee).toBeCloseTo(2, 8); // 买1 + 卖1
-    // 口径对齐：与 computePosition 的 realizedPnl 严格相等
-    expect(summary.totalNetPnl).toBeCloseTo(computePosition('BTC', fills, 0).realizedPnl, 8);
-  });
-
-  it('部分平仓产生多个回合，每回合 entryPrice 为当时含费均价', () => {
-    const fills = [
-      fill('BUY', 1, 100, 0, 0, 'o1'),
-      fill('SELL', 0.4, 110, 0, 10, 'o2'),
-      fill('SELL', 0.6, 120, 0, 20, 'o3'),
-    ];
-    const { trips } = computeSpotRoundTrips(fills);
-    expect(trips).toHaveLength(2);
-    expect(trips[0]).toMatchObject({ qty: 0.4, entryPrice: 100, exitPrice: 110 });
-    expect(trips[1]).toMatchObject({ qty: 0.6, entryPrice: 100, exitPrice: 120 });
-    // 两个回合净盈亏之和 = 0.4×10 + 0.6×20 = 16
-    expect(trips[0].netPnl + trips[1].netPnl).toBeCloseTo(16, 8);
-    expect(computeSpotRoundTrips(fills).summary.totalNetPnl).toBeCloseTo(
-      computePosition('BTC', fills, 0).realizedPnl,
-      8,
-    );
-  });
-
-  it('多次买入加权成本：回合 entryPrice 为加权含费均价', () => {
-    const fills = [
-      fill('BUY', 1, 100, 0, 0, 'o1'),
-      fill('BUY', 1, 110, 0, 5, 'o2'), // 加权均价 105
-      fill('SELL', 1, 116, 0, 15, 'o3'),
-    ];
-    const { trips } = computeSpotRoundTrips(fills);
-    expect(trips).toHaveLength(1);
-    expect(trips[0].entryPrice).toBeCloseTo(105, 8);
-    expect(trips[0].netPnl).toBeCloseTo(11, 8);
-    // 仍未平净：剩余 1 份持仓不产生回合
-    expect(computeSpotRoundTrips(fills).summary.count).toBe(1);
-  });
-
-  it('卖出超过持仓（数据异常）不生成超出部分的回合，与 computePosition 容忍口径一致', () => {
-    const fills = [
-      fill('BUY', 0.5, 100, 0, 0, 'o1'),
-      fill('SELL', 1.5, 110, 0, 10, 'o2'), // 超卖 1 份
-    ];
-    const { trips, summary } = computeSpotRoundTrips(fills);
-    expect(trips).toHaveLength(1);
-    expect(trips[0].qty).toBeCloseTo(0.5, 8); // 只对持仓部分配对
-    expect(summary.totalNetPnl).toBeCloseTo(computePosition('BTC', fills, 0).realizedPnl, 8);
-  });
-
-  it('卖出后清仓再买入：openedAt 重置为新回合', () => {
-    const fills = [
-      fill('BUY', 1, 100, 0, 0, 'o1'),
-      fill('SELL', 1, 105, 0, 10, 'o2'),
-      fill('BUY', 1, 110, 0, 20, 'o3'),
-      fill('SELL', 1, 120, 0, 30, 'o4'),
-    ];
-    const { trips } = computeSpotRoundTrips(fills);
-    expect(trips).toHaveLength(2);
-    expect(trips[0].openedAt).toBe(T0);
-    expect(trips[1].openedAt).toBe(T0 + 20 * 60_000); // 第二回合从新买入开始
-    expect(trips[1].closeOrderId).toBe('o4');
-  });
-
-  it('returnPct 按含费成本计算', () => {
-    const fills = [fill('BUY', 1, 100, 0, 0, 'o1'), fill('SELL', 1, 110, 0, 10, 'o2')];
-    const { trips } = computeSpotRoundTrips(fills);
-    expect(trips[0].returnPct).toBeCloseTo(0.1, 6);
-  });
-
-  it('只有买入（未平仓）不产生回合', () => {
-    const { trips, summary } = computeSpotRoundTrips([fill('BUY', 1, 100, 0, 0, 'o1')]);
-    expect(trips).toHaveLength(0);
-    expect(summary.count).toBe(0);
-  });
-
-  it('空数据不崩溃', () => {
-    const { trips, summary } = computeSpotRoundTrips([]);
-    expect(trips).toHaveLength(0);
-    expect(summary.totalNetPnl).toBe(0);
-  });
-});
 
 describe('合约回合配对（computeFuturesRoundTrips）', () => {
   it('多头回合：netPnl = (卖-买)×量-平仓费，与 applyFuturesFill 链条 realizedPnl 一致', () => {

@@ -41,6 +41,13 @@ export class MeanReversionStrategy implements Strategy {
     exitBandPosLow: 0.4,
     /** 回归出场带上界 */
     exitBandPosHigh: 0.6,
+    /**
+     * 只做多（现货专用，引擎强制注入，勿手动配）。
+     * Lot 模型下现货策略只负责入场（BUY），出场交给逐单止盈止损；
+     * 本策略的「回归出场」与「超买卖出」在现货市场会与逐单 TP/SL 冲突，
+     * 置 true 时两处 SELL 全部退化为 HOLD。合约市场为 false（SELL=开空有效）。
+     */
+    longOnly: false,
   };
 
   readonly paramSchema = {
@@ -53,6 +60,7 @@ export class MeanReversionStrategy implements Strategy {
       confidenceFloor: { type: 'number', minimum: 0, maximum: 1, title: '触发时置信度起点' },
       exitBandPosLow: { type: 'number', minimum: 0, maximum: 1, title: '回归出场带下界 %b' },
       exitBandPosHigh: { type: 'number', minimum: 0, maximum: 1, title: '回归出场带上界 %b' },
+      longOnly: { type: 'boolean', title: '只做多（现货引擎自动注入，勿手动改）' },
     },
   };
 
@@ -71,6 +79,7 @@ export class MeanReversionStrategy implements Strategy {
       confidenceFloor: num(raw?.confidenceFloor, this.defaultParams.confidenceFloor, 0, 1),
       exitBandPosLow: num(raw?.exitBandPosLow, this.defaultParams.exitBandPosLow, 0, 1),
       exitBandPosHigh: num(raw?.exitBandPosHigh, this.defaultParams.exitBandPosHigh, 0, 1),
+      longOnly: raw?.longOnly === true,
     };
   }
 
@@ -98,6 +107,14 @@ export class MeanReversionStrategy implements Strategy {
     // 该分支必须放在开仓判定之前——出场优先于加仓。
     const posQty = Number(ctx.position?.quantity ?? 0);
     if (posQty > 0) {
+      // 只做多（现货 Lot）：出场交给逐单止盈止损，策略不再承担卖出职责
+      if (p.longOnly) {
+        return this.hold(
+          `longOnly 模式：持仓 ${posQty} 回归中轨（%b ${bandPos.toFixed(3)}），出场由逐单 TP/SL 负责`,
+          this.proximityOf(bandPos, rsi14, p),
+          'SPOT_LONG_ONLY',
+        );
+      }
       if (bandPos >= p.exitBandPosLow && bandPos <= p.exitBandPosHigh) {
         // 回归深度：越接近中轨（0.5）置信越高
         const depth = 1 - Math.abs(bandPos - 0.5) / Math.max(1e-9, (p.exitBandPosHigh - p.exitBandPosLow) / 2);
@@ -140,7 +157,7 @@ export class MeanReversionStrategy implements Strategy {
     }
 
     // 超买 → SELL：价格触及上轨区 且 RSI 超买
-    if (bandPos >= p.bandPosHigh && rsi14 >= p.rsiOverbought) {
+    if (!p.longOnly && bandPos >= p.bandPosHigh && rsi14 >= p.rsiOverbought) {
       const bandScore = clamp01((bandPos - p.bandPosHigh) / Math.max(1e-9, 1 - p.bandPosHigh));
       const rsiScore = clamp01((rsi14 - p.rsiOverbought) / Math.max(1e-9, 100 - p.rsiOverbought));
       const strength = (bandScore + rsiScore) / 2;
@@ -229,6 +246,7 @@ export class MeanReversionStrategy implements Strategy {
       confidenceFloor: number;
       exitBandPosLow: number;
       exitBandPosHigh: number;
+      longOnly: boolean;
     };
   }
 }

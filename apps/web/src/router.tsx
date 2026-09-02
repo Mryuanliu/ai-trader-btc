@@ -6,7 +6,6 @@ import { LoginPage } from '@/pages/LoginPage';
 import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
-import { AdminAgentConfig } from '@/pages/admin/AdminAgentConfig';
 import { AdminDecisions } from '@/pages/admin/AdminDecisions';
 import { AdminNews } from '@/pages/admin/AdminNews';
 import { AdminOrders } from '@/pages/admin/AdminOrders';
@@ -77,7 +76,6 @@ export function AppRoutes() {
         }
       >
         <Route index element={<AdminOverview />} />
-        <Route path="agent" element={<AdminAgentConfig />} />
         <Route path="decisions" element={<AdminDecisions />} />
         <Route path="news" element={<AdminNews />} />
         <Route path="orders" element={<AdminOrders />} />

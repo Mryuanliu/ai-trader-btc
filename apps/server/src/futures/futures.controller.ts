@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { FuturesAgentConfigShape, FuturesPositionView } from '@ai-trader/shared';
 import { FuturesConfigService } from './futures-config.service';
 import { FuturesPositionService } from './futures-position.service';
 import { FuturesTradingService, PlaceFuturesOrderResult } from './futures-trading.service';
 import { FuturesEngine } from './futures-engine.service';
+import { FuturesDecisionsService } from './futures-decisions.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 
@@ -14,6 +15,7 @@ export class FuturesController {
     private readonly positions: FuturesPositionService,
     private readonly trading: FuturesTradingService,
     private readonly engine: FuturesEngine,
+    private readonly decisions: FuturesDecisionsService,
   ) {}
 
   @UseGuards(JwtAuthGuard)
@@ -125,10 +127,56 @@ export class FuturesController {
     return { ...this.engine.getHealth(), running: this.engine.isRunning };
   }
 
-  /** 合约决策记录（按 market 隔离，不混入现货） */
+  /**
+   * 合约决策分页列表（按 market 隔离，不混入现货）。
+   * 返回 `PageResult`（items/total/page/pageSize），供前端决策页分页渲染。
+   */
   @UseGuards(JwtAuthGuard)
   @Get('decisions')
-  async listDecisions(@Query('limit') limit?: string) {
-    return this.engine.list({ limit: Number(limit) || 20 });
+  async listDecisions(
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('action') action?: string,
+    @Query('lane') lane?: string,
+    @Query('executedOnly') executedOnly?: string,
+    @Query('keyword') keyword?: string,
+  ) {
+    return this.decisions.page({
+      page: Number(page) || 1,
+      pageSize: Number(pageSize) || 20,
+      action,
+      lane,
+      executedOnly: executedOnly === 'true',
+      keyword,
+    });
+  }
+
+  /** 合约决策链路统计（近 N 天，按 lane 分组） */
+  @UseGuards(JwtAuthGuard)
+  @Get('decisions/stats')
+  async decisionStats(@Query('days') days?: string) {
+    return this.decisions.laneStats(Number(days) || 7);
+  }
+
+  /** 阻塞原因诊断聚合（近 N 小时）：回答「为什么没开单」 */
+  @UseGuards(JwtAuthGuard)
+  @Get('decisions/diagnostics')
+  async decisionDiagnostics(@Query('windowHours') windowHours?: string) {
+    return this.decisions.diagnostics(Number(windowHours) || 24);
+  }
+
+  /**
+   * 合约决策详情（含 Prompt、模型原始输出与快照，供前端决策时间线展开）。
+   * 注意：动态路由 :id 必须放在静态路由（stats/diagnostics）之后，
+   * 否则 'stats'/'diagnostics' 会被当作 id 而解析 UUID 失败。
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('decisions/:id')
+  async decisionDetail(@Param('id') id: string) {
+    const detail = await this.decisions.detail(id);
+    if (!detail) {
+      throw new BusinessException('NOT_FOUND', '决策记录不存在');
+    }
+    return detail;
   }
 }

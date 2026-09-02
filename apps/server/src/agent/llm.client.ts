@@ -16,6 +16,9 @@ export const ContextInsightSchema = z.object({
   aggression: z.number().min(0).max(1),
   newsSentiment: z.number().min(-1).max(1),
   positionView: z.enum(['positive', 'neutral', 'negative']),
+  // 建议止盈止损（Lot 模型逐单出场参数），可选：不输出则用全局兜底
+  suggestedStopLossPct: z.number().min(0.005).max(0.1).optional(),
+  suggestedTakeProfitPct: z.number().min(0.005).max(0.1).optional(),
   comment: z.string().max(120).optional(),
 });
 

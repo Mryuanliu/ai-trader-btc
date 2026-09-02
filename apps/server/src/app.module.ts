@@ -11,7 +11,6 @@ import { ExchangesModule } from './exchanges/exchanges.module';
 import { MarketModule } from './market/market.module';
 import { NewsModule } from './news/news.module';
 import { AccountModule } from './account/account.module';
-import { AgentConfigModule } from './agent/agent-config.module';
 import { AgentModule } from './agent/agent.module';
 import { TradingModule } from './trading/trading.module';
 import { FuturesModule } from './futures/futures.module';
@@ -23,6 +22,12 @@ import { OverviewModule } from './overview/overview.module';
 import { BacktestModule } from './backtest/backtest.module';
 import { AllExceptionsFilter } from './common/all-exception.filter';
 
+/**
+ * 应用根模块（仅合约交易）。
+ *
+ * `AgentModule` 只提供决策内核（L0~L3：指标/策略/链路分派/AI 上下文），
+ * 消费者是合约引擎 FuturesEngine；现货引擎与现货配置已移除。
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -48,7 +53,6 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     MarketModule,
     AccountModule,
     NewsModule,
-    AgentConfigModule,
     TradingModule,
     FuturesModule,
     ExecutionModule,

@@ -8,13 +8,12 @@ import {
 import { http } from './client';
 import { useRealtimeStore } from '@/ws/realtime';
 import type {
-  AgentConfigShape,
-  AgentRuntimeState,
   Candle,
   DecisionRecord,
   DecisionSummary,
   Environment,
   KeywordTrend,
+  LotDTO,
   MarketPulse,
   NewsItemDTO,
   OrderDTO,
@@ -142,6 +141,8 @@ export function useOrders(params: {
   pageSize?: number;
   status?: string;
   source?: string;
+  /** 市场：现货/合约共用订单表，必须隔离查询 */
+  market?: 'spot' | 'futures';
 }) {
   return useQuery<PageResult<OrderDTO>>({
     queryKey: ['orders', params],
@@ -165,7 +166,29 @@ export function usePlaceOrder() {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ['orders'] });
       void client.invalidateQueries({ queryKey: ['overview'] });
+      void client.invalidateQueries({ queryKey: ['lots'] });
+      void client.invalidateQueries({ queryKey: ['positions'] });
     },
+  });
+}
+
+/** 未完结仓位单列表：交易面板「选择要平的 Lot」、持仓页列表共用 */
+export function useOpenLots(params: { market?: 'spot' | 'futures'; symbol?: string }) {
+  return useQuery<LotDTO[]>({
+    queryKey: ['lots', 'open', params],
+    queryFn: () => http.get('/lots', { params: { ...params, status: 'open' } }),
+    enabled: Boolean(params.market),
+    refetchInterval: 15000,
+  });
+}
+
+/** 全量仓位单（含已完结）：订单页按 Lot 分组、对账用 */
+export function useAllLots(params: { market?: 'spot' | 'futures'; symbol?: string }) {
+  return useQuery<LotDTO[]>({
+    queryKey: ['lots', 'all', params],
+    queryFn: () => http.get('/lots', { params: { ...params, status: 'all' } }),
+    enabled: Boolean(params.market),
+    refetchInterval: 30000,
   });
 }
 
@@ -180,49 +203,7 @@ export function useCancelOrder() {
   });
 }
 
-// ------------------------------------------------------------------ Agent
-export function useAgentState() {
-  return useQuery<AgentRuntimeState>({
-    queryKey: ['agent', 'state'],
-    queryFn: () => http.get('/agent/config'),
-    refetchInterval: 20000,
-  });
-}
-
-export function useUpdateAgentConfig() {
-  const client = useQueryClient();
-  return useMutation<AgentConfigShape, Error, Partial<AgentConfigShape>>({
-    mutationFn: (patch) => http.patch('/agent/config', patch),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['agent'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-    },
-  });
-}
-
-export function useToggleAgent() {
-  const client = useQueryClient();
-  return useMutation<AgentConfigShape, Error, boolean>({
-    mutationFn: (enabled) => http.post('/agent/toggle', { enabled }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['agent'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-    },
-  });
-}
-
-export function useRunAgent() {
-  const client = useQueryClient();
-  return useMutation<DecisionSummary, Error, void>({
-    mutationFn: () => http.post('/agent/run'),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['agent'] });
-      void client.invalidateQueries({ queryKey: ['orders'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-    },
-  });
-}
-
+// ------------------------------------------------------------------ 合约决策
 export function useDecisions(params: {
   page?: number;
   pageSize?: number;
@@ -233,7 +214,7 @@ export function useDecisions(params: {
 }) {
   return useQuery<PageResult<DecisionSummary>>({
     queryKey: ['decisions', params],
-    queryFn: () => http.get('/agent/decisions', { params }),
+    queryFn: () => http.get('/futures/decisions', { params }),
     refetchInterval: 30000,
   });
 }
@@ -248,7 +229,7 @@ export interface LaneStats {
 export function useLaneStats() {
   return useQuery<LaneStats>({
     queryKey: ['decision-lane-stats'],
-    queryFn: () => http.get('/agent/decisions/stats'),
+    queryFn: () => http.get('/futures/decisions/stats'),
     refetchInterval: 60000,
   });
 }
@@ -336,25 +317,19 @@ export interface RoundTripsResponse {
   summary: RoundTripSummary;
 }
 
-export function useRoundTrips(market: 'spot' | 'futures', symbol?: string) {
+export function useRoundTrips(symbol?: string) {
   return useQuery<RoundTripsResponse>({
-    queryKey: ['round-trips', market, symbol ?? 'all'],
+    queryKey: ['round-trips', symbol ?? 'all'],
     queryFn: () =>
-      http.get(
-        `/orders/round-trips?market=${market}` + (symbol ? `&symbol=${symbol}` : ''),
-      ),
+      http.get('/orders/round-trips' + (symbol ? `?symbol=${symbol}` : '')),
     refetchInterval: 30000,
   });
 }
 
-export function useDecisionDiagnostics(windowHours = 24, market?: 'spot' | 'futures') {
+export function useDecisionDiagnostics(windowHours = 24) {
   return useQuery<DecisionDiagnostics>({
-    queryKey: ['decision-diagnostics', windowHours, market ?? 'all'],
-    queryFn: () =>
-      http.get(
-        `/agent/decisions/diagnostics?windowHours=${windowHours}` +
-          (market ? `&market=${market}` : ''),
-      ),
+    queryKey: ['decision-diagnostics', windowHours],
+    queryFn: () => http.get(`/futures/decisions/diagnostics?windowHours=${windowHours}`),
     refetchInterval: 60000,
   });
 }
@@ -375,8 +350,8 @@ export interface BacktestRequest {
   exitRules?: { stopLossPct?: number | null; takeProfitPct?: number | null };
   warmupBars?: number;
   autoBackfill?: boolean;
-  /** 市场：spot=现货（默认）；futures=合约 */
-  market?: 'spot' | 'futures';
+  /** 兼容字段：本项目仅合约回测，忽略现货 */
+  market?: 'futures';
   /** 合约杠杆 1~10 */
   leverage?: number;
   /** 合约回测附加 1x/3x/5x 杠杆对比 */
@@ -493,7 +468,7 @@ export function useBacktestProgress(enabled: boolean) {
 export function useDecisionDetail(id: string | null) {
   return useQuery<DecisionRecord>({
     queryKey: ['decision', id],
-    queryFn: () => http.get(`/agent/decisions/${id}`),
+    queryFn: () => http.get(`/futures/decisions/${id}`),
     enabled: Boolean(id),
   });
 }
@@ -631,6 +606,7 @@ export interface FuturesConfigDTO {
   strategyName: string;
   strategyParams: Record<string, unknown>;
   exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
+  lastRunAt: string | null;
 }
 
 export function useFuturesPositions() {

@@ -1,23 +1,24 @@
 import { useState } from 'react';
 import { Button, Empty, Spin, Switch, Tag, App as AntApp } from 'antd';
 import { Bot, PlayCircle, RefreshCw } from 'lucide-react';
-import { useAgentState, useDecisions, useToggleAgent, useRunAgent } from '@/api/hooks';
-import { RUN_MODE_LABELS } from '@ai-trader/shared';
+import { useDecisions, useFuturesConfig, useFuturesHealth, useRunFuturesEngine, useUpdateFuturesConfig } from '@/api/hooks';
+import { RUN_MODE_LABELS, type RunMode } from '@ai-trader/shared';
 import { ActionTag } from '@/components/OrderStatusTag';
 import { formatRelative, formatTime } from '@/utils/format';
 import { useRequireAuth } from '@/components/AuthGate';
 
-/** 移动端 Agent 页：启停、手动决策、最近决策流水 */
+/** 移动端 Agent 页（合约）：开关、手动触发一次合约决策、最近合约决策流水 */
 export function MobileAgent() {
-  const { data, isLoading } = useAgentState();
+  const { data: config, isLoading } = useFuturesConfig();
+  const { data: health } = useFuturesHealth();
   const { data: decisions, isLoading: loadingDecisions } = useDecisions({ pageSize: 10 });
-  const toggle = useToggleAgent();
-  const run = useRunAgent();
+  const updateConfig = useUpdateFuturesConfig();
+  const run = useRunFuturesEngine();
   const { message } = AntApp.useApp();
   const { run: requireAuth, modal } = useRequireAuth();
   const [busy, setBusy] = useState(false);
 
-  if (isLoading && !data) {
+  if (isLoading && !config) {
     return (
       <div className="flex justify-center py-16">
         <Spin />
@@ -25,14 +26,15 @@ export function MobileAgent() {
     );
   }
 
-  const config = data?.config;
-
   const onToggle = (checked: boolean) =>
     requireAuth(() => {
-      toggle.mutate(checked, {
-        onSuccess: () => message.success(checked ? 'Agent 已启动' : 'Agent 已停止'),
-        onError: (err) => message.error(err.message),
-      });
+      updateConfig.mutate(
+        { enabled: checked },
+        {
+          onSuccess: () => message.success(checked ? '合约 Agent 已启动' : '合约 Agent 已停止'),
+          onError: (err) => message.error(err.message),
+        },
+      );
     });
 
   const onRun = () =>
@@ -53,17 +55,17 @@ export function MobileAgent() {
       <section className="glass-card p-4">
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-2 text-[14px] font-medium text-white">
-            <Bot size={16} className="text-btc-light" /> {config?.name ?? 'Agent'}
+            <Bot size={16} className="text-btc-light" /> {config?.name ?? '合约 Agent'}
           </span>
-          <Switch checked={config?.enabled ?? false} onChange={onToggle} loading={toggle.isPending} />
+          <Switch checked={config?.enabled ?? false} onChange={onToggle} loading={updateConfig.isPending} />
         </div>
         <div className="mt-3 grid grid-cols-2 gap-3 text-[11px]">
-          <Field label="运行模式" value={RUN_MODE_LABELS[config?.mode ?? 'dry_run']} />
+          <Field label="运行模式" value={RUN_MODE_LABELS[(config?.mode as RunMode) ?? 'dry_run']} />
           <Field label="决策周期" value={`${config?.decisionIntervalSec ?? 0} 秒`} />
           <Field label="交易对" value={config?.symbol ?? '--'} />
-          <Field label="仓位比例" value={`${((config?.positionPct ?? 0) * 100).toFixed(0)}%`} />
-          <Field label="模型" value={data?.llmAvailable ? (config?.model ?? '--') : '未配置（降级）'} />
-          <Field label="最近运行" value={data?.lastRunAt ? formatRelative(data.lastRunAt) : '尚未运行'} />
+          <Field label="杠杆" value={`${config?.leverage ?? 0}x`} />
+          <Field label="保证金模式" value={config?.marginType === 'cross' ? '全仓' : '逐仓'} />
+          <Field label="链路" value={config?.decisionLane === 'hybrid' ? 'hybrid（AI 上下文）' : 'strategy（纯策略）'} />
         </div>
         <Button
           block
@@ -73,8 +75,13 @@ export function MobileAgent() {
           onClick={onRun}
           className="!mt-4 !border-btc/40 !bg-btc/12 !text-btc-light"
         >
-          立即执行一次决策
+          立即执行一次合约决策
         </Button>
+        {health?.tripped ? (
+          <div className="mt-2 text-[10px] text-warn">
+            合约链路已熔断（连续失败 {health.consecutiveFailures} 次），自动决策暂停
+          </div>
+        ) : null}
       </section>
 
       <section className="glass-card p-4">

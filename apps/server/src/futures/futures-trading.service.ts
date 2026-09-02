@@ -2,23 +2,27 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
+  clampLotTpSl,
   clampRiskValue,
   computeFuturesOrderQty,
   DecisionAction,
   floorToStep,
   FuturesOrderIntent,
   isActionableIntent,
+  LotExitReason,
+  MAX_OPEN_LOTS_PER_DIRECTION,
   normalizeOrder,
   NormalizeResult,
   OrderDTO,
   OrderSide,
   OrderSource,
   OrderType,
-  resolveFuturesOrderIntent,
+  resolveFuturesOrderIntentLot,
+  resolveLotCloseIntent,
   SymbolFilters,
 } from '@ai-trader/shared';
 import { Repository } from 'typeorm';
-import { OrderEntity, TradeFillEntity } from '../database/entities';
+import { OrderEntity, PositionLotEntity, TradeFillEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import { isFuturesAdapter } from '../exchanges/adapter.interface';
 import { EventBusService } from '../common/events';
@@ -26,6 +30,7 @@ import { BusinessException } from '../common/business.exception';
 import { FuturesConfigService } from './futures-config.service';
 import { FuturesPositionService } from './futures-position.service';
 import { FuturesRiskService, FuturesRiskVerdict } from './futures-risk.service';
+import { LotService } from '../account/lot.service';
 
 export interface PlaceFuturesOrderInput {
   symbol?: string;
@@ -42,6 +47,16 @@ export interface PlaceFuturesOrderInput {
   leverage?: number;
   /** 直接指定数量（手动单用）；不传则按保证金预算推导 */
   quantity?: number;
+  /**
+   * 平仓目标 Lot（close_long/close_short 时必传）：
+   * 平仓必须全量平掉该 Lot，成交后按 Lot 结算盈亏
+   */
+  lotId?: string;
+  /** 平仓原因（结算 Lot 用） */
+  exitReason?: LotExitReason;
+  /** 本单止盈止损快照（hybrid AI 逐单给参数；不传用全局兜底） */
+  stopLossPct?: number;
+  takeProfitPct?: number;
 }
 
 export interface PlaceFuturesOrderResult {
@@ -59,6 +74,15 @@ const FUTURES_EXCHANGE = 'binance-futures' as const;
 
 /** dry-run 模拟撮合滑点（bps）。合约配置未单列该参数，先固定，与现货默认一致 */
 const DRY_RUN_SLIPPAGE_BPS = 5;
+
+/**
+ * 估算手续费费率（bps，单边 taker）。
+ *
+ * 仅在两种场景使用：dry-run 模拟撮合、真实成交但交易所响应未带 fills。
+ * 现货链路取 agent_configs.feeRateBps；合约配置没有该参数，固定 taker 基准值。
+ * 记 0 会让毛盈亏伪装成净盈亏——本项目 C2 实证费率是净收益的生死线。
+ */
+const FUTURES_FEE_BPS = 10;
 
 /**
  * 合约执行器：把策略动作翻译成合约订单并执行。
@@ -82,7 +106,173 @@ export class FuturesTradingService {
     private readonly risk: FuturesRiskService,
     private readonly events: EventBusService,
     private readonly config: ConfigService,
+    private readonly lots: LotService,
   ) {}
+
+  /**
+   * Lot 生命周期挂接（合约侧，dry-run 与真实成交共用）：
+   * - close 意图（reduceOnly）：结算指定 Lot（input.lotId），exitReason 由调用方给出
+   * - open 意图：新建 Lot（BUY=LONG / SELL=SHORT），TP/SL 快照落库（input ?? 全局兜底）
+   */
+  private async settleOrOpenLot(
+    input: PlaceFuturesOrderInput,
+    intent: FuturesOrderIntent,
+    order: OrderEntity,
+    fill: { price: number; quantity: number; fee: number },
+  ): Promise<void> {
+    try {
+      if (intent.kind === 'close') {
+        if (!input.lotId) {
+          this.logger.warn(`合约平仓单缺少 lotId（orderId=${order.id}），Lot 无法结算`);
+          return;
+        }
+        await this.lots.settleFromCloseFill({
+          lotId: input.lotId,
+          closeOrderId: order.id,
+          fill,
+          exitReason: input.exitReason ?? 'MANUAL',
+        });
+      } else {
+        const tpSl = clampLotTpSl({
+          stopLossPct: input.stopLossPct,
+          takeProfitPct: input.takeProfitPct,
+        });
+        await this.lots.createFromOpenFill({
+          order,
+          fill,
+          stopLossPct: tpSl.stopLossPct,
+          takeProfitPct: tpSl.takeProfitPct,
+        });
+      }
+    } catch (err) {
+      // Lot 记账失败不应让下单流程失败，但必须留痕排查
+      this.logger.error(`Lot 挂接失败（orderId=${order.id}）: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 成交对账：补记「已成交但没写 trade_fills / 没建 Lot」的合约订单。
+   *
+   * **为什么必须有**：demo 环境的 `POST /fapi/v1/order` 响应 `executedQty` 可能为 0
+   * （成交是异步完成的），下单时的 `if (result.filledQuantity > 0)` 判断会跳过记账；
+   * 后续 `syncOpenOrders` 只更新订单状态与数量，不补记成交明细与 Lot，
+   * 造成「订单显示 FILLED 但盈亏永远算不出来」的静默故障。
+   *
+   * 幂等：trade_fills 按 orderId 去重；Lot 按 openOrderId 去重（createFromOpenFill 已内置）。
+   * 因此每轮调度调用都安全，可放心高频执行。
+   */
+  async syncPendingFills(limit = 100): Promise<{ filled: number; lots: number; skipped: number }> {
+    // 已成交（FILLED / PARTIALLY_FILLED）且未写过成交明细的合约单
+    const rows = await this.orderRepo
+      .createQueryBuilder('o')
+      .leftJoin(TradeFillEntity, 'f', 'f."orderId" = o.id::text')
+      .where('o.market = :market', { market: 'futures' })
+      .andWhere('o.status IN (:...statuses)', { statuses: ['FILLED', 'PARTIALLY_FILLED'] })
+      .andWhere('o."exchangeOrderId" IS NOT NULL')
+      .andWhere('f.id IS NULL')
+      .orderBy('o."createdAt"', 'ASC')
+      .take(limit)
+      .getMany();
+
+    if (rows.length === 0) return { filled: 0, lots: 0, skipped: 0 };
+
+    const adapter = await this.registry.get(FUTURES_EXCHANGE);
+    let filled = 0;
+    let lots = 0;
+    let skipped = 0;
+
+    for (const order of rows) {
+      try {
+        const detail = await adapter.getOrder({
+          symbol: order.symbol,
+          exchangeOrderId: order.exchangeOrderId ?? undefined,
+          clientOrderId: order.clientOrderId ?? undefined,
+        });
+        if (!(detail.filledQuantity > 0)) {
+          skipped += 1;
+          this.logger.debug(`对账跳过（交易所未成交）：orderId=${order.id}`);
+          continue;
+        }
+
+        const fillPrice = detail.filledPrice > 0 ? detail.filledPrice : order.filledPrice;
+        if (!(fillPrice > 0)) {
+          skipped += 1;
+          this.logger.warn(
+            `对账跳过（成交价缺失）：orderId=${order.id} exchangeOrderId=${order.exchangeOrderId}`,
+          );
+          continue;
+        }
+        const fee =
+          detail.fee ??
+          detail.filledQuantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
+
+        await this.fillRepo.save(
+          this.fillRepo.create({
+            orderId: order.id,
+            symbol: order.symbol,
+            price: fillPrice,
+            quantity: detail.filledQuantity,
+            fee,
+            feeAsset: detail.feeAsset ?? 'USDT',
+            filledAt: new Date(),
+          }),
+        );
+        filled += 1;
+
+        // 补齐订单上的成交信息（下单当时可能为空）
+        order.filledQuantity = detail.filledQuantity;
+        order.filledPrice = fillPrice;
+        await this.orderRepo.save(order);
+
+        // Lot 挂接：reduceOnly=平仓（结算同方向最老 Lot）；否则开仓（建 Lot）
+        if (order.reduceOnly) {
+          const target = await this.lots.findOldestOpenLot(
+            'futures',
+            order.symbol,
+            order.positionSide === 'SHORT' ? 'SHORT' : 'LONG',
+          );
+          if (!target) {
+            this.logger.warn(
+              `对账：平仓单未找到可结算的未完结 Lot（orderId=${order.id}），跳过结算`,
+            );
+          } else {
+            await this.lots.settleFromCloseFill({
+              lotId: target.id,
+              closeOrderId: order.id,
+              fill: { price: fillPrice, quantity: detail.filledQuantity, fee },
+              exitReason: 'MANUAL',
+            });
+            lots += 1;
+          }
+        } else {
+          const tpSl = clampLotTpSl({ stopLossPct: null, takeProfitPct: null });
+          const created = await this.lots.createFromOpenFill({
+            order,
+            fill: { price: fillPrice, quantity: detail.filledQuantity, fee },
+            stopLossPct: tpSl.stopLossPct,
+            takeProfitPct: tpSl.takeProfitPct,
+          });
+          if (created) lots += 1;
+        }
+
+        this.logger.log(
+          `对账补记：orderId=${order.id} ${order.side} ${detail.filledQuantity} ${order.symbol} ` +
+            `@ ${fillPrice.toFixed(2)}（fee ${fee.toFixed(4)}，reduceOnly=${order.reduceOnly}）`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `对账失败（orderId=${order.id}）: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    if (filled > 0 || lots > 0) {
+      this.logger.warn(
+        `合约成交对账完成：补记成交 ${filled} 笔、Lot ${lots} 个、跳过 ${skipped} 笔`,
+      );
+    }
+    return { filled, lots, skipped };
+  }
 
   toDTO(order: OrderEntity): OrderDTO {
     return {
@@ -90,6 +280,7 @@ export class FuturesTradingService {
       exchange: order.exchange,
       environment: order.environment,
       mode: order.mode,
+      market: order.market,
       symbol: order.symbol,
       side: order.side,
       type: order.type,
@@ -117,6 +308,20 @@ export class FuturesTradingService {
   }
 
   /**
+   * 确保账户为双向持仓（hedge mode）——Lot 多空共存的前提。幂等。
+   *
+   * 只在真实交易模式调用（dry-run 不触交易所）。
+   * 交易所侧要求无持仓才能切换，切换前由引擎/用户保证净持仓为零；
+   * 若交易所拒绝（仍有持仓/-4067），异常上抛由调用方记为决策失败，绝不静默降级——
+   * 单向模式下多空 Lot 语义无法成立。
+   */
+  async ensureHedgeMode(): Promise<void> {
+    const adapter = await this.registry.get(FUTURES_EXCHANGE);
+    if (!isFuturesAdapter(adapter) || !adapter.setPositionMode) return;
+    await adapter.setPositionMode(true);
+  }
+
+  /**
    * 合约下单唯一出口：
    * 动作翻译 → 数量推导 → 精度取整 → 权威风控 → 设置杠杆/保证金 → 发单。
    */
@@ -139,9 +344,25 @@ export class FuturesTradingService {
       throw new BusinessException('EXCHANGE_ERROR', '无法获取合约当前价格，下单已取消');
     }
 
-    // ---- 1. 方向语义：策略动作 + 当前持仓 -> 开/加/平 ----
+    // ---- 1. 方向语义（Lot 模型 / hedge mode）----
+    // 带 lotId = 平仓单：意图与数量都由目标 Lot 决定（全量 reduceOnly 平掉）
+    // 不带 lotId = 开仓单：BUY 恒开多 / SELL 恒开空，与当前净持仓无关（多空可共存）
+    let lot: PositionLotEntity | null = null;
+    let intent: FuturesOrderIntent;
+    if (input.lotId) {
+      lot = await this.lots.getOpenLot(input.lotId);
+      if (!lot) {
+        throw new BusinessException('BAD_REQUEST', `未找到未完结的仓位单（lotId=${input.lotId}）`);
+      }
+      if (lot.symbol !== symbol) {
+        throw new BusinessException('BAD_REQUEST', `仓位单交易对不符（${lot.symbol} ≠ ${symbol}）`);
+      }
+      intent = resolveLotCloseIntent(lot.direction);
+    } else {
+      intent = resolveFuturesOrderIntentLot(input.action);
+    }
+
     const currentQty = await this.positions.getNetQuantity(symbol);
-    const intent = resolveFuturesOrderIntent(input.action, currentQty);
 
     const leverage = this.risk.effectiveLeverage(
       input.leverage !== undefined ? { ...cfg, leverage: input.leverage } : cfg,
@@ -163,6 +384,8 @@ export class FuturesTradingService {
     const sizing = await this.resolveQuantity({
       intent,
       currentQty,
+      // 平仓数量以目标 Lot 为准（全量平掉该单），不是净持仓
+      lotQty: lot ? Number(lot.quantity) : undefined,
       explicitQty: input.quantity,
       availableMargin: await this.getAvailableMargin(),
       positionPct: cfg.positionPct,
@@ -254,6 +477,7 @@ export class FuturesTradingService {
     if (mode === 'dry_run') {
       const slippage = DRY_RUN_SLIPPAGE_BPS / 10_000;
       const fillPrice = intent.side === 'BUY' ? price * (1 + slippage) : price * (1 - slippage);
+      const dryFee = quantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
       order.status = 'FILLED';
       order.filledQuantity = quantity;
       order.filledPrice = fillPrice;
@@ -265,11 +489,18 @@ export class FuturesTradingService {
           symbol,
           price: fillPrice,
           quantity,
-          fee: 0,
+          // 模拟撮合同样要计费：合约盈亏对费率极度敏感，记 0 会让 dry-run 结果系统性偏乐观
+          fee: dryFee,
           feeAsset: 'USDT',
           filledAt: new Date(),
         }),
       );
+      // Lot 生命周期挂接（dry-run 与真实同口径，保证回测/模拟可对账）
+      await this.settleOrOpenLot(input, intent, order, {
+        price: fillPrice,
+        quantity,
+        fee: dryFee,
+      });
       this.logger.log(
         `[dry-run][合约] ${intent.kind} ${intent.positionSide} ${quantity} ${symbol} @ ${fillPrice.toFixed(2)}`,
       );
@@ -299,16 +530,41 @@ export class FuturesTradingService {
         order = await this.orderRepo.save(order);
 
         if (result.filledQuantity > 0) {
+          this.logger.log(
+            `[${mode}][合约] 成交确认：${intent.kind} ${intent.positionSide} ` +
+              `${result.filledQuantity} ${symbol} @ ${result.filledPrice || price} ` +
+              `fee=${(result.fee ?? '估算').toString()} fills=${result.fee != null ? '交易所回传' : '无→按费率估算'}`,
+          );
+          const filledFee =
+            result.fee ??
+            result.filledQuantity * (result.filledPrice || price) * (FUTURES_FEE_BPS / 10_000);
           await this.fillRepo.save(
             this.fillRepo.create({
               orderId: order.id,
               symbol,
               price: result.filledPrice || price,
               quantity: result.filledQuantity,
-              fee: 0,
-              feeAsset: 'USDT',
+              // 真实手续费（交易所 fills[].commission 折算为 USDT）；
+              // 取不到时按 taker 费率估算，绝不记 0（会把毛盈亏当净盈亏）
+              fee: filledFee,
+              feeAsset: result.feeAsset ?? 'USDT',
               filledAt: new Date(),
             }),
+          );
+
+          // Lot 生命周期挂接：开仓成交建 Lot / 平仓成交结算 Lot
+          await this.settleOrOpenLot(input, intent, order, {
+            price: result.filledPrice || price,
+            quantity: result.filledQuantity,
+            fee: filledFee,
+          });
+        } else {
+          // ⚠️ 关键留痕：下单响应未含成交量（demo 环境 executedQty 可能为 0）。
+          // 成交明细与 Lot 由调度器的 syncPendingFills 对账补记；若不补记，盈亏将无法计算。
+          this.logger.warn(
+            `[${mode}][合约] 下单响应未含成交量（status=${result.status}，` +
+              `exchangeOrderId=${result.exchangeOrderId}），成交明细与 Lot 将由对账任务补记 ` +
+              `orderId=${order.id}`,
           );
         }
         this.logger.log(
@@ -346,6 +602,8 @@ export class FuturesTradingService {
   private async resolveQuantity(input: {
     intent: Exclude<FuturesOrderIntent, { kind: 'hold' }>;
     currentQty: number;
+    /** 平仓目标 Lot 的数量：close 意图时优先于净持仓（Lot 模型按单全平） */
+    lotQty?: number;
     explicitQty?: number;
     availableMargin: number;
     positionPct: number;
@@ -355,9 +613,10 @@ export class FuturesTradingService {
   }): Promise<{ quantity: number; notional: number; margin: number; note?: string }> {
     const { intent, filters, price } = input;
 
-    // 平仓：按当前持仓量全平，取整避免浮点残留
+    // 平仓：优先按目标 Lot 全平；无 Lot 时按净持仓兜底（兼容历史调用），取整避免浮点残留
     if (intent.kind === 'close') {
-      const qty = floorToStep(Math.abs(input.currentQty), filters.stepSize);
+      const raw = input.lotQty ?? Math.abs(input.currentQty);
+      const qty = floorToStep(raw, filters.stepSize);
       if (!(qty > 0)) {
         return { quantity: 0, notional: 0, margin: 0, note: '无持仓可平' };
       }

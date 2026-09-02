@@ -107,6 +107,7 @@ export class FuturesConfigService {
       strategyName: entity.strategyName?.trim() || DEFAULT_FUTURES_AGENT_CONFIG.strategyName,
       strategyParams: entity.strategyParams ?? {},
       exitRules: normalizeExitRules(entity.exitRules),
+      lastRunAt: entity.lastRunAt ? entity.lastRunAt.toISOString() : null,
     };
   }
 

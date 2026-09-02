@@ -9,7 +9,9 @@ import {
   StrategyContext,
   StrategyOutput,
   buildSignals,
+  clampLotTpSl,
   computeIndicators,
+  extractLotTpSl,
   mapInsightToParams,
   normalizeInsight,
   scoreSignals,
@@ -39,10 +41,15 @@ export interface LaneDecision {
   llmResult: LlmResult | null;
   /** strategy 链路为空串；hybrid 链路存上下文 prompt */
   prompt: string;
-  /** 出场规则触发时为 true：全部平仓（而非按 positionPct 部分处理） */
+  /** 出场规则触发时为 true：全部平仓（而非按 positionPct 部分处理）。Lot 模型下已无全平场景 */
   closeAll?: boolean;
   /** 仅 hybrid 链路：AI 激进度映射的仓位乘数（0.5~1.5） */
   positionMultiplier?: number;
+  /**
+   * 仅 hybrid 链路：AI 建议的逐单止盈止损（已钳制到安全区间）。
+   * strategy 链路 / AI 未输出时为 undefined → 下单侧用全局兜底（SL 2%/TP 4%）。
+   */
+  lotTpSl?: { stopLossPct: number; takeProfitPct: number };
 }
 
 /**
@@ -132,6 +139,13 @@ export class DecisionCoreService {
       temperature: number;
       maxTokens: number;
       insightCacheKey: string;
+      /**
+       * 只做多（现货专用，Lot 模型）：
+       * 现货策略只入场（BUY），出场交给逐单止盈止损，策略层不应再输出 SELL。
+       * 置 true 时策略（如 mean_reversion）的 SELL 分支退化为 HOLD。
+       * 合约传 false（SELL=开空有效，多空共存）。
+       */
+      longOnly?: boolean;
     },
     snapshot: DecisionInputSnapshot,
     position: PositionSnapshot,
@@ -201,6 +215,9 @@ export class DecisionCoreService {
     // 用户 strategyParams 为基底，AI 映射参数覆盖同名项（AI 只调元参数，不碰其余配置）
     const params = { ...input.strategyParams, ...mapped };
     const lane = await this.buildStrategyLane(input, snapshot, position, params);
+    // AI 建议的逐单 TP/SL（Lot 模型）：钳制到安全区间后交给下单侧落 Lot 快照；
+    // AI 未输出（或 strategy 链路）为 undefined → 下单侧用全局兜底
+    const suggestedTpSl = extractLotTpSl(insight);
     return {
       ...lane,
       lane: 'hybrid',
@@ -208,6 +225,7 @@ export class DecisionCoreService {
       degradeReason: lane.degradeReason ?? degradeReason,
       prompt,
       positionMultiplier: mapped.positionMultiplier,
+      lotTpSl: suggestedTpSl ? clampLotTpSl(suggestedTpSl) : undefined,
       llmResult,
     };
   }
@@ -230,10 +248,13 @@ export class DecisionCoreService {
       position,
       account: { quoteFree: snapshot.account.quoteFree, baseFree: snapshot.account.baseFree },
     };
+    // 现货 Lot 模型：强制策略只做多（longOnly），策略层不再输出 SELL，出场交给逐单 TP/SL
+    const params = { ...(paramsOverride ?? input.strategyParams) };
+    if (input.longOnly) params.longOnly = true;
     const { output, strategyName, fellBack } = this.strategyService.evaluate(
       input.strategyName,
       context,
-      paramsOverride ?? input.strategyParams,
+      params,
     );
     return {
       lane: 'strategy',

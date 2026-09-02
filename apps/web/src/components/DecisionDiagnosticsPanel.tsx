@@ -204,8 +204,7 @@ function NearMissTable({ items }: { items: NearMiss[] }) {
  */
 export function DecisionDiagnosticsPanel() {
   const [windowHours, setWindowHours] = useState(24);
-  const [market, setMarket] = useState<'all' | 'spot' | 'futures'>('all');
-  const { data, isLoading } = useDecisionDiagnostics(windowHours, market === 'all' ? undefined : market);
+  const { data, isLoading } = useDecisionDiagnostics(windowHours);
 
   const totalBlocked = useMemo(
     () => (data?.topReasons ?? []).reduce((acc, r) => acc + r.count, 0),
@@ -224,18 +223,6 @@ export function DecisionDiagnosticsPanel() {
             { label: '24h', value: 24 },
             { label: '3 天', value: 72 },
             { label: '7 天', value: 168 },
-          ]}
-        />
-        <span className="text-[12px] text-subtle">市场</span>
-        <Select
-          size="small"
-          value={market}
-          onChange={setMarket}
-          style={{ width: 110 }}
-          options={[
-            { label: '全部', value: 'all' },
-            { label: '现货', value: 'spot' },
-            { label: '合约', value: 'futures' },
           ]}
         />
         {data ? (

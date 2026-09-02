@@ -2,8 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   computeFuturesOrderQty,
   isActionableIntent,
+  MAX_OPEN_LOTS_PER_DIRECTION,
   resolveFuturesOrderIntent,
+  resolveFuturesOrderIntentLot,
+  resolveLotCloseIntent,
 } from '../futures';
+import {
+  checkLotExit,
+  clampLotTpSl,
+  settleLotPnl,
+  DEFAULT_LOT_STOP_LOSS_PCT,
+  DEFAULT_LOT_TAKE_PROFIT_PCT,
+} from '../../position';
 
 describe('resolveFuturesOrderIntent 方向语义映射', () => {
   it('无持仓时 BUY=开多、SELL=开空', () => {
@@ -121,5 +131,119 @@ describe('computeFuturesOrderQty 保证金仓位计算', () => {
     const r = computeFuturesOrderQty({ ...base, availableMargin: 0.5, positionPct: 0.001 });
     expect(r.quantity).toBe(0);
     expect(r.note).toContain('取整后为 0');
+  });
+});
+describe('resolveFuturesOrderIntentLot 方向语义映射（Lot 模型 / hedge mode）', () => {
+  it('BUY 恒开多、SELL 恒开空，与当前净持仓无关', () => {
+    // 关键差异：净持仓语义下「持多时 SELL=平多」；Lot 语义下 SELL=开空（多空共存）
+    for (const qty of [-0.05, 0, 0.05]) {
+      expect(resolveFuturesOrderIntentLot('BUY')).toEqual({
+        kind: 'open',
+        side: 'BUY',
+        positionSide: 'LONG',
+        reduceOnly: false,
+      });
+      expect(resolveFuturesOrderIntentLot('SELL')).toEqual({
+        kind: 'open',
+        side: 'SELL',
+        positionSide: 'SHORT',
+        reduceOnly: false,
+      });
+      void qty;
+    }
+  });
+
+  it('HOLD 恒观望', () => {
+    expect(resolveFuturesOrderIntentLot('HOLD').kind).toBe('hold');
+    expect(isActionableIntent(resolveFuturesOrderIntentLot('HOLD'))).toBe(false);
+  });
+
+  it('Lot 平仓意图：平多=SELL reduceOnly LONG，平空=BUY reduceOnly SHORT', () => {
+    expect(resolveLotCloseIntent('LONG')).toEqual({
+      kind: 'close',
+      side: 'SELL',
+      positionSide: 'LONG',
+      reduceOnly: true,
+    });
+    expect(resolveLotCloseIntent('SHORT')).toEqual({
+      kind: 'close',
+      side: 'BUY',
+      positionSide: 'SHORT',
+      reduceOnly: true,
+    });
+  });
+
+  it('Lot 上限为 3（用户拍板：允许加仓，超出忽略信号）', () => {
+    expect(MAX_OPEN_LOTS_PER_DIRECTION).toBe(3);
+  });
+});
+
+describe('checkLotExit 逐单止盈止损判定', () => {
+  const base = { stopLossPct: 0.02, takeProfitPct: 0.04 };
+
+  it('多头：跌破 entry×(1−SL) 触发止损，涨破 entry×(1+TP) 触发止盈', () => {
+    const entry = 100;
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'LONG', price: 97.9 })).toBe(
+      'STOP_LOSS',
+    );
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'LONG', price: 104.1 })).toBe(
+      'TAKE_PROFIT',
+    );
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'LONG', price: 100 })).toBeNull();
+  });
+
+  it('空头反向：涨破 entry×(1+SL) 触发止损，跌破 entry×(1−TP) 触发止盈', () => {
+    const entry = 100;
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'SHORT', price: 102.1 })).toBe(
+      'STOP_LOSS',
+    );
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'SHORT', price: 95.9 })).toBe(
+      'TAKE_PROFIT',
+    );
+    expect(checkLotExit({ ...base, entryPrice: entry, direction: 'SHORT', price: 100 })).toBeNull();
+  });
+
+  it('非法价格不触发（不抛错）', () => {
+    expect(checkLotExit({ ...base, entryPrice: 0, direction: 'LONG', price: 100 })).toBeNull();
+    expect(checkLotExit({ ...base, entryPrice: 100, direction: 'LONG', price: 0 })).toBeNull();
+  });
+});
+
+describe('clampLotTpSl / settleLotPnl', () => {
+  it('AI 输出钳制到 [0.005, 0.1]，非法值回落默认（SL 2%/TP 4%）', () => {
+    expect(clampLotTpSl({})).toEqual({
+      stopLossPct: DEFAULT_LOT_STOP_LOSS_PCT,
+      takeProfitPct: DEFAULT_LOT_TAKE_PROFIT_PCT,
+    });
+    expect(clampLotTpSl({ stopLossPct: 0.5, takeProfitPct: 0.001 }).stopLossPct).toBe(0.1);
+    expect(clampLotTpSl({ stopLossPct: 0.5, takeProfitPct: 0.001 }).takeProfitPct).toBe(0.005);
+    expect(clampLotTpSl({ stopLossPct: NaN, takeProfitPct: null }).stopLossPct).toBe(
+      DEFAULT_LOT_STOP_LOSS_PCT,
+    );
+  });
+
+  it('多头结算：毛盈亏 − 双边手续费，收益率为名义口径', () => {
+    const r = settleLotPnl({
+      direction: 'LONG',
+      quantity: 1,
+      entryPrice: 100,
+      exitPrice: 110,
+      entryFee: 0.1,
+      exitFee: 0.1,
+    });
+    expect(r.realizedPnl).toBeCloseTo(9.8, 8);
+    expect(r.returnPct).toBeCloseTo(0.098, 8);
+  });
+
+  it('空头结算方向相反', () => {
+    const r = settleLotPnl({
+      direction: 'SHORT',
+      quantity: 1,
+      entryPrice: 100,
+      exitPrice: 90,
+      entryFee: 0,
+      exitFee: 0,
+    });
+    expect(r.realizedPnl).toBeCloseTo(10, 8);
   });
 });

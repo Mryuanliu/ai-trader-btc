@@ -6,12 +6,9 @@ import {
   buildSignals,
   strategyRegistry,
   computeIndicators,
-  emptyFuturesPosition,
-  applyFuturesFill,
-  evaluateExitRules,
+  checkLotExit,
   floorToStep,
-  isActionableIntent,
-  resolveFuturesOrderIntent,
+  settleLotPnl,
   scoreSignals,
 } from '@ai-trader/shared';
 import { computeFuturesMetrics } from './metrics';
@@ -40,7 +37,25 @@ import type {
  * 简化声明（相对实盘的偏差，回测结果按保守方向读取）：
  *   - 不建模维持保证金率分档与 ADL，强平价即「保证金亏完」
  *   - 资金费按本根收盘的名义价值估算，非结算时点的精确标记价
+ *
+ * Lot 模型（2026-08-31 起，与实盘 FuturesEngine 同口径）：
+ *   BUY 恒开多 Lot、SELL 恒开空 Lot，多空 Lot 可共存（hedge 锁仓）；
+ *   出场只有逐单止盈止损（checkLotExit，每 Lot 自己的 entryPrice/TP/SL）；
+ *   不再有「反手平仓」语义——反向信号只是开反向新 Lot，不碰旧仓。
+ *   强平按 Lot 逐仓判定：单笔 Lot 保证金亏完即平掉该 Lot（不影响其他 Lot）。
  */
+
+/** 合约回测 Lot（订单级仓位单）：与实盘 PositionLot 同口径 */
+interface FuturesBacktestLot {
+  id: number;
+  direction: 'LONG' | 'SHORT';
+  quantity: number;
+  entryPrice: number;
+  margin: number;
+  entryFee: number;
+  stopLossPct: number;
+  takeProfitPct: number;
+}
 export async function runFuturesBacktest(
   candles: Candle[],
   strategy: Strategy,
@@ -52,10 +67,10 @@ export async function runFuturesBacktest(
   const feeRate = config.feeRateBps / 10_000;
   const leverage = Math.min(10, Math.max(1, Math.round(config.leverage)));
 
-  // 钱包现金（未占用部分）；margin 是仓位锁定的逐仓保证金
+  // 钱包现金（未占用部分）；每个 Lot 锁定自己的逐仓保证金
   let cash = config.initialCapital;
-  let margin = 0;
-  let pos: FuturesPositionState = emptyFuturesPosition(config.symbol);
+  let lotSeq = 0;
+  const lots: FuturesBacktestLot[] = [];
 
   const trades: FuturesBacktestTrade[] = [];
   const liquidations: FuturesLiquidationEvent[] = [];
@@ -67,58 +82,66 @@ export async function runFuturesBacktest(
     { time: candles[0]?.time ?? 0, equity: config.initialCapital, drawdownPct: 0 },
   ];
 
+  // 净持仓视图（风控/上下文用）：多头量 − 空头量
+  const netQty = () => lots.reduce((acc, l) => acc + (l.direction === 'LONG' ? l.quantity : -l.quantity), 0);
+  const totalMargin = () => lots.reduce((acc, l) => acc + l.margin, 0);
+  // 总浮动盈亏（所有未完结 Lot 按 mark 计）
   const unrealized = (mark: number) =>
-    pos.netQty !== 0 && mark > 0 ? pos.netQty * (mark - pos.entryPrice) : 0;
-
-  /** 强平价：逐仓下保证金亏完的价格。无持仓返回 null */
-  const liquidationPrice = (): number | null => {
-    if (pos.netQty === 0 || !(pos.entryPrice > 0) || margin <= 0) return null;
-    // 多头：entry − margin/qty（价格跌到这里保证金亏完）；空头：entry + margin/|qty|
-    return pos.netQty > 0
-      ? pos.entryPrice - margin / pos.netQty
-      : pos.entryPrice + margin / Math.abs(pos.netQty);
+    lots.reduce((acc, l) => acc + (l.direction === 'LONG' ? 1 : -1) * (mark - l.entryPrice) * l.quantity, 0);
+  // 加权平均入场价（净持仓视角）
+  const avgEntry = () => {
+    const nq = netQty();
+    if (nq === 0) return 0;
+    return (
+      lots.reduce((acc, l) => acc + (l.direction === 'LONG' ? 1 : -1) * l.entryPrice * l.quantity, 0) / Math.abs(nq)
+    );
   };
+  // 净持仓已实现盈亏（资金费在 cash 侧记，这里累计平仓盈亏用于上下文展示）
+  let realizedTotal = 0;
 
   const totalBars = Math.max(1, candles.length - 1 - config.warmupBars);
   for (let i = config.warmupBars; i < candles.length - 1; i++) {
     const bar = candles[i];
 
-    // ---- 1. 强平检查（保守：先于资金费、出场与决策）----
-    const liq = liquidationPrice();
-    if (liq !== null) {
-      const touched =
-        pos.netQty > 0 ? bar.low <= liq : bar.high >= liq;
+    // ---- 1. 逐 Lot 强平检查（保守：先于资金费、出场与决策）----
+    // 每个 Lot 有独立保证金与入场价：多头看 low、空头看 high 是否触及其强平价
+    for (let li = lots.length - 1; li >= 0; li--) {
+      const lot = lots[li];
+      const liqPrice =
+        lot.direction === 'LONG'
+          ? lot.entryPrice - lot.margin / lot.quantity
+          : lot.entryPrice + lot.margin / lot.quantity;
+      const touched = lot.direction === 'LONG' ? bar.low <= liqPrice : bar.high >= liqPrice;
       if (touched) {
         liquidations.push({
           time: bar.time,
-          price: Number(liq.toFixed(2)),
-          loss: Number(margin.toFixed(2)),
-          positionSide: pos.netQty > 0 ? 'LONG' : 'SHORT',
-          quantity: Math.abs(pos.netQty),
+          price: Number(liqPrice.toFixed(2)),
+          loss: Number(lot.margin.toFixed(2)),
+          positionSide: lot.direction,
+          quantity: lot.quantity,
         });
-        // 逐仓：保证金全部损失，现金不受影响（保证金开仓时已划出）
-        cash += 0;
-        margin = 0;
-        pos = emptyFuturesPosition(config.symbol);
+        // 逐仓：该 Lot 保证金全部损失；现金不受影响（保证金开仓时已划出）
+        lots.splice(li, 1);
       }
     }
 
     // ---- 2. 资金费结算：结算时点落在 (上一根开盘, 本根时间] 的区间内 ----
-    // 先跳过早于回测起点/上一根的历史结算点，否则指针会被第一个过期点卡死
+    // 按净持仓（多头量 − 空头量）计：锁仓时多空对冲，净资金费趋于 0，与实盘一致
     while (
       fundingCursor < fundingRates.length &&
       fundingRates[fundingCursor].fundingTime <= candles[i - 1].time
     ) {
       fundingCursor += 1;
     }
-    const notionalNow = Math.abs(pos.netQty) * bar.open;
+    const net = netQty();
+    const notionalNow = Math.abs(net) * bar.open;
     while (
       fundingCursor < fundingRates.length &&
       fundingRates[fundingCursor].fundingTime <= bar.time
     ) {
       const fr = fundingRates[fundingCursor];
-      // 多头付正费率；空头收正费率（净持仓为负时支付额取反）
-      const payment = notionalNow * fr.rate * Math.sign(pos.netQty || 0);
+      // 净多头付正费率；净空头收正费率
+      const payment = notionalNow * fr.rate * Math.sign(net || 0);
       cash -= payment;
       totalFundingPaid += payment;
       fundingCursor += 1;
@@ -134,6 +157,8 @@ export async function runFuturesBacktest(
     const indicatorScore = scoreSignals(signals);
     const price = bar.close;
 
+    const nq = netQty();
+    const nqAbs = Math.abs(nq);
     // 合约仓位映射为策略上下文：数量取绝对值（方向由执行层结合净持仓正负决定）
     const context: StrategyContext = {
       symbol: config.symbol,
@@ -155,86 +180,96 @@ export async function runFuturesBacktest(
       },
       position: {
         symbol: config.symbol,
-        quantity: Math.abs(pos.netQty),
-        avgCost: pos.entryPrice,
-        realizedPnl: pos.realizedPnl,
+        quantity: nqAbs,
+        avgCost: avgEntry(),
+        realizedPnl: realizedTotal,
         unrealizedPnl: unrealized(price),
-        marketValue: Math.abs(pos.netQty) * price,
+        marketValue: nqAbs * price,
         totalBought: 0,
         totalSold: 0,
-        totalFee: pos.totalFee,
+        totalFee: 0,
       },
       // 合约账户语义：quoteFree=可用保证金，baseFree=当前净持仓绝对值
-      account: { quoteFree: cash, baseFree: Math.abs(pos.netQty) },
+      account: { quoteFree: cash, baseFree: nqAbs },
       params: strategy.normalizeParams(config.strategyParams),
     };
 
-    // 出场规则（方向感知）优先级最高；触发时替代策略信号全平
-    const exit = evaluateExitRules({
-      entryPrice: pos.entryPrice,
-      price,
-      side: pos.netQty > 0 ? 'LONG' : pos.netQty < 0 ? 'SHORT' : null,
-      exitRules: {
-        stopLossPct: config.exitRules?.stopLossPct ?? null,
-        takeProfitPct: config.exitRules?.takeProfitPct ?? null,
-      },
-    });
-    const output = exit.triggered && exit.closeAction
-      ? {
-          action: exit.closeAction,
-          confidence: 1,
-          reason: `出场规则触发：${exit.reason}。按出场规则全部平仓。`,
-        }
-      : strategy.evaluate(context);
+    // ---- 3. 出场优先：逐 Lot 止盈止损（Lot 模型下唯一自动出场，与实盘 checkLotExit 同口径）----
+    // 第 i 根收盘判定 → 第 i+1 根开盘成交；先平全部触发 Lot，不再开新仓
+    const nextOpen = candles[i + 1].open;
+    const triggered = lots.filter((lot) =>
+      checkLotExit({
+        entryPrice: lot.entryPrice,
+        direction: lot.direction,
+        stopLossPct: lot.stopLossPct,
+        takeProfitPct: lot.takeProfitPct,
+        price,
+      }),
+    );
+    for (const lot of triggered) {
+      const closeSide = lot.direction === 'LONG' ? 'SELL' : 'BUY';
+      const fillPrice = closeSide === 'BUY' ? nextOpen * (1 + slippage) : nextOpen * (1 - slippage);
+      const notional = lot.quantity * fillPrice;
+      const exitFee = notional * feeRate;
+      const { realizedPnl } = settleLotPnl({
+        direction: lot.direction,
+        quantity: lot.quantity,
+        entryPrice: lot.entryPrice,
+        exitPrice: fillPrice,
+        entryFee: lot.entryFee,
+        exitFee,
+      });
+      // 逐仓：本金（保证金）退回 + 已实现盈亏 − 平仓费
+      cash += lot.margin + realizedPnl - exitFee;
+      realizedTotal += realizedPnl;
+      pushTrade(
+        candles[i + 1].time, closeSide, fillPrice, lot.quantity, exitFee, nextOpen,
+        1, indicatorScore, lot.direction, true, lot.margin, notional,
+      );
+      lots.splice(lots.indexOf(lot), 1);
+    }
 
-    // ---- 4. 下单意图：策略动作 + 净持仓 → 开/加/平（与实盘同源）----
-    if (output.action !== 'HOLD' && output.confidence >= config.minConfidence) {
-      const intent = resolveFuturesOrderIntent(output.action, pos.netQty);
-      // 类型守卫收窄：HOLD 无 side，开/平三分支才有
-      if (isActionableIntent(intent)) {
-      const nextOpen = candles[i + 1].open;
-      const fillPrice =
-        intent.side === 'BUY' ? nextOpen * (1 + slippage) : nextOpen * (1 - slippage);
+    if (triggered.length === 0) {
+      // 无 Lot 触发 → 策略信号只负责开新仓（BUY 恒开多 / SELL 恒开空，多空可共存）
+      const output = strategy.evaluate(context);
+      if (output.action !== 'HOLD' && output.confidence >= config.minConfidence) {
+        // Lot 语义：动作直接映射方向，与净持仓无关
+        const direction: 'LONG' | 'SHORT' = output.action === 'BUY' ? 'LONG' : 'SHORT';
+        const side = output.action === 'BUY' ? 'BUY' : 'SELL';
+        const fillPrice = side === 'BUY' ? nextOpen * (1 + slippage) : nextOpen * (1 - slippage);
 
-      if (intent.kind === 'close') {
-        // 平仓：全平净持仓（反手信号只平不反，下一周期自然开反向）
-        const closeQty = Math.abs(pos.netQty);
-        if (closeQty > 0) {
-          const notional = closeQty * fillPrice;
-          const fee = notional * feeRate;
-          const realized = pos.netQty * (fillPrice - pos.entryPrice);
-          cash += margin + realized - fee;
-          pushTrade(candles[i + 1].time, intent.side, fillPrice, closeQty, fee, nextOpen, output.confidence, indicatorScore, pos.netQty > 0 ? 'LONG' : 'SHORT', true, 0, notional);
-          margin = 0;
-          pos = emptyFuturesPosition(config.symbol);
-        }
-      } else if (intent.kind === 'open' || intent.kind === 'add') {
-        // 开仓/加仓：保证金预算 = 可用现金 × positionPct，名义 = 保证金 × 杠杆
+        // 开仓：保证金预算 = 可用现金 × positionPct，名义 = 保证金 × 杠杆
         const marginBudget = cash * config.positionPct;
         const rawQty = marginBudget * leverage > 0
           ? floorToStep((marginBudget * leverage) / fillPrice, config.stepSize)
           : 0;
         const notional = rawQty * fillPrice;
-
         if (rawQty > 0 && notional >= config.minNotional) {
           const usedMargin = notional / leverage;
           const fee = notional * feeRate;
           if (usedMargin + fee <= cash) {
             cash -= usedMargin + fee;
-            margin += usedMargin;
-            pos = applyFuturesFill(pos, { side: intent.side, quantity: rawQty, price: fillPrice, fee: 0 });
+            lots.push({
+              id: ++lotSeq,
+              direction,
+              quantity: rawQty,
+              entryPrice: fillPrice,
+              margin: usedMargin,
+              entryFee: fee,
+              stopLossPct: config.exitRules?.stopLossPct ?? 0.02,
+              takeProfitPct: config.exitRules?.takeProfitPct ?? 0.04,
+            });
             pushTrade(
-              candles[i + 1].time, intent.side, fillPrice, rawQty, fee, nextOpen,
-              output.confidence, indicatorScore, intent.positionSide, false, usedMargin, notional,
+              candles[i + 1].time, side, fillPrice, rawQty, fee, nextOpen,
+              output.confidence, indicatorScore, direction, false, usedMargin, notional,
             );
           }
         }
       }
-      }
     }
 
-    // ---- 5. 权益点（本根收盘估值）----
-    const equity = cash + margin + unrealized(bar.close);
+    // ---- 5. 权益点（本根收盘估值：现金 + 所有 Lot 保证金 + 净持仓浮动盈亏）----
+    const equity = cash + totalMargin() + unrealized(bar.close);
     equityCurve.push({
       time: bar.time,
       equity: Number(equity.toFixed(2)),

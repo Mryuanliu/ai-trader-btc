@@ -6,8 +6,8 @@
  */
 import 'dotenv/config';
 import { AppDataSource } from './data-source';
-import { AgentConfigEntity, ExchangeAccountEntity, NewsItemEntity } from './entities';
-import { DEFAULT_AGENT_CONFIG, EXCHANGE_CODES, EXCHANGE_LABELS } from '@ai-trader/shared';
+import { ExchangeAccountEntity, NewsItemEntity } from './entities';
+import { EXCHANGE_CODES, EXCHANGE_LABELS } from '@ai-trader/shared';
 
 const SEED_NEWS = [
   {
@@ -53,21 +53,7 @@ async function main() {
   await AppDataSource.initialize();
   console.log('数据库连接成功，开始写入种子数据…');
 
-  // 1. Agent 配置
-  const agentRepo = AppDataSource.getRepository(AgentConfigEntity);
-  let agent = await agentRepo.findOne({ where: {}, order: { createdAt: 'ASC' } });
-  if (!agent) {
-    agent = agentRepo.create({
-      ...DEFAULT_AGENT_CONFIG,
-      mode: (process.env.APP_RUN_MODE as AgentConfigEntity['mode']) ?? 'dry_run',
-    });
-    await agentRepo.save(agent);
-    console.log('✓ 已创建默认 Agent 配置');
-  } else {
-    console.log('· Agent 配置已存在，跳过');
-  }
-
-  // 2. 交易所账户占位
+  // 1. 交易所账户占位（仅合约模式下只有 binance-futures）
   const accountRepo = AppDataSource.getRepository(ExchangeAccountEntity);
   for (const code of EXCHANGE_CODES) {
     const label = EXCHANGE_LABELS[code];

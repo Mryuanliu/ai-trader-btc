@@ -24,6 +24,7 @@ import {
   OrderResult,
   PlaceOrderInput,
   PriceQuote,
+  sumCommissionUsdt,
 } from './adapter.interface';
 import { buildQuery, hmacSha256Hex } from './signature';
 import { axiosTransport, wsAgent } from '../common/proxy';
@@ -510,13 +511,35 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     }
   }
 
+  /**
+   * 切换持仓模式（one-way ↔ hedge）。已是目标模式时静默返回（幂等）。
+   *
+   * 前提：账户无任何持仓，否则交易所拒绝（-4067）。
+   * Lot 模型要求多空共存（锁仓），因此真实交易前必须处于 hedge 模式；
+   * 单向模式下 hedging 关闭，positionRisk 只返回一条净持仓记录，
+   * 无法表达多空两侧独立的止盈止损。
+   */
+  async setPositionMode(dual: boolean): Promise<PositionMode> {
+    const current = await this.getPositionMode();
+    if ((current === 'hedge') === dual) return current;
+
+    await this.signed('POST', '/fapi/v1/positionSide/dual', {
+      dualSidePosition: dual ? 'true' : 'false',
+    });
+    // 切换成功后失效缓存，让后续读取拿到新模式
+    this.positionModeCache = dual ? 'hedge' : 'one-way';
+    this.logger.log(`合约持仓模式已切换为：${dual ? '双向持仓（hedge）' : '单向持仓'}`);
+    return this.positionModeCache;
+  }
+
   async placeOrder(input: PlaceOrderInput): Promise<OrderResult> {
     const payload: Record<string, unknown> = {
       symbol: input.symbol,
       side: input.side,
       type: input.type,
       quantity: input.quantity,
-      newOrderRespType: 'RESULT',
+      // 同现货：FULL 才带 fills[].commission，手续费是盈亏口径的关键输入
+      newOrderRespType: 'FULL',
     };
     if (input.type === 'LIMIT') {
       payload.price = input.price;
@@ -633,6 +656,8 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
       quantity: Number(data.origQty ?? fallback.quantity ?? 0),
       filledQuantity: executedQty,
       filledPrice,
+      // 仅在成交时折算；未成交订单没有 fills，fee 保持 undefined（未知而非 0）
+      ...(executedQty > 0 ? sumCommissionUsdt(data, filledPrice) : {}),
       raw: data,
     };
   }

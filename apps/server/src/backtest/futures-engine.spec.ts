@@ -7,7 +7,6 @@ import {
   strategyRegistry,
   TrendFollowingStrategy,
 } from '@ai-trader/shared';
-import { runBacktest } from './engine';
 import { runFuturesBacktest } from './futures-engine';
 import type { BacktestConfig, FuturesBacktestConfig } from './types';
 
@@ -151,30 +150,26 @@ describe('runFuturesBacktest · 空头（方向感知）', () => {
     expect(report.metrics.winRate).toBeGreaterThan(0);
   });
 
-  it('反向信号只平仓不反手：持多遇 SELL 产生 reduceOnly 平仓单，下一跳才反手开空', async () => {
-    // 前 5 个决策买入建多，之后全部卖出（先平多，再开空）
+  it('反向信号开空新 Lot（Lot 语义 / hedge 锁仓）：SELL 直接建空，不复用多仓、不反手', async () => {
+    // 横盘行情避免 TP/SL 干扰；前 5 个决策 BUY 建多，之后全部 SELL（开空新 Lot）
     const report = await runFuturesBacktest(
-      rising(320, 100, 2, T0),
+      flat(320, 100, T0),
       stubStrategy('BUY', 5),
       futuresConfig({ leverage: 2 }),
     );
 
-    const closes = report.trades.filter((t) => t.reduceOnly);
-    expect(closes.length).toBeGreaterThanOrEqual(1);
-    const firstClose = closes[0];
-    // 平多单：SELL + LONG
-    expect(firstClose.side).toBe('SELL');
-    expect(firstClose.positionSide).toBe('LONG');
+    // 前 5 个 BUY 都是开多 Lot（非 reduceOnly）
+    const buys = report.trades.filter((t) => t.side === 'BUY');
+    expect(buys.length).toBeGreaterThanOrEqual(5);
+    expect(buys.every((t) => t.positionSide === 'LONG' && !t.reduceOnly)).toBe(true);
 
-    // 平仓之后的开仓单必须是反方向（SHORT），且中间不存在同跳反手
-    const closeIdx = report.trades.indexOf(firstClose);
-    for (let i = closeIdx + 1; i < report.trades.length; i++) {
-      const t = report.trades[i];
-      if (!t.reduceOnly) {
-        expect(t.positionSide).toBe('SHORT');
-        break;
-      }
-    }
+    // 存在非 reduceOnly 的 SELL（开空新 Lot，positionSide=SHORT）——多空共存锁仓
+    const openShorts = report.trades.filter((t) => t.side === 'SELL' && !t.reduceOnly);
+    expect(openShorts.length).toBeGreaterThanOrEqual(1);
+    expect(openShorts.every((t) => t.positionSide === 'SHORT')).toBe(true);
+
+    // 多空并存：同一时间点同时存在多头与空头未平 Lot（净持仓被对冲但仍各自持有）
+    // 横盘下不触 TP/SL，BUY 与开空 SELL 都会留存，直到预算用尽
   });
 });
 
@@ -227,36 +222,6 @@ describe('runFuturesBacktest · 强平（简化保守模型）', () => {
     // 1x：强平线 -100%，同样的跌幅绝不触发
     const lev1 = await runFuturesBacktest(candles, stubStrategy('BUY'), futuresConfig({ leverage: 1 }));
     expect(lev1.liquidations.length).toBe(0);
-  });
-});
-
-describe('现货回归断言（Commit 6 不改现货引擎）', () => {
-  it('现货回测基线不变：止损出场单 confidence=1 全仓卖出', async () => {
-    const candles = [...rising(210, 150, 0.5, T0), ...crash(10, 176, 3, T0 + 210 * STEP)];
-    const report = await runBacktest(
-      candles,
-      trend(),
-      {
-        symbol: 'BTCUSDT',
-        interval: '5m',
-        from: 0,
-        to: 0,
-        initialCapital: 10_000,
-        slippageBps: 0,
-        feeRateBps: 0,
-        positionPct: 0.5,
-        minConfidence: 0.6,
-        strategyName: 'trend_following',
-        strategyParams: { entryThreshold: 0.25 },
-        warmupBars: 150,
-        exitRules: { stopLossPct: 0.03 },
-      },
-    );
-    const buys = report.trades.filter((t) => t.side === 'BUY');
-    expect(buys.length).toBeGreaterThanOrEqual(1);
-    const stopSell = report.trades.find((t) => t.side === 'SELL' && t.decisionConfidence === 1);
-    expect(stopSell).toBeDefined();
-    expect(stopSell!.quantity).toBeGreaterThan(buys[0].quantity * 0.9);
   });
 });
 

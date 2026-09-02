@@ -15,7 +15,6 @@ import { ApiOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import {
   ENVIRONMENTS,
   ENVIRONMENT_LABELS,
-  EXCHANGE_LABELS,
   MARKET_LABELS,
   marketOfExchange,
   type Environment,
@@ -34,6 +33,12 @@ interface AccountFormValues {
   passphrase: string;
 }
 
+/**
+ * 合约交易所账户页。
+ *
+ * 仅合约模式下只有 binance-futures 一个账户，直接展示该账户的密钥配置，
+ * 不再需要交易所切换 Tab。Passphrase 为欧意专属字段，已移除。
+ */
 export function AdminAccounts() {
   const { data, isLoading, refetch } = useAccounts();
   const update = useUpdateAccount();
@@ -41,9 +46,8 @@ export function AdminAccounts() {
   const { message } = AntApp.useApp();
   const { run: requireAuth, modal, token } = useRequireAuth();
   const [forms] = Form.useForm<AccountFormValues>();
-  const [active, setActive] = useState<ExchangeCode>('binance');
 
-  const current = data?.find((a) => a.exchange === active);
+  const current = data?.find((a) => a.exchange === 'binance-futures');
 
   useEffect(() => {
     if (current) {
@@ -62,7 +66,7 @@ export function AdminAccounts() {
     const values = await forms.validateFields();
     try {
       await update.mutateAsync({
-        exchange: active,
+        exchange: 'binance-futures',
         patch: {
           label: values.label,
           environment: values.environment,
@@ -70,7 +74,6 @@ export function AdminAccounts() {
           // 留空表示不修改密钥
           ...(values.apiKey ? { apiKey: values.apiKey } : {}),
           ...(values.apiSecret ? { apiSecret: values.apiSecret } : {}),
-          ...(values.passphrase ? { passphrase: values.passphrase } : {}),
         },
       });
       message.success('已保存，密钥以密文存储');
@@ -80,7 +83,7 @@ export function AdminAccounts() {
   };
 
   const onTest = () => {
-    test.mutate(active, {
+    test.mutate('binance-futures' as ExchangeCode, {
       onSuccess: (res) =>
         res.ok ? message.success(res.message) : message.warning(res.message),
       onError: (err) => message.error(err.message),
@@ -93,10 +96,11 @@ export function AdminAccounts() {
         <div>
           <div className="flex items-center gap-2 text-[15px] font-semibold text-white">
             <SafetyCertificateOutlined className="text-btc-light" />
-            交易所账户与密钥
+            合约交易所账户与密钥
           </div>
           <div className="muted-text mt-1">
-            API Key 使用 AES-256-GCM 加密落库，接口只返回掩码，保存后无法在前端查看明文。
+            币安 U 本位合约账户（binance-futures）。API Key 使用 AES-256-GCM 加密落库，
+            接口只返回掩码，保存后无法在前端查看明文。
           </div>
         </div>
         {!token ? (
@@ -107,20 +111,6 @@ export function AdminAccounts() {
       </div>
 
       <div className="glass-card p-4">
-        <div className="mb-4">
-          <Segmented
-            value={active}
-            onChange={(v) => setActive(v as ExchangeCode)}
-            options={(data ?? []).map((a) => ({
-              // 标注市场类型，便于区分现货账户与合约账户
-              label: `${EXCHANGE_LABELS[a.exchange]} · ${MARKET_LABELS[marketOfExchange(a.exchange)]}${
-                a.configured ? ' · 已配置' : ''
-              }`,
-              value: a.exchange,
-            }))}
-          />
-        </div>
-
         {current ? (
           <Row gutter={24}>
             <Col xs={24} lg={10}>
@@ -131,12 +121,12 @@ export function AdminAccounts() {
                     {current.enabled ? '已启用' : '已停用'}
                   </Tag>
                 </div>
+                <RowOf
+                  label="市场"
+                  value={`${MARKET_LABELS[marketOfExchange('binance-futures')]} · U 本位永续`}
+                />
                 <RowOf label="环境" value={ENVIRONMENT_LABELS[current.environment]} />
                 <RowOf label="API Key" value={current.apiKeyMasked || '未配置'} mono />
-                <RowOf
-                  label="Passphrase"
-                  value={current.hasPassphrase ? '已设置' : current.exchange === 'okx' ? '未设置（OKX 必填）' : '不适用'}
-                />
                 <RowOf
                   label="连通性"
                   value={
@@ -157,14 +147,14 @@ export function AdminAccounts() {
                 <Row gutter={12}>
                   <Col span={12}>
                     <Form.Item name="label" label="账户备注">
-                      <Input placeholder="主账户" />
+                      <Input placeholder="主合约账户" />
                     </Form.Item>
                   </Col>
                   <Col span={12}>
                     <Form.Item
                       name="environment"
                       label={
-                        <Tooltip title="决定交易请求发往哪个主机；模拟盘为币安官方 Demo Mode，余额可在币安网页端随时重置">
+                        <Tooltip title="决定合约交易请求发往哪个主机；模拟盘为币安官方 Demo 合约（demo-fapi.binance.com），余额可在币安网页端随时重置">
                           <span className="border-b border-dashed border-white/25">环境</span>
                         </Tooltip>
                       }
@@ -178,7 +168,7 @@ export function AdminAccounts() {
                     </Form.Item>
                   </Col>
                 </Row>
-                <Form.Item name="enabled" label="启用该交易所下单" valuePropName="checked">
+                <Form.Item name="enabled" label="启用该合约账户下单" valuePropName="checked">
                   <Switch checkedChildren="启用" unCheckedChildren="停用" />
                 </Form.Item>
                 <Form.Item name="apiKey" label="API Key（留空表示不修改）">
@@ -187,11 +177,6 @@ export function AdminAccounts() {
                 <Form.Item name="apiSecret" label="API Secret（留空表示不修改）">
                   <Input.Password placeholder="请输入新的 API Secret" autoComplete="off" />
                 </Form.Item>
-                {current.exchange === 'okx' ? (
-                  <Form.Item name="passphrase" label="Passphrase（欧意必填）">
-                    <Input.Password placeholder="请输入 Passphrase" autoComplete="off" />
-                  </Form.Item>
-                ) : null}
                 <div className="flex gap-3">
                   <Button
                     type="primary"
@@ -225,19 +210,14 @@ export function AdminAccounts() {
         <span className="section-title">接入说明</span>
         <ul className="mt-3 flex flex-col gap-2 text-[12px] leading-relaxed text-subtle">
           <li>
-            · <span className="text-white">币安模拟盘（推荐）</span>：登录后在{' '}
+            · <span className="text-white">币安合约模拟盘（推荐）</span>：登录后到
             <span className="text-btc-light">https://demo.binance.com/en/my/settings/api-management</span>{' '}
-            创建密钥，环境选「模拟盘」。请求发往 <code className="text-btc-light">demo-api.binance.com</code>，
-            行情与正式盘一致，余额可随时重置。
+            创建密钥，并确认已勾选「启用未来(合约)」权限。合约请求发往{' '}
+            <code className="text-btc-light">demo-fapi.binance.com</code>，与现货共用同一套 API Key，
+            余额可在网页端随时重置。
           </li>
-          <li>
-            · <span className="text-white">币安旧测试网</span>：
-            <span className="text-btc-light">https://testnet.binance.vision</span> 申请，环境选「测试网」。
-            行情与正式盘相互独立，适合验证尚未上线的功能。
-          </li>
-          <li>· 欧意模拟盘：在 OKX 创建 API 时勾选「Demo trading」，并填写创建时设置的 Passphrase。</li>
-          <li>· 只想先跑通链路：保持运行模式为「模拟撮合」即可，无需任何密钥，下单结果按当前市价模拟撮合并写入数据库。</li>
-          <li>· 切换「实盘」前请务必先在模拟盘验证策略，并在风控配置中设置合理的单笔上限与回撤熔断。</li>
+          <li>· 只想先跑通链路：保持运行模式为「模拟撮合」即可，无需任何密钥，下单按当前市价模拟撮合并写入数据库。</li>
+          <li>· 切换「实盘」前请务必先在模拟盘验证策略，并设置合理的杠杆、强平距离预警与逐仓模式。</li>
           <li>
             · 访问境外接口受阻时，在 <code className="text-btc-light">.env</code> 配置{' '}
             <code className="text-btc-light">HTTPS_PROXY</code>（REST 与 WebSocket 同时生效）。
