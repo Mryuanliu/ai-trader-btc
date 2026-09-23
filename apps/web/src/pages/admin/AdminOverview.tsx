@@ -22,8 +22,7 @@ import {
   formatSignedUsd,
   formatTime,
   formatUsd,
-  lotStopPrice,
-  lotTakeProfitPrice,
+
   trendClass,
 } from '@/utils/format';
 
@@ -352,28 +351,6 @@ export function AdminOverview() {
                 width: 120,
                 align: 'right',
                 render: (v: number) => <span className="num">{formatPrice(v)}</span>,
-              },
-              {
-                title: '止损 / 止盈',
-                key: 'tpSl',
-                width: 170,
-                align: 'center',
-                render: (_, row) => (
-                  <div className="flex flex-col leading-tight">
-                    <span className="text-[10px]">
-                      <span className="text-muted">SL </span>
-                      <span className="num text-down">
-                        {formatPrice(lotStopPrice(row.direction, Number(row.entryPrice), Number(row.stopLossPct) || 0))}
-                      </span>
-                    </span>
-                    <span className="text-[10px]">
-                      <span className="text-muted">TP </span>
-                      <span className="num text-up">
-                        {formatPrice(lotTakeProfitPrice(row.direction, Number(row.entryPrice), Number(row.takeProfitPct) || 0))}
-                      </span>
-                    </span>
-                  </div>
-                ),
               },
               {
                 title: '浮动盈亏',

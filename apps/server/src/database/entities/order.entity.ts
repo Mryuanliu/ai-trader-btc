@@ -53,11 +53,28 @@ export class OrderEntity {
   @Column({ type: 'varchar', length: 8 })
   side: OrderSide;
 
-  @Column({ type: 'varchar', length: 8 })
+  /**
+   * 订单类型。
+   *
+   * 长度 24 是为了容纳条件单：`STOP_MARKET`(11) / `TAKE_PROFIT_MARKET`(18)。
+   * 原先的 varchar(8) 只够 MARKET/LIMIT，挂网格单会直接报
+   * "value too long for type character varying(8)"。
+   */
+  @Column({ type: 'varchar', length: 24 })
   type: OrderType;
 
   @Column({ type: 'float8', default: 0 })
   price: number;
+
+  /**
+   * 条件单触发价（STOP_MARKET / TAKE_PROFIT_MARKET）。
+   *
+   * 网格层的「挂单」靠它表达：策略挂出后订单停在 NEW，
+   * 价格触及由交易所触发成交，随后由对账任务补记成交与 Lot。
+   * 市价单为 0。
+   */
+  @Column({ type: 'float8', default: 0 })
+  stopPrice: number;
 
   @Column({ type: 'float8', default: 0 })
   quantity: number;
@@ -83,9 +100,6 @@ export class OrderEntity {
 
   @Column({ type: 'varchar', length: 16, default: 'manual' })
   source: OrderSource;
-
-  @Column({ type: 'varchar', length: 64, nullable: true })
-  decisionId: string | null;
 
   /** 合约杠杆倍数（下单时实际生效值）；现货恒为 0 */
   @Column({ type: 'int', default: 0 })

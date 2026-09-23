@@ -4,10 +4,10 @@ import type {
   MarketType,
   OrderSide,
   OrderStatus,
+  OrderType,
   RunMode,
 } from '../types/common';
 import type { MarketPulse, Ticker } from '../types/market';
-import type { DecisionSummary } from '../types/agent';
 import type { NewsItemDTO, KeywordTrend } from '../types/news';
 
 export interface PageResult<T> {
@@ -67,7 +67,6 @@ export interface OverviewDTO {
   };
   marketPulse: MarketPulse;
   recentOrders: RecentOrderItem[];
-  recentDecisions: DecisionSummary[];
   news: NewsItemDTO[];
   keywordTrends: KeywordTrend[];
   dataSources: DataSourceStatus[];
@@ -78,7 +77,7 @@ export interface RecentOrderItem {
   id: string;
   symbol: string;
   side: OrderSide;
-  type: 'MARKET' | 'LIMIT';
+  type: OrderType;
   price: number;
   quantity: number;
   status: OrderStatus;
@@ -107,26 +106,15 @@ export interface DataSourceStatus {
   latencyMs?: number;
 }
 
-export interface PlaceOrderRequest {
-  exchange: ExchangeCode;
-  symbol: string;
-  side: OrderSide;
-  type: 'MARKET' | 'LIMIT';
-  quantity: number;
-  price?: number;
-  /** 实盘下单需要的二次确认 token */
-  confirmToken?: string;
-  /**
-   * 平仓目标 Lot：手动平仓时必须指定要全量平掉的仓位单（UI 列出未完结 Lot 供选择）。
-   * 不传时策略链路不允许 SELL/平仓方向（Lot 模型下策略只负责入场）。
-   */
-  lotId?: string;
-  /** 本单止盈止损（hybrid AI 逐单给参数；不传用全局兜底 SL 2%/TP 4%） */
-  stopLossPct?: number;
-  takeProfitPct?: number;
-}
+// 注：`PlaceOrderRequest`（现货下单请求）已移除——
+// 现货链路早已删除，手动下单统一走 `POST /api/futures/order`。
 
-/** 仓位单（Lot）对外视图：订单页分组、持仓页列表共用 */
+/**
+ * 仓位单（Lot）对外视图。
+ *
+ * 已移除 `stopLossPct` / `takeProfitPct`：逐层止盈止损随决策引擎一并废弃，
+ * 出场由策略负责（马丁网格用篮子追踪止盈），这两个字段只会恒为 0 造成误导。
+ */
 export interface LotDTO {
   id: string;
   market: 'spot' | 'futures';
@@ -141,8 +129,6 @@ export interface LotDTO {
   exitPrice: number | null;
   exitFeeUsdt: number | null;
   status: 'OPEN' | 'CLOSED' | 'CANCELLED';
-  stopLossPct: number;
-  takeProfitPct: number;
   exitReason: string | null;
   realizedPnl: number | null;
   returnPct: number | null;
@@ -159,12 +145,102 @@ export interface ApiError {
   timestamp: string;
 }
 
-/** WebSocket 推送事件契约 */
+/** WebSocket 推送事件契约（decision/risk 事件随决策引擎与风控一并移除） */
 export type RealtimeEvent =
   | { type: 'price'; payload: { symbol: string; price: number; changePercent24h: number; ts: number } }
   | { type: 'order'; payload: RecentOrderItem }
-  | { type: 'decision'; payload: DecisionSummary }
-  | { type: 'risk'; payload: { level: 'info' | 'warn' | 'error'; message: string; ts: number } }
   | { type: 'news'; payload: NewsItemDTO };
 
 export const WS_EVENT = 'realtime';
+
+// ---------------------------------------------------------------- 策略托管
+
+/** 策略卡片（策略合集页展示） */
+export interface StrategyDescriptor {
+  name: string;
+  label: string;
+  description: string;
+  defaultParams: Record<string, unknown>;
+  /** 参数 JSON Schema：前端据此动态渲染配置表单 */
+  paramSchema: Record<string, unknown>;
+}
+
+/** 策略运行状态 */
+export interface StrategyRunStatus {
+  running: boolean;
+  /** 当前运行的策略名 */
+  name: string | null;
+  label: string | null;
+  /** 当前生效参数 */
+  params: Record<string, unknown> | null;
+  startedAt: string | null;
+  lastTickAt: string | null;
+  /** 最近一次 tick 的错误（无错误为 null） */
+  lastError: string | null;
+  /** 策略自定义状态（如网格层数、篮子峰值） */
+  state: Record<string, unknown> | null;
+  /** 当前未完结仓位单数量 */
+  openLotCount: number;
+}
+
+/** 阻止策略启动的未完结仓位单（需用户手动平掉） */
+export interface BlockingLot {
+  id: string;
+  direction: string;
+  quantity: number;
+  entryPrice: number;
+  unrealizedPnl: number;
+  openedAt: string;
+}
+
+/**
+ * 启动结果。
+ *
+ * `ok=false` 时看 `blockingLots`：
+ * 有值表示「上一轮策略留下的仓位单还没平」，需用户手动处理；
+ * 为空表示其他原因（策略名错误、已有策略在跑），看 `message`。
+ */
+export interface StrategyStartResult {
+  ok: boolean;
+  status: StrategyRunStatus;
+  blockingLots?: BlockingLot[];
+  message: string;
+}
+
+/**
+ * AI 行情分析结果。
+ *
+ * 这是平台**唯一**使用大模型的地方：只解读行情、不给交易指令。
+ * 买卖决策完全属于策略——AI 的建议不参与任何下单逻辑。
+ */
+export interface AiMarketAnalysis {
+  symbol: string;
+  price: number;
+  changePercent24h: number;
+  /** 本地指标：ATR14（1h） */
+  atr: number;
+  /** 本地指标：价格相对 30 周期均线的偏离（%） */
+  maDeviationPct: number;
+  /** AI 判定的市场状态 */
+  regime: 'trending' | 'ranging' | 'volatile' | null;
+  /** 该判断的置信度 0~1 */
+  regimeConfidence: number | null;
+  /** 建议激进度 0~1 */
+  aggression: number | null;
+  /** 新闻情绪 -1~1 */
+  newsSentiment: number | null;
+  /** 持仓视角 */
+  positionView: 'positive' | 'neutral' | 'negative' | null;
+  /** AI 点评（一句话） */
+  comment: string | null;
+  /** 推理模型的思维链（可能为空） */
+  reasoning: string | null;
+  /** 实际参与分析的模型名 */
+  model: string | null;
+  /** 分析是否成功；false 时 error 有原因 */
+  ok: boolean;
+  error: string | null;
+  /** 参与分析的新闻条数 */
+  newsCount: number;
+  generatedAt: string;
+}

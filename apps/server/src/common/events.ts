@@ -1,15 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { Observable, Subject, filter, map } from 'rxjs';
-import { Candle, NewsItemDTO, PriceTick, Timeframe } from '@ai-trader/shared';
-import { DecisionSummary, OrderDTO } from '@ai-trader/shared';
-import { RiskLevel } from '../database/entities';
+import { Candle, NewsItemDTO, OrderDTO, PriceTick, Timeframe } from '@ai-trader/shared';
 
+/**
+ * 进程内事件（网关据此向前端广播）。
+ *
+ * `decision`（决策产出）与 `risk`（风控事件）已随决策引擎/风控移除——
+ * 平台不再产生这两类事件，前端改为直接拉取策略状态。
+ */
 export interface AppEventMap {
   price: PriceTick;
   candle: { symbol: string; interval: Timeframe; candle: Candle };
   order: OrderDTO;
-  decision: DecisionSummary;
-  risk: { level: RiskLevel; message: string; ts: number };
   news: NewsItemDTO;
 }
 

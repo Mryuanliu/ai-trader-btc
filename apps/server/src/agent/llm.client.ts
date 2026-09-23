@@ -2,13 +2,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { ContextInsight } from '@ai-trader/shared';
 import { isTruthy } from '../common/env.util';
 
 /**
- * AI 上下文分析输出（元参数，非买卖指令）。
+ * AI 行情解读输出。
+ *
+ * 这是 LLM 的输出契约，只服务于「AI 行情」页面——
+ * 平台不使用它的任何字段去下单（策略自治）。
+ * 原定义在 shared 的 types/agent.ts，随决策引擎清理一并内联到这里。
+ */
+export interface ContextInsight {
+  regime: 'trending' | 'ranging' | 'volatile';
+  regimeConfidence: number;
+  aggression: number;
+  newsSentiment: number;
+  positionView: 'positive' | 'neutral' | 'negative';
+  suggestedStopLossPct?: number;
+  suggestedTakeProfitPct?: number;
+  comment?: string;
+}
+
+/**
+ * 模型输出 schema。
  * 注：原让模型直出 BUY/SELL/HOLD 的 DecisionSchema 已移除——
- * AI 不再下达买卖指令，只提供市场上下文，由策略执行（分层裁决）。
+ * AI 不下达买卖指令，只输出市场解读。
  */
 export const ContextInsightSchema = z.object({
   regime: z.enum(['trending', 'ranging', 'volatile']),

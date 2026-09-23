@@ -1,13 +1,6 @@
 import { floorToStep } from './common';
 import type { LotDirection } from '../position';
-import type {
-  DecisionAction,
-  MarketType,
-  OrderSide,
-  RunMode,
-  Timeframe,
-} from './common';
-import type { DecisionLane, ExitRulesShape, StrategyName } from './agent';
+import type { DecisionAction, MarketType, OrderSide, RunMode } from './common';
 
 /** 持仓方向：LONG=多头，SHORT=空头 */
 export const POSITION_SIDES = ['LONG', 'SHORT'] as const;
@@ -43,48 +36,9 @@ export type FuturesOrderIntent =
   /** 反手信号：先只平仓（reduceOnly），反手留到下一周期无持仓时再开，避免单次误判放大风险 */
   | { kind: 'close'; side: OrderSide; positionSide: PositionSide; reduceOnly: true };
 
-/**
- * 由「策略动作 + 当前净持仓」推导合约下单意图。
- *
- * | 策略 | 无持仓 | 持多 | 持空 |
- * |---|---|---|---|
- * | BUY  | 开多   | 加多 | 平空（reduceOnly） |
- * | SELL | 开空   | 平多（reduceOnly） | 加空 |
- * | HOLD | 观望   | 观望 | 观望 |
- *
- * 反向信号只平仓不反手：平完后的下一个决策周期若信号仍然是反方向，
- * 此时持仓已为 0，会自然落到「开仓」分支。这样把「平+开」拆成两次决策，
- * 即便中间行情剧烈波动也不会在同一跳内留下双倍仓位。
- *
- * @param action 策略输出的动作
- * @param currentQty 当前净持仓：正=多头，负=空头，0=无持仓
- */
-export function resolveFuturesOrderIntent(
-  action: DecisionAction,
-  currentQty: number,
-): FuturesOrderIntent {
-  if (action === 'HOLD') {
-    return { kind: 'hold', reason: '策略输出观望' };
-  }
-
-  const held = Number(currentQty);
-  const long = held > 0;
-  const short = held < 0;
-
-  if (action === 'BUY') {
-    // 持空时买入 = 平空；其余为开多/加多
-    if (short) return { kind: 'close', side: 'BUY', positionSide: 'SHORT', reduceOnly: true };
-    return long
-      ? { kind: 'add', side: 'BUY', positionSide: 'LONG', reduceOnly: false }
-      : { kind: 'open', side: 'BUY', positionSide: 'LONG', reduceOnly: false };
-  }
-
-  // action === 'SELL'
-  if (long) return { kind: 'close', side: 'SELL', positionSide: 'LONG', reduceOnly: true };
-  return short
-    ? { kind: 'add', side: 'SELL', positionSide: 'SHORT', reduceOnly: false }
-    : { kind: 'open', side: 'SELL', positionSide: 'SHORT', reduceOnly: false };
-}
+// 注：`resolveFuturesOrderIntent(action, currentQty)`（净持仓语义）已移除。
+// 它依赖「HOLD 不动作、反向信号先平后开」的决策引擎前提；策略托管后
+// 策略直接指定方向，合约侧只剩 Lot 语义的 resolveFuturesOrderIntentLot。
 
 /**
  * 该意图是否会产生真实下单（hold 不产生）。
@@ -96,12 +50,7 @@ export function isActionableIntent(
   return intent.kind !== 'hold';
 }
 
-/** 是否为观望意图（类型守卫，便于读取 reason） */
-export function isHoldIntent(
-  intent: FuturesOrderIntent,
-): intent is Extract<FuturesOrderIntent, { kind: 'hold' }> {
-  return intent.kind === 'hold';
-}
+// 注：`isHoldIntent` 已移除（无消费者；hold 分支用判别式 intent.kind === 'hold' 即可）
 
 // ---------------------------------------------------------------------------
 // Position Lot（hedge mode）语义
@@ -110,8 +59,9 @@ export function isHoldIntent(
 // 多空 Lot 共存（锁仓）。反向信号不再平仓——出场只有两条路：
 // 逐 Lot TP/SL 触发（checkLotExit）或手动平仓（指定 lotId 全量平掉）。
 
-/** 每方向未完结 Lot 上限：超出时同向信号被忽略并记 blocking reason */
-export const MAX_OPEN_LOTS_PER_DIRECTION = 3;
+// 注：`MAX_OPEN_LOTS_PER_DIRECTION`（每方向 Lot 上限 3）已移除——
+// 它是决策引擎的全局约束；策略托管后层数上限由策略参数自己定
+//（马丁网格为 maxLayersPerSide，默认 6）。
 
 /**
  * Lot 模型下的意图解析：动作只决定开仓方向，与当前净持仓无关。
@@ -203,67 +153,40 @@ export function computeFuturesOrderQty(input: FuturesSizingInput): FuturesSizing
   return { quantity, notional: quantity * price, margin: (quantity * price) / leverage };
 }
 
-/** 合约风控拒绝码与文案 */
-export const FUTURES_RISK_REASONS: Record<string, string> = {
-  LEVERAGE_CLAMPED: '杠杆超出允许范围，已钳制',
-  BELOW_MIN_NOTIONAL: '名义价值低于交易所最小名义',
-  INSUFFICIENT_MARGIN: '可用保证金不足',
-  LIQUIDATION_TOO_CLOSE: '距强平价过近，禁止加仓',
-  LIVE_MODE_CONFIRM_REQUIRED: '实盘下单缺少二次确认 Token',
-  INVALID_QUANTITY: '下单数量不合法',
-  NO_POSITION_TO_CLOSE: '无持仓可平',
-  ADAPTER_NOT_TRADABLE: '合约适配器不支持交易',
-};
+// 注：`FUTURES_RISK_REASONS`（风控拒绝码）已移除——平台不做风控，
+// 下单失败统一由交易所错误与前置校验（最小名义/数量精度）表达。
 
-/** 合约 Agent 配置（独立链路，与现货 agent_configs 互不干扰） */
+/**
+ * 合约链路配置。
+ *
+ * 策略托管平台定位下，这里只保留**平台自身需要**的东西：
+ * 账户与交易的基本参数。策略参数、链路选择、置信度阈值、杠杆上限、
+ * 强平距离、出场规则等全部移除——它们是策略的内部事务，由策略自己管。
+ */
 export interface FuturesAgentConfigShape {
-  name: string;
-  /** 合约链路开关（用户要求默认开启） */
+  /** 合约链路开关 */
   enabled: boolean;
   symbol: string;
-  timeframe: Timeframe;
-  decisionIntervalSec: number;
   mode: RunMode;
-  /** 保证金占用比例 0~1 */
+  /** 保证金占用比例 0~1（平台按此推导下单数量） */
   positionPct: number;
-  /** 触发下单的最低置信度 0~1 */
-  minConfidence: number;
-  /** 开仓杠杆，钳制 1~maxLeverage */
+  /** 开仓杠杆 */
   leverage: number;
-  /** 杠杆硬上限（管理员可配，默认 10） */
-  maxLeverage: number;
   /** 保证金模式，默认逐仓（单仓风险隔离） */
   marginType: MarginType;
-  /** 距强平价低于该比例时禁止加仓 */
-  liquidationBufferPct: number;
-  decisionLane: DecisionLane;
-  strategyName: StrategyName;
-  strategyParams: Record<string, unknown>;
-  exitRules: ExitRulesShape;
   /** 最近一次运行时间（ISO 字符串）；尚未运行过为 null */
   lastRunAt: string | null;
 }
 
 export const DEFAULT_FUTURES_AGENT_CONFIG: FuturesAgentConfigShape = {
-  name: 'BTC 合约 Agent',
   enabled: true,
   symbol: 'BTCUSDT',
-  timeframe: '5m',
-  decisionIntervalSec: 300,
   mode: 'dry_run',
   positionPct: 0.1,
-  minConfidence: 0.6,
-  // 默认 5 倍：方案拍板值。杠杆是双刃剑，5 倍下 20% 反向波动即爆仓，
-  // 必须配合 maxLeverage 上限与强平距离预警一起用。
+  // 默认 5 倍：杠杆是双刃剑，5 倍下约 20% 反向波动即爆仓。
+  // 平台不设上限——用多少由策略自己决定（定位是策略托管平台）。
   leverage: 5,
-  maxLeverage: 10,
-  // 逐仓：单个仓位亏损不影响账户其他资金
   marginType: 'isolated',
-  liquidationBufferPct: 0.15,
-  decisionLane: 'hybrid',
-  strategyName: 'trend_following',
-  strategyParams: {},
-  exitRules: { stopLossPct: null, takeProfitPct: null },
   lastRunAt: null,
 };
 

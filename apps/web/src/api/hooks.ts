@@ -8,10 +8,10 @@ import {
 import { http } from './client';
 import { useRealtimeStore } from '@/ws/realtime';
 import type {
+  AiMarketAnalysis,
   Candle,
-  DecisionRecord,
-  DecisionSummary,
   Environment,
+  FuturesAgentConfigShape,
   KeywordTrend,
   LotDTO,
   MarketPulse,
@@ -19,7 +19,9 @@ import type {
   OrderDTO,
   OverviewDTO,
   PageResult,
-  PlaceOrderRequest,
+  StrategyDescriptor,
+  StrategyRunStatus,
+  StrategyStartResult,
   Ticker,
   Timeframe,
   ExchangeCode,
@@ -151,27 +153,6 @@ export function useOrders(params: {
   });
 }
 
-export function useRecentOrders(limit = 10) {
-  return useQuery<OrderDTO[]>({
-    queryKey: ['orders', 'recent', limit],
-    queryFn: () => http.get('/orders/recent', { params: { limit } }),
-    refetchInterval: 15000,
-  });
-}
-
-export function usePlaceOrder() {
-  const client = useQueryClient();
-  return useMutation<OrderDTO, Error, PlaceOrderRequest>({
-    mutationFn: (body) => http.post('/orders', body),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['orders'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-      void client.invalidateQueries({ queryKey: ['lots'] });
-      void client.invalidateQueries({ queryKey: ['positions'] });
-    },
-  });
-}
-
 /** 未完结仓位单列表：交易面板「选择要平的 Lot」、持仓页列表共用 */
 export function useOpenLots(params: { market?: 'spot' | 'futures'; symbol?: string }) {
   return useQuery<LotDTO[]>({
@@ -182,296 +163,6 @@ export function useOpenLots(params: { market?: 'spot' | 'futures'; symbol?: stri
   });
 }
 
-/** 全量仓位单（含已完结）：订单页按 Lot 分组、对账用 */
-export function useAllLots(params: { market?: 'spot' | 'futures'; symbol?: string }) {
-  return useQuery<LotDTO[]>({
-    queryKey: ['lots', 'all', params],
-    queryFn: () => http.get('/lots', { params: { ...params, status: 'all' } }),
-    enabled: Boolean(params.market),
-    refetchInterval: 30000,
-  });
-}
-
-export function useCancelOrder() {
-  const client = useQueryClient();
-  return useMutation<OrderDTO, Error, string>({
-    mutationFn: (id) => http.post(`/orders/${id}/cancel`),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['orders'] });
-      void client.invalidateQueries({ queryKey: ['overview'] });
-    },
-  });
-}
-
-// ------------------------------------------------------------------ 合约决策
-export function useDecisions(params: {
-  page?: number;
-  pageSize?: number;
-  action?: string;
-  executedOnly?: boolean;
-  keyword?: string;
-  lane?: string;
-}) {
-  return useQuery<PageResult<DecisionSummary>>({
-    queryKey: ['decisions', params],
-    queryFn: () => http.get('/futures/decisions', { params }),
-    refetchInterval: 30000,
-  });
-}
-
-/** 决策链路统计（阶段 6）：按链路分组的决策量、降级量与动作分布 */
-export interface LaneStats {
-  total: number;
-  degradedTotal: number;
-  lanes: { lane: 'strategy' | 'hybrid'; count: number; degraded: number; buys: number; sells: number; holds: number }[];
-}
-
-export function useLaneStats() {
-  return useQuery<LaneStats>({
-    queryKey: ['decision-lane-stats'],
-    queryFn: () => http.get('/futures/decisions/stats'),
-    refetchInterval: 60000,
-  });
-}
-
-// ------------------------------------------------------------------ 决策诊断（策略增强 A 期）
-
-/** 信号投票统计：各信号的中性/多/空占比，暴露「信号长期不表态」问题 */
-export interface SignalVoteStat {
-  name: string;
-  label: string;
-  total: number;
-  neutralRate: number;
-  bullishRate: number;
-  bearishRate: number;
-}
-
-/** 单个信号对综合倾向的贡献 */
-export interface SignalContribution {
-  name: string;
-  label: string;
-  bias: 'bullish' | 'bearish' | 'neutral';
-  weight: number;
-  signed: number;
-  note?: string;
-}
-
-/** 最接近触发的观望记录（差一点就开仓的） */
-export interface NearMiss {
-  id: string;
-  createdAt: string;
-  proximity: number | null;
-  blockingReason: string | null;
-  score: number | null;
-  requiredScore: number | null;
-  contributions: SignalContribution[];
-}
-
-/** 决策诊断聚合：回答「为什么没开单」 */
-export interface DecisionDiagnostics {
-  windowHours: number;
-  total: number;
-  holdTotal: number;
-  /** 阻塞原因 Top 排行（含占比） */
-  topReasons: { code: string; count: number; share: number }[];
-  /** 接近度分布：观望决策堆积在哪个区间 */
-  proximityBuckets: { bucket: string; count: number }[];
-  /** 最接近触发的观望，供下钻 */
-  nearMisses: NearMiss[];
-  /** 各信号投票率 */
-  signalStats: SignalVoteStat[];
-}
-
-// ------------------------------------------------------------------ 回合盈亏（订单页）
-
-/** 一个完整回合（开仓→平仓）的盈亏明细 */
-export interface RoundTrip {
-  direction: 'long' | 'short';
-  qty: number;
-  entryPrice: number;
-  exitPrice: number;
-  grossPnl: number;
-  fee: number;
-  netPnl: number;
-  returnPct: number;
-  openedAt: number;
-  closedAt: number;
-  closeOrderId?: string;
-}
-
-export interface RoundTripSummary {
-  count: number;
-  wins: number;
-  losses: number;
-  totalNetPnl: number;
-  winRate: number;
-  bestPnl: number;
-  worstPnl: number;
-}
-
-export interface RoundTripsResponse {
-  market: 'spot' | 'futures';
-  symbol: string;
-  fillCount: number;
-  trips: RoundTrip[];
-  summary: RoundTripSummary;
-}
-
-export function useRoundTrips(symbol?: string) {
-  return useQuery<RoundTripsResponse>({
-    queryKey: ['round-trips', symbol ?? 'all'],
-    queryFn: () =>
-      http.get('/orders/round-trips' + (symbol ? `?symbol=${symbol}` : '')),
-    refetchInterval: 30000,
-  });
-}
-
-export function useDecisionDiagnostics(windowHours = 24) {
-  return useQuery<DecisionDiagnostics>({
-    queryKey: ['decision-diagnostics', windowHours],
-    queryFn: () => http.get(`/futures/decisions/diagnostics?windowHours=${windowHours}`),
-    refetchInterval: 60000,
-  });
-}
-
-// ------------------------------------------------------------------ 回测（阶段 6）
-export interface BacktestRequest {
-  symbol?: string;
-  interval?: string;
-  from: string;
-  to: string;
-  initialCapital?: number;
-  slippageBps?: number;
-  feeRateBps?: number;
-  positionPct?: number;
-  minConfidence?: number;
-  strategyName?: string;
-  strategyParams?: Record<string, unknown>;
-  exitRules?: { stopLossPct?: number | null; takeProfitPct?: number | null };
-  warmupBars?: number;
-  autoBackfill?: boolean;
-  /** 兼容字段：本项目仅合约回测，忽略现货 */
-  market?: 'futures';
-  /** 合约杠杆 1~10 */
-  leverage?: number;
-  /** 合约回测附加 1x/3x/5x 杠杆对比 */
-  compareLeverage?: boolean;
-}
-
-export interface BacktestReportDTO {
-  meta: {
-    symbol: string;
-    interval: string;
-    from: number;
-    to: number;
-    candleCount: number;
-    warmupBars: number;
-    initialCapital: number;
-    strategyName: string;
-    strategyParams: Record<string, unknown>;
-    exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
-    downsampled?: boolean;
-    /** 合约专属 */
-    leverage?: number;
-    stepSize?: number;
-    minNotional?: number;
-    totalFundingPaid?: number;
-    liquidationCount?: number;
-  };
-  metrics: {
-    totalReturnPct: number;
-    annualizedReturnPct: number;
-    maxDrawdownPct: number;
-    sharpeRatio: number;
-    winRate: number;
-    profitFactor: number;
-    tradeCount: number;
-    buyHoldReturnPct: number;
-    excessVsBuyHoldPct: number;
-  };
-  equityCurve: { time: number; equity: number; drawdownPct: number }[];
-  trades: {
-    time: number;
-    side: 'BUY' | 'SELL';
-    price: number;
-    quantity: number;
-    fee: number;
-    equityAfter: number;
-    decisionConfidence: number;
-    /** 合约专属 */
-    positionSide?: 'LONG' | 'SHORT';
-    reduceOnly?: boolean;
-    margin?: number;
-    notional?: number;
-  }[];
-  /** compareLeverage=true 时：1x/3x/5x 对比行 */
-  comparison?: {
-    leverage: number;
-    totalReturnPct: number;
-    annualizedReturnPct: number;
-    maxDrawdownPct: number;
-    sharpeRatio: number;
-    winRate: number;
-    profitFactor: number;
-    tradeCount: number;
-    liquidationCount: number;
-    totalFundingPaid: number;
-  }[];
-  /** 强平事件（合约） */
-  liquidations?: {
-    time: number;
-    price: number;
-    loss: number;
-    positionSide: 'LONG' | 'SHORT';
-    quantity: number;
-  }[];
-}
-
-export function useBacktestStrategies() {
-  return useQuery<
-    {
-      name: string;
-      label: string;
-      description: string;
-      defaultParams: Record<string, unknown>;
-      paramSchema: Record<string, unknown> | null;
-    }[]
-  >({
-    queryKey: ['backtest-strategies'],
-    queryFn: () => http.get('/backtest/strategies'),
-    staleTime: Infinity,
-  });
-}
-
-export interface BacktestProgressDTO {
-  stage: 'loading' | 'backfill' | 'compute';
-  pct: number;
-  detail: string;
-}
-
-export function useRunBacktest() {
-  return useMutation<BacktestReportDTO, Error, BacktestRequest>({
-    mutationFn: (req) => http.post('/backtest/run', req),
-  });
-}
-
-/** 回测执行进度：仅在回测 pending 时轮询（后端计算分块让出事件循环，轮询才有响应） */
-export function useBacktestProgress(enabled: boolean) {
-  return useQuery<BacktestProgressDTO | null>({
-    queryKey: ['backtest-progress'],
-    queryFn: () => http.get('/backtest/progress'),
-    refetchInterval: 300,
-    enabled,
-  });
-}
-
-export function useDecisionDetail(id: string | null) {
-  return useQuery<DecisionRecord>({
-    queryKey: ['decision', id],
-    queryFn: () => http.get(`/futures/decisions/${id}`),
-    enabled: Boolean(id),
-  });
-}
 
 // ------------------------------------------------------------------ 新闻
 export function useNews(params: { page?: number; pageSize?: number; source?: string; keyword?: string }) {
@@ -508,23 +199,6 @@ export function useRefreshNews() {
   });
 }
 
-// ------------------------------------------------------------------ 风控
-export function useRiskEvents(params: { page?: number; pageSize?: number }) {
-  return useQuery<
-    PageResult<{
-      id: string;
-      type: string;
-      level: string;
-      message: string;
-      symbol: string;
-      createdAt: string;
-    }>
-  >({
-    queryKey: ['risk', 'events', params],
-    queryFn: () => http.get('/risk/events', { params }),
-    refetchInterval: 30000,
-  });
-}
 
 // ------------------------------------------------------------------ 交易所账户
 export interface ExchangeAccountView {
@@ -589,25 +263,6 @@ export interface FuturesPositionDTO {
   liquidationDistancePct: number | null;
 }
 
-export interface FuturesConfigDTO {
-  name: string;
-  enabled: boolean;
-  symbol: string;
-  timeframe: string;
-  decisionIntervalSec: number;
-  mode: string;
-  positionPct: number;
-  minConfidence: number;
-  leverage: number;
-  maxLeverage: number;
-  marginType: 'isolated' | 'cross';
-  liquidationBufferPct: number;
-  decisionLane: string;
-  strategyName: string;
-  strategyParams: Record<string, unknown>;
-  exitRules: { stopLossPct: number | null; takeProfitPct: number | null };
-  lastRunAt: string | null;
-}
 
 export function useFuturesPositions() {
   return useQuery<FuturesPositionDTO[]>({
@@ -626,7 +281,7 @@ export function useFuturesMargin() {
 }
 
 export function useFuturesConfig() {
-  return useQuery<FuturesConfigDTO>({
+  return useQuery<FuturesAgentConfigShape>({
     queryKey: ['futures', 'config'],
     queryFn: () => http.get('/futures/config'),
     refetchInterval: 10000,
@@ -635,7 +290,7 @@ export function useFuturesConfig() {
 
 export function useUpdateFuturesConfig() {
   const client = useQueryClient();
-  return useMutation<FuturesConfigDTO, Error, Record<string, unknown>>({
+  return useMutation<FuturesAgentConfigShape, Error, Record<string, unknown>>({
     mutationFn: (patch) => http.patch('/futures/config', patch),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ['futures', 'config'] });
@@ -672,28 +327,9 @@ export function useFuturesPlaceOrder() {
   });
 }
 
-export function useRunFuturesEngine() {
-  const client = useQueryClient();
-  return useMutation<
-    { action: string; confidence: number; lane: string; riskPassed: boolean; orderId: string | null },
-    Error,
-    void
-  >({
-    mutationFn: () => http.post('/futures/run'),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ['futures', 'decisions'] });
-      void client.invalidateQueries({ queryKey: ['futures', 'positions'] });
-    },
-  });
-}
-
-export function useFuturesHealth() {
-  return useQuery<{ consecutiveFailures: number; nextRetryAt: number; tripped: boolean; running: boolean }>({
-    queryKey: ['futures', 'health'],
-    queryFn: () => http.get('/futures/health'),
-    refetchInterval: 10000,
-  });
-}
+// useRunFuturesEngine（手动触发一次决策）与 useFuturesHealth（熔断健康度）
+// 已移除：决策引擎与熔断都不存在了，对应后端路由也已删除。
+// 策略的启动/停止/状态见下方「策略托管」区块。
 
 // ------------------------------------------------------------------ 鉴权
 export function useLogin() {
@@ -703,5 +339,77 @@ export function useLogin() {
     { username: string; password: string }
   >({
     mutationFn: (body) => http.post('/auth/login', body),
+  });
+}
+
+// ---------------------------------------------------------------- 策略托管
+
+/** 策略合集（策略卡片页） */
+export function useStrategies() {
+  return useQuery<StrategyDescriptor[]>({
+    queryKey: ['strategies'],
+    queryFn: () => http.get('/strategy'),
+  });
+}
+
+/** 策略运行状态（轮询：便于观察网格层数与 tick 结果） */
+export function useStrategyStatus(refetchInterval = 5000) {
+  return useQuery<StrategyRunStatus>({
+    queryKey: ['strategy-status'],
+    queryFn: () => http.get('/strategy/status'),
+    refetchInterval,
+  });
+}
+
+/**
+ * 启动策略。
+ *
+ * 注意返回体是 200 + `{ ok:false, blockingLots }` 而非抛错：
+ * 「上一轮策略还有仓位没平」是正常的业务分支，不是异常。
+ */
+export function useStartStrategy() {
+  const qc = useQueryClient();
+  return useMutation<
+    StrategyStartResult,
+    Error,
+    { name: string; params?: Record<string, unknown> }
+  >({
+    mutationFn: (body) => http.post('/strategy/start', body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['strategy-status'] });
+    },
+  });
+}
+
+/** 停止策略（不自动平仓，持仓保留由用户处理） */
+export function useStopStrategy() {
+  const qc = useQueryClient();
+  return useMutation<StrategyRunStatus, Error, void>({
+    mutationFn: () => http.post('/strategy/stop'),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['strategy-status'] });
+    },
+  });
+}
+
+// ------------------------------------------------------------ AI 行情分析
+
+/** AI 行情分析（60s 自动刷新，与后端缓存同步） */
+export function useAiMarketAnalysis(symbol = 'BTCUSDT') {
+  return useQuery<AiMarketAnalysis>({
+    queryKey: ['ai-market', symbol],
+    queryFn: () => http.get('/ai/market', { params: { symbol } }),
+    refetchInterval: 60_000,
+  });
+}
+
+/** 强制重新分析（绕过后端 60s 缓存） */
+export function useRefreshAiMarket() {
+  const qc = useQueryClient();
+  return useMutation<AiMarketAnalysis, Error, string>({
+    mutationFn: (symbol) => http.get('/ai/market', { params: { symbol, force: 'true' } }),
+    onSuccess: (data, symbol) => {
+      qc.setQueryData(['ai-market', symbol], data);
+    },
   });
 }

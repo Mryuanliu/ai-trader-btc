@@ -1,14 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import {
-  LotDirection,
-  LotExitReason,
-  MarketType,
-  MAX_OPEN_LOTS_PER_DIRECTION,
-  checkLotExit,
-  settleLotPnl,
-} from '@ai-trader/shared';
+import { LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
 import { OrderEntity } from '../database/entities/order.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 
@@ -23,15 +16,15 @@ export class LotService {
 
   /**
    * 开仓成交回调：为开仓订单建立 Lot（幂等，openOrderId 唯一）。
-   * TP/SL 参数在开仓时快照落库——hybrid AI 逐单可异，strategy 链路已在调用侧兜底。
+   *
+   * 不设逐层止盈止损：出场由策略负责（马丁网格用篮子追踪止盈），
+   * 平台既不扫描也不落这些参数。
    */
   async createFromOpenFill(params: {
     order: OrderEntity;
     fill: { price: number; quantity: number; fee: number };
-    stopLossPct: number;
-    takeProfitPct: number;
   }): Promise<PositionLotEntity | null> {
-    const { order, fill, stopLossPct, takeProfitPct } = params;
+    const { order, fill } = params;
     if (!(fill.quantity > 0) || !(fill.price > 0)) return null;
 
     const existing = await this.lotRepo.findOne({ where: { openOrderId: order.id } });
@@ -52,13 +45,11 @@ export class LotService {
       entryPrice: fill.price,
       entryFeeUsdt: fill.fee ?? 0,
       status: 'OPEN',
-      stopLossPct,
-      takeProfitPct,
       openedAt: new Date(),
     });
     const saved = await this.lotRepo.save(lot);
     this.logger.log(
-      `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price} (SL ${(stopLossPct * 100).toFixed(2)}%/TP ${(takeProfitPct * 100).toFixed(2)}%)`,
+      `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price}`,
     );
     return saved;
   }
@@ -126,14 +117,8 @@ export class LotService {
     });
   }
 
-  /** 指定方向的未完结数量（MAX_OPEN_LOTS 检查用） */
-  async countOpenByDirection(
-    market: MarketType,
-    symbol: string,
-    direction: LotDirection,
-  ): Promise<number> {
-    return this.lotRepo.count({ where: { market, symbol, direction, status: 'OPEN' } });
-  }
+  // countOpenByDirection（按方向计数）已移除：它只为已删的决策引擎
+  // MAX_OPEN_LOTS_PER_DIRECTION 检查服务，层数上限现在由策略自己管。
 
   /**
    * 取同方向**最早**的未完结 Lot（FIFO）。
@@ -158,29 +143,18 @@ export class LotService {
   }
 
   /**
-   * 逐 Lot TP/SL 判定（纯函数 checkLotExit，回测同口径）。
-   * @param price 当前标记价（现货现价 / 合约 markPrice）
-   * @returns 触发出场的 Lot 及原因；未触发返回空
+   * 按开仓订单查 Lot。
+   *
+   * 策略开仓后需要立刻拿回「我刚建的那个仓」的 id（用于后续独立平仓）；
+   * 真实成交延迟时可能查不到（Lot 由对账任务补建），调用方须容忍 null。
    */
-  async checkTpSl(
-    market: MarketType,
-    symbol: string,
-    price: number,
-  ): Promise<Array<{ lot: PositionLotEntity; reason: LotExitReason }>> {
-    const open = await this.listOpen(market, symbol);
-    const triggered: Array<{ lot: PositionLotEntity; reason: LotExitReason }> = [];
-    for (const lot of open) {
-      const hit = checkLotExit({
-        entryPrice: Number(lot.entryPrice),
-        direction: lot.direction,
-        stopLossPct: Number(lot.stopLossPct),
-        takeProfitPct: Number(lot.takeProfitPct),
-        price,
-      });
-      if (hit) triggered.push({ lot, reason: hit });
-    }
-    return triggered;
+  async findByOpenOrderId(openOrderId: string): Promise<PositionLotEntity | null> {
+    return this.lotRepo.findOne({ where: { openOrderId } });
   }
+
+  // checkTpSl（逐 Lot 止盈止损扫描）已移除：平台不再扫描逐层止盈止损，
+  // 出场完全由策略负责（马丁网格用篮子追踪止盈）。
+  // Lot 上的 stopLossPct / takeProfitPct 因此以 0 落库表示「关闭」。
 
   toDTO(lot: PositionLotEntity, currentPrice?: number) {
     const entryPrice = Number(lot.entryPrice);
@@ -210,8 +184,6 @@ export class LotService {
       exitPrice: lot.exitPrice === null ? null : Number(lot.exitPrice),
       exitFeeUsdt: lot.exitFeeUsdt === null ? null : Number(lot.exitFeeUsdt),
       status: lot.status,
-      stopLossPct: Number(lot.stopLossPct),
-      takeProfitPct: Number(lot.takeProfitPct),
       exitReason: lot.exitReason,
       realizedPnl: lot.realizedPnl === null ? null : Number(lot.realizedPnl),
       returnPct: lot.returnPct === null ? null : Number(lot.returnPct),

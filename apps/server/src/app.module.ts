@@ -14,19 +14,19 @@ import { AccountModule } from './account/account.module';
 import { AgentModule } from './agent/agent.module';
 import { TradingModule } from './trading/trading.module';
 import { FuturesModule } from './futures/futures.module';
-import { ExecutionModule } from './execution/execution.module';
 import { AuthModule } from './auth/auth.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { OverviewModule } from './overview/overview.module';
-import { BacktestModule } from './backtest/backtest.module';
+import { StrategyModule } from './strategy/strategy.module';
 import { AllExceptionsFilter } from './common/all-exception.filter';
 
 /**
- * 应用根模块（仅合约交易）。
+ * 应用根模块（策略托管平台）。
  *
- * `AgentModule` 只提供决策内核（L0~L3：指标/策略/链路分派/AI 上下文），
- * 消费者是合约引擎 FuturesEngine；现货引擎与现货配置已移除。
+ * 平台只提供三件事：绑定交易所、下单交易、监控订单。
+ * 交易逻辑全部由挂载的策略自行负责，平台不做任何风控；
+ * 回测与决策引擎已移除。
  */
 @Module({
   imports: [
@@ -55,10 +55,9 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     NewsModule,
     TradingModule,
     FuturesModule,
-    ExecutionModule,
     AgentModule,
     OverviewModule,
-    BacktestModule,
+    StrategyModule,
     GatewayModule,
     SchedulerModule,
   ],

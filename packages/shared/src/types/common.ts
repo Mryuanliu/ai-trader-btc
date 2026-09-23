@@ -74,7 +74,14 @@ export const RUN_MODE_LABELS: Record<RunMode, string> = {
 };
 
 export type OrderSide = 'BUY' | 'SELL';
-export type OrderType = 'MARKET' | 'LIMIT';
+/**
+ * 订单类型。
+ *
+ * `STOP_MARKET`：条件市价单——BUY 在价格**上破** stopPrice 时成交，
+ * SELL 在价格**下破**时成交（即 MT5 的 BuyStop / SellStop）。
+ * 策略的网格待成交层用它实现，触发由交易所负责，平台不轮询。
+ */
+export type OrderType = 'MARKET' | 'LIMIT' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
 
 export const ORDER_STATUSES = [
   'NEW',
@@ -132,34 +139,6 @@ export const FALLBACK_SYMBOL_FILTERS: Omit<SymbolFilters, 'symbol'> = {
   minNotional: 5,
 };
 
-/**
- * 风控参数安全边界。
- *
- * 风控各项原本以 `> 0` 作为启用判据，配置置 0 即等于关闭该规则。
- * 这里改为下界钳制：置 0 会回落到 min 而非失效，避免误配置导致裸奔。
- */
-export const RISK_LIMITS = {
-  maxOrderAmount: { min: 1, max: 1_000_000 },
-  maxDailyOrders: { min: 1, max: 1_000 },
-  maxDrawdownPct: { min: 0.1, max: 100 },
-  minOrderIntervalSec: { min: 0, max: 86_400 },
-  dailyLossLimit: { min: 1, max: 1_000_000 },
-  positionPct: { min: 0.0001, max: 1 },
-  minConfidence: { min: 0, max: 1 },
-  /** 模拟撮合滑点，单位 bps（1bps = 0.01%） */
-  slippageBps: { min: 0, max: 100 },
-  /** 手续费率，单位 bps，默认 10bps（0.1%） */
-  feeRateBps: { min: 0, max: 100 },
-  /** 单一标的持仓市值占总权益的上限（百分比），防止连续加仓导致过度集中 */
-  maxExposurePct: { min: 5, max: 100 },
-  /** 合约开仓杠杆倍数。上限 10：再高则小幅波动即强平，与「回撤优先」原则冲突 */
-  leverage: { min: 1, max: 10 },
-  /** 杠杆硬上限（管理员可下调，但不允许配出超过此值的天花板） */
-  maxLeverage: { min: 1, max: 20 },
-  /** 距强平价低于该比例时禁止加仓（0.15 = 15%） */
-  liquidationBufferPct: { min: 0.01, max: 0.5 },
-} as const;
-
 /** 由成交明细推导的持仓快照 */
 export interface PositionSnapshot {
   symbol: string;
@@ -211,16 +190,6 @@ export interface FuturesPositionSnapshot {
   liquidationDistancePct: number | null;
 }
 
-export type RiskLimitKey = keyof typeof RISK_LIMITS;
-
-/** 把数值钳制到合法区间；非有限值或非数字时回落到 min */
-export function clampRiskValue(key: RiskLimitKey, value: unknown): number {
-  const { min, max } = RISK_LIMITS[key];
-  const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n)) return min;
-  return Math.min(max, Math.max(min, n));
-}
-
 /**
  * 浮点安全的小数位数推断。
  * 0.01 -> 2；0.00001 -> 5；1 -> 0。
@@ -268,12 +237,6 @@ export function roundToStep(value: number, step: number): number {
 
 export type DecisionAction = 'BUY' | 'SELL' | 'HOLD';
 
-export const DECISION_ACTION_LABELS: Record<DecisionAction, string> = {
-  BUY: '买入',
-  SELL: '卖出',
-  HOLD: '观望',
-};
-
 export const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
 
@@ -296,7 +259,13 @@ export const TIMEFRAME_LABELS: Record<Timeframe, string> = {
 };
 
 /** 订单来源 */
-export type OrderSource = 'agent' | 'manual';
+/**
+ * 订单来源。
+ * - `strategy`：策略自动下单（当前唯一的自动来源）
+ * - `manual`：用户在面板手动下单
+ * - `agent`：历史遗留（旧决策引擎），仅存量数据中存在
+ */
+export type OrderSource = 'agent' | 'manual' | 'strategy';
 
 export const DEFAULT_SYMBOL = 'BTCUSDT';
 export const QUOTE_ASSET = 'USDT';

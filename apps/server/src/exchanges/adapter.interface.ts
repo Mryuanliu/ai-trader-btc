@@ -26,6 +26,16 @@ export interface PlaceOrderInput {
   type: OrderType;
   quantity: number;
   price?: number;
+  /**
+   * 条件单触发价（`STOP_MARKET` / `TAKE_PROFIT_MARKET` 必填）。
+   *
+   * 语义即 MT5 的挂单：
+   * - `STOP_MARKET` + BUY：价格**上破** stopPrice 时市价买入（BuyStop）
+   * - `STOP_MARKET` + SELL：价格**下破** stopPrice 时市价卖出（SellStop）
+   *
+   * 策略的网格待成交层用它实现，触发由交易所负责，平台不轮询等待。
+   */
+  stopPrice?: number;
   clientOrderId?: string;
   /**
    * 持仓方向（仅合约有意义，现货适配器忽略）。
@@ -40,12 +50,22 @@ export interface CancelOrderInput {
   symbol: string;
   exchangeOrderId?: string;
   clientOrderId?: string;
+  /**
+   * 是否为条件单（Algo Order）。
+   *
+   * 币安自 2025-12 起把止盈止损类订单迁到独立端点，
+   * 条件单的创建/查询/撤销都必须走 `/fapi/v1/algoOrder{...}`，
+   * 用 `/fapi/v1/order` 会被拒（-4120）。
+   */
+  conditional?: boolean;
 }
 
 export interface OrderQuery {
   symbol: string;
   exchangeOrderId?: string;
   clientOrderId?: string;
+  /** 见 CancelOrderInput.conditional */
+  conditional?: boolean;
 }
 
 export interface OrderResult {

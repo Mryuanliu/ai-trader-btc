@@ -71,13 +71,8 @@ export class PositionLotEntity {
   @Column({ type: 'varchar', length: 16 })
   status: LotStatus;
 
-  /** 本单生效的止损比例（开仓时落库快照：hybrid AI 逐单可异，strategy 用全局兜底） */
-  @Column({ type: 'decimal', precision: 10, scale: 6 })
-  stopLossPct: number;
-
-  /** 本单生效的止盈比例 */
-  @Column({ type: 'decimal', precision: 10, scale: 6 })
-  takeProfitPct: number;
+  // 注：原 stopLossPct / takeProfitPct（逐层止盈止损）已移除——
+  // 出场由策略负责（马丁网格用篮子追踪止盈），平台不扫描也不落这两个参数。
 
   @Column({ type: 'varchar', length: 24, nullable: true })
   exitReason: LotExitReason | null;

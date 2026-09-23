@@ -14,64 +14,14 @@ export interface PositionFill {
 // ---------------------------------------------------------------------------
 // Position Lot（订单级仓位单）
 // ---------------------------------------------------------------------------
-// 每笔开仓订单 = 一个 Lot，独立止盈止损、全量平仓后才算完结。
+// 每笔开仓订单 = 一个 Lot，全量平仓后才算完结。
 // 1 开仓单 ↔ 1 Lot ↔ 1 平仓单，回合配对不再依赖 FIFO 启发式。
+// 出场由策略决定（平台不设也不扫描逐层止盈止损）。
 
 export type LotDirection = 'LONG' | 'SHORT';
 export type LotStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
 /** 出场原因：信号出场（预留）/止损/止盈/手动/反手解除 */
 export type LotExitReason = 'SIGNAL' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'MANUAL' | 'REVERSE';
-
-/**
- * strategy 链路 / AI 降级时的逐单止盈止损兜底值（用户确认：SL 2% / TP 4%，盈亏比 2:1）。
- * hybrid 链路 AI 可逐单覆盖，但必须钳制到 [MIN_TP_SL, MAX_TP_SL] 防幻觉值。
- */
-export const DEFAULT_LOT_STOP_LOSS_PCT = 0.02;
-export const DEFAULT_LOT_TAKE_PROFIT_PCT = 0.04;
-export const MIN_TP_SL_PCT = 0.005;
-export const MAX_TP_SL_PCT = 0.1;
-
-/** 把 AI/配置给出的止盈止损参数钳制到安全区间，非法值回落默认 */
-export function clampLotTpSl(input: {
-  stopLossPct?: number | null;
-  takeProfitPct?: number | null;
-}): { stopLossPct: number; takeProfitPct: number } {
-  const clamp = (v: number | null | undefined, d: number) => {
-    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return d;
-    return Math.min(Math.max(v, MIN_TP_SL_PCT), MAX_TP_SL_PCT);
-  };
-  return {
-    stopLossPct: clamp(input.stopLossPct, DEFAULT_LOT_STOP_LOSS_PCT),
-    takeProfitPct: clamp(input.takeProfitPct, DEFAULT_LOT_TAKE_PROFIT_PCT),
-  };
-}
-
-/**
- * 逐 Lot 止盈止损判定（多头：跌破止损线/涨破止盈线；空头反向）。
- * 纯函数：决策循环、合约引擎、回测引擎共用同一判定，保证实盘与回测口径一致。
- *
- * @returns 触发类型；null = 未触发
- */
-export function checkLotExit(params: {
-  entryPrice: number;
-  direction: LotDirection;
-  stopLossPct: number;
-  takeProfitPct: number;
-  price: number;
-}): 'STOP_LOSS' | 'TAKE_PROFIT' | null {
-  const { entryPrice, direction, stopLossPct, takeProfitPct, price } = params;
-  if (!(entryPrice > 0) || !(price > 0)) return null;
-
-  if (direction === 'LONG') {
-    if (price <= entryPrice * (1 - stopLossPct)) return 'STOP_LOSS';
-    if (price >= entryPrice * (1 + takeProfitPct)) return 'TAKE_PROFIT';
-  } else {
-    if (price >= entryPrice * (1 + stopLossPct)) return 'STOP_LOSS';
-    if (price <= entryPrice * (1 - takeProfitPct)) return 'TAKE_PROFIT';
-  }
-  return null;
-}
-
 /** Lot 结算：净盈亏（已扣双边手续费）与名义收益率 */
 export function settleLotPnl(params: {
   direction: LotDirection;

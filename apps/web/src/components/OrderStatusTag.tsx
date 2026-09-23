@@ -1,12 +1,5 @@
 import { Tag } from 'antd';
-import {
-  ORDER_STATUS_LABELS,
-  RUN_MODE_LABELS,
-  DECISION_ACTION_LABELS,
-  type DecisionAction,
-  type OrderStatus,
-  type RunMode,
-} from '@ai-trader/shared';
+import { ORDER_STATUS_LABELS, RUN_MODE_LABELS, type OrderStatus, type RunMode } from '@ai-trader/shared';
 
 const STATUS_COLOR: Record<OrderStatus, string> = {
   NEW: 'blue',
@@ -38,10 +31,4 @@ export function ModeTag({ mode }: { mode: RunMode }) {
   );
 }
 
-export function ActionTag({ action }: { action: DecisionAction }) {
-  return (
-    <Tag color={action === 'BUY' ? 'green' : action === 'SELL' ? 'red' : 'default'}>
-      {DECISION_ACTION_LABELS[action]}
-    </Tag>
-  );
-}
+// ActionTag（BUY/SELL/HOLD 决策标签）已随决策引擎移除——不再有决策动作可展示

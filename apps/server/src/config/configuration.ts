@@ -17,7 +17,7 @@ export interface AppEnv {
   DB_SYNCHRONIZE: boolean;
   DB_LOGGING: boolean;
   APP_RUN_MODE: RunMode;
-  LIVE_TRADING_CONFIRM_TOKEN: string;
+  // 注：LIVE_TRADING_CONFIRM_TOKEN 已移除——实盘二次确认改为前端弹窗
   LLM_ENABLED: boolean;
   LLM_BASE_URL: string;
   LLM_API_KEY: string;
@@ -70,7 +70,6 @@ export const envSchema = Joi.object({
   DB_LOGGING: Joi.boolean().default(false),
 
   APP_RUN_MODE: Joi.string().valid('dry_run', 'testnet', 'live').default('dry_run'),
-  LIVE_TRADING_CONFIRM_TOKEN: Joi.string().default('change-me-live-confirm-token'),
 
   LLM_ENABLED: Joi.boolean().default(true),
   LLM_BASE_URL: Joi.string().default('https://api.deepseek.com'),

@@ -13,7 +13,7 @@ import { DataSource } from 'typeorm';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
 import { FuturesConfigService } from '../futures/futures-config.service';
-import { FuturesEngine } from '../futures/futures-engine.service';
+import { StrategyRunner } from '../strategy/strategy-runner.service';
 import { FuturesTradingService } from '../futures/futures-trading.service';
 import { LlmClient } from '../agent/llm.client';
 import { PositionService } from '../account/position.service';
@@ -36,7 +36,7 @@ export class OverviewService {
     private readonly market: MarketService,
     private readonly news: NewsService,
     private readonly futuresConfig: FuturesConfigService,
-    private readonly futures: FuturesEngine,
+    private readonly strategy: StrategyRunner,
     private readonly futuresTrading: FuturesTradingService,
     private readonly llm: LlmClient,
     private readonly trading: TradingService,
@@ -94,7 +94,6 @@ export class OverviewService {
       };
     });
 
-    const recentDecisions = await this.futures.list({ limit: 8 });
     const newsResult = await this.news.list({ pageSize: 8 });
     const keywordTrends = await this.news.keywordTrends(10);
 
@@ -123,13 +122,13 @@ export class OverviewService {
       mode: config.mode,
       environment: config.mode === 'live' ? 'live' : 'testnet',
       agentEnabled: config.enabled,
-      agentRunning: this.futures.isRunning,
+      // 自动交易是否在跑 = 是否已挂载策略（平台不再有「决策引擎」概念）
+      agentRunning: this.strategy.isRunning(),
       llmAvailable: this.llm.available,
       balances,
       totals,
       marketPulse,
       recentOrders,
-      recentDecisions: recentDecisions.map((d) => ({ ...d })),
       news: newsResult.items,
       keywordTrends,
       dataSources: await this.dataSources(balanceSource),

@@ -1,18 +1,18 @@
 import { useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { LayoutGrid, ListOrdered, LineChart, Bot } from 'lucide-react';
+import { LayoutGrid, LineChart, Bot } from 'lucide-react';
 import { useOverview } from '@/api/hooks';
 import { useRealtimeStore } from '@/ws/realtime';
 import { PriceTicker } from '@/components/PriceTicker';
 import { EnvBadge, LivePulse } from '@/components/StatusBits';
 import { LogoutButton, useRequireAuth } from '@/components/AuthGate';
 
+/** 移动端底部导航：资产 / 交易 / 策略（订单页与决策页已随架构调整移除） */
 const TABS = [
   { key: '/m', label: '资产', icon: LayoutGrid },
   { key: '/m/trade', label: '交易', icon: LineChart },
-  { key: '/m/orders', label: '订单', icon: ListOrdered },
-  { key: '/m/agent', label: 'Agent', icon: Bot },
+  { key: '/m/strategy', label: '策略', icon: Bot },
 ];
 
 export function MobileLayout() {

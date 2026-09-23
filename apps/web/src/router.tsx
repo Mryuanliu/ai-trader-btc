@@ -6,17 +6,14 @@ import { LoginPage } from '@/pages/LoginPage';
 import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
-import { AdminDecisions } from '@/pages/admin/AdminDecisions';
+import { AdminStrategy } from '@/pages/admin/AdminStrategy';
+import { AdminAiMarket } from '@/pages/admin/AdminAiMarket';
 import { AdminNews } from '@/pages/admin/AdminNews';
-import { AdminOrders } from '@/pages/admin/AdminOrders';
 import { AdminAccounts } from '@/pages/admin/AdminAccounts';
-import { AdminRisk } from '@/pages/admin/AdminRisk';
-import { AdminBacktest } from '@/pages/admin/AdminBacktest';
 import { AdminFutures } from '@/pages/admin/AdminFutures';
 import { MobileHome } from '@/pages/mobile/MobileHome';
 import { MobileTrade } from '@/pages/mobile/MobileTrade';
-import { MobileOrders } from '@/pages/mobile/MobileOrders';
-import { MobileAgent } from '@/pages/mobile/MobileAgent';
+import { MobileStrategy } from '@/pages/mobile/MobileStrategy';
 import { useIsMobile } from '@/hooks/useBreakpoint';
 
 /** 受保护路由：未登录跳登录页，登录后回到原本要访问的地址 */
@@ -64,8 +61,7 @@ export function AppRoutes() {
       >
         <Route index element={<MobileHome />} />
         <Route path="trade" element={<MobileTrade />} />
-        <Route path="orders" element={<MobileOrders />} />
-        <Route path="agent" element={<MobileAgent />} />
+        <Route path="strategy" element={<MobileStrategy />} />
       </Route>
       <Route
         path="/admin"
@@ -76,13 +72,11 @@ export function AppRoutes() {
         }
       >
         <Route index element={<AdminOverview />} />
-        <Route path="decisions" element={<AdminDecisions />} />
-        <Route path="news" element={<AdminNews />} />
-        <Route path="orders" element={<AdminOrders />} />
-        <Route path="accounts" element={<AdminAccounts />} />
-        <Route path="risk" element={<AdminRisk />} />
-        <Route path="backtest" element={<AdminBacktest />} />
+        <Route path="strategy" element={<AdminStrategy />} />
+        <Route path="ai-market" element={<AdminAiMarket />} />
         <Route path="futures" element={<AdminFutures />} />
+        <Route path="news" element={<AdminNews />} />
+        <Route path="accounts" element={<AdminAccounts />} />
       </Route>
       <Route path="*" element={<Navigate to={isMobile ? '/m' : '/admin'} replace />} />
     </Routes>

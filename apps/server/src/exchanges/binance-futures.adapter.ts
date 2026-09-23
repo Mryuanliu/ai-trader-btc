@@ -350,19 +350,8 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     });
   }
 
-  /** 历史资金费率（公共接口，无需密钥），按时间倒序返回 */
-  async getFundingRates(symbol: string, limit = 100): Promise<FundingRate[]> {
-    const data = await this.get<
-      { symbol: string; fundingRate: string; fundingTime: number; markPrice?: string }[]
-    >('/fapi/v1/fundingRate', { symbol, limit });
-
-    return data.map((r) => ({
-      symbol: r.symbol,
-      fundingTime: Number(r.fundingTime),
-      rate: Number(r.fundingRate),
-      markPrice: r.markPrice !== undefined ? Number(r.markPrice) : undefined,
-    }));
-  }
+  // getFundingRates（历史资金费率）已移除：唯一消费者是需要资金费模型的
+  // 合约回测，回测已删除，funding_rates 表也一并 DROP。
 
   // ---------------------------------------------------------------- 订阅行情
 
@@ -532,15 +521,38 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     return this.positionModeCache;
   }
 
+  /** 条件单（止盈止损 / 网格待成交层）必须走 Algo Order API */
+  private isConditional(type: string): boolean {
+    return type === 'STOP_MARKET' || type === 'TAKE_PROFIT_MARKET';
+  }
+
   async placeOrder(input: PlaceOrderInput): Promise<OrderResult> {
+    // ⚠️ 2025-12 起 `/fapi/v1/order` 不再接受条件单（返回 -4120
+    // "Order type not supported for this endpoint"），必须改用 `/fapi/v1/algoOrder`：
+    // 参数 `stopPrice` → `triggerPrice`，新增 `algoType=CONDITIONAL`，
+    // 客户单号字段变成 `clientAlgoId`，订单 ID 变为 `algoId`。
+    const conditional = this.isConditional(input.type);
+
     const payload: Record<string, unknown> = {
       symbol: input.symbol,
       side: input.side,
       type: input.type,
       quantity: input.quantity,
-      // 同现货：FULL 才带 fills[].commission，手续费是盈亏口径的关键输入
-      newOrderRespType: 'FULL',
     };
+
+    if (conditional) {
+      if (!(Number(input.stopPrice) > 0)) {
+        throw new Error(`${input.type} 必须提供有效的 stopPrice`);
+      }
+      payload.algoType = 'CONDITIONAL';
+      payload.triggerPrice = input.stopPrice;
+      // 用标记价触发，避免插针造成的假触发
+      payload.workingType = 'MARK_PRICE';
+    } else {
+      // 普通单：FULL 才带 fills[].commission，手续费是盈亏口径的关键输入
+      payload.newOrderRespType = 'FULL';
+    }
+
     if (input.type === 'LIMIT') {
       payload.price = input.price;
       payload.timeInForce = 'GTC';
@@ -560,9 +572,19 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
       // 单向持仓：禁止下发 positionSide（-4061），方向由 side + reduceOnly 表达
       if (input.reduceOnly) payload.reduceOnly = 'true';
     }
-    if (input.clientOrderId) payload.newClientOrderId = input.clientOrderId;
+    if (input.clientOrderId) {
+      if (conditional) payload.clientAlgoId = input.clientOrderId;
+      else payload.newClientOrderId = input.clientOrderId;
+    }
 
-    const data = await this.signed<Record<string, any>>('POST', '/fapi/v1/order', payload);
+    const path = conditional ? '/fapi/v1/algoOrder' : '/fapi/v1/order';
+    const data = await this.signed<Record<string, any>>('POST', path, payload);
+
+    if (conditional) {
+      // 条件单创建响应只给 algoId（还没有成交，成交要等触发）
+      return this.normalizeAlgoOrder(data, input);
+    }
+
     const result = this.normalizeOrder(data, input);
 
     /**
@@ -599,6 +621,20 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
   }
 
   async cancelOrder(input: CancelOrderInput): Promise<OrderResult> {
+    if (input.conditional) {
+      const data = await this.signed<Record<string, any>>('DELETE', '/fapi/v1/algoOrder', {
+        symbol: input.symbol,
+        algoId: input.exchangeOrderId,
+        clientAlgoId: input.clientOrderId,
+      });
+      return this.normalizeAlgoOrder(data, {
+        symbol: input.symbol,
+        side: (data.side ?? 'BUY') as PlaceOrderInput['side'],
+        type: 'STOP_MARKET',
+        quantity: Number(data.quantity ?? 0),
+      });
+    }
+
     const data = await this.signed<Record<string, any>>('DELETE', '/fapi/v1/order', {
       symbol: input.symbol,
       orderId: input.exchangeOrderId,
@@ -613,6 +649,19 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
   }
 
   async getOrder(query: OrderQuery): Promise<OrderResult> {
+    if (query.conditional) {
+      const data = await this.signed<Record<string, any>>('GET', '/fapi/v1/algoOrder', {
+        algoId: query.exchangeOrderId,
+        clientAlgoId: query.clientOrderId,
+      });
+      return this.normalizeAlgoOrder(data, {
+        symbol: query.symbol,
+        side: (data.side ?? 'BUY') as PlaceOrderInput['side'],
+        type: 'STOP_MARKET',
+        quantity: Number(data.quantity ?? 0),
+      });
+    }
+
     const data = await this.signed<Record<string, any>>('GET', '/fapi/v1/order', {
       symbol: query.symbol,
       orderId: query.exchangeOrderId,
@@ -626,16 +675,66 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     });
   }
 
+  /** 当前挂单：普通挂单 + 条件挂单合并（两者在不同端点） */
   async getOpenOrders(symbol?: string): Promise<OrderResult[]> {
-    const data = await this.signed<Record<string, any>[]>('GET', '/fapi/v1/openOrders', { symbol });
-    return data.map((row) =>
-      this.normalizeOrder(row, {
-        symbol: row.symbol,
-        side: row.side,
-        type: row.type,
-        quantity: Number(row.origQty ?? 0),
-      }),
-    );
+    const [normal, algo] = await Promise.all([
+      this.signed<Record<string, any>[]>('GET', '/fapi/v1/openOrders', { symbol }),
+      this.signed<Record<string, any>[]>('GET', '/fapi/v1/openAlgoOrders', { symbol }).catch(
+        () => [] as Record<string, any>[],
+      ),
+    ]);
+    return [
+      ...normal.map((row) =>
+        this.normalizeOrder(row, {
+          symbol: row.symbol,
+          side: row.side,
+          type: row.type,
+          quantity: Number(row.origQty ?? 0),
+        }),
+      ),
+      ...algo.map((row) =>
+        this.normalizeAlgoOrder(row, {
+          symbol: row.symbol ?? symbol ?? '',
+          side: row.side ?? 'BUY',
+          type: row.orderType ?? row.type ?? 'STOP_MARKET',
+          quantity: Number(row.quantity ?? row.origQty ?? 0),
+        }),
+      ),
+    ];
+  }
+
+  /**
+   * 条件单（Algo Order）响应归一化。
+   *
+   * 字段与普通订单不同：`algoId` / `orderType` / `triggerPrice` /
+   * `quantity` / `algoStatus`。
+   *
+   * 触发判定：`algoStatus` 为 TRIGGERED/FINISHED 视为已成交。
+   * ⚠️ 成交价用 `triggerPrice` 近似——条件单触发后按市价成交，
+   * 真实均价需要另查 userTrades；对网格策略而言触发价与实际成交价
+   * 的偏差远小于网格间距，且 demo 环境无法可靠配对成交记录，
+   * 故采用近似值并在盈亏上略偏保守。
+   */
+  private normalizeAlgoOrder(data: Record<string, any>, fallback: PlaceOrderInput): OrderResult {
+    const algoStatus = String(data.algoStatus ?? data.status ?? 'NEW');
+    const triggered = algoStatus === 'TRIGGERED' || algoStatus === 'FINISHED';
+    const quantity = Number(data.quantity ?? data.origQty ?? fallback.quantity ?? 0);
+    const triggerPrice = Number(data.triggerPrice ?? data.stopPrice ?? 0);
+    const canceled = algoStatus === 'CANCELED' || algoStatus === 'EXPIRED';
+
+    return {
+      exchangeOrderId: String(data.algoId ?? data.orderId ?? ''),
+      clientOrderId: String(data.clientAlgoId ?? fallback.clientOrderId ?? ''),
+      symbol: String(data.symbol ?? fallback.symbol),
+      side: (data.side ?? fallback.side) as OrderResult['side'],
+      type: (data.orderType ?? fallback.type) as OrderResult['type'],
+      status: triggered ? 'FILLED' : canceled ? 'CANCELED' : 'NEW',
+      price: triggerPrice,
+      quantity,
+      filledQuantity: triggered ? quantity : 0,
+      filledPrice: triggered ? triggerPrice : 0,
+      raw: data,
+    };
   }
 
   private normalizeOrder(data: Record<string, any>, fallback: PlaceOrderInput): OrderResult {

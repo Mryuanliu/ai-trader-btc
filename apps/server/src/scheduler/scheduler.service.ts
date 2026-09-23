@@ -4,12 +4,19 @@ import { Cron, CronExpression, Interval } from '@nestjs/schedule';
 import { EXCHANGE_CODES } from '@ai-trader/shared';
 import { MarketService } from '../market/market.service';
 import { NewsService } from '../news/news.service';
-import { TradingService } from '../trading/trading.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
-import { FuturesEngine } from '../futures/futures-engine.service';
 import { FuturesConfigService } from '../futures/futures-config.service';
 import { FuturesTradingService } from '../futures/futures-trading.service';
+import { StrategyRunner } from '../strategy/strategy-runner.service';
 
+/**
+ * 主循环。
+ *
+ * 与改造前的区别：**不再做任何决策调度**（原 FuturesEngine 的
+ * `shouldSkipScheduledRun` / 冷却 / 熔断 / 实盘拦截都已移除）。
+ * 这里只做三件事：喂行情、对账订单、驱动已挂载的策略。
+ * 策略是否该下单、下多少，全由策略自己决定。
+ */
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
@@ -21,32 +28,32 @@ export class SchedulerService {
   constructor(
     private readonly market: MarketService,
     private readonly news: NewsService,
-    private readonly trading: TradingService,
     private readonly registry: ExchangeRegistry,
     private readonly config: ConfigService,
-    private readonly futures: FuturesEngine,
     private readonly futuresConfig: FuturesConfigService,
     private readonly futuresTrading: FuturesTradingService,
+    private readonly strategy: StrategyRunner,
   ) {}
 
-  /** 主循环：合约决策节流 + 周期性任务 */
+  /** 主循环：行情、对账、挂单触发、策略驱动 */
   @Interval(5000)
   async tick() {
     this.market.pumpSimulation();
 
     const now = Date.now();
 
-    // 新闻抓取（hybrid 链路的 AI 上下文需要）
+    // 新闻抓取（「AI 行情分析」的上下文来源）
     const newsInterval = Number(this.config.get<string>('NEWS_FETCH_INTERVAL_SEC', '900')) * 1000;
     if (now - this.lastNewsAt > newsInterval) {
       this.lastNewsAt = now;
       void this.news.fetchAll().catch((err) => this.logger.warn(`新闻抓取异常: ${err.message}`));
     }
 
-    // 未终结订单状态同步 + 合约成交对账（补记成交明细与 Lot，幂等）
+    // 合约成交对账（补记成交明细与 Lot，幂等）。
+    // 订单状态推进已包含在 syncPendingFills 里（它会回查交易所并更新状态），
+    // 原先额外的 TradingService.syncOpenOrders 对合约单是重复劳动，已移除。
     if (now - this.lastOrderSyncAt > 60_000) {
       this.lastOrderSyncAt = now;
-      void this.trading.syncOpenOrders();
       void this.futuresTrading
         .syncPendingFills()
         .then((r) => {
@@ -59,44 +66,24 @@ export class SchedulerService {
         .catch((err) => this.logger.warn(`合约成交对账异常: ${err.message}`));
     }
 
-    await this.runFuturesIfDue();
+    // dry-run 的网格挂单需要每 tick 检查触发（否则要等一个对账周期才成交）
+    await this.triggerDryRunOrders();
+
+    // 驱动已挂载的策略（无策略时是空操作）
+    await this.strategy.tick();
   }
 
-  /**
-   * 合约链路调度：与现货**彼此独立**。
-   *
-   * 独立开关、独立配置、独立熔断计数器——关闭合约不影响现货，
-   * 合约连续失败进入熔断也不会牵连现货链路。
-   */
-  private async runFuturesIfDue() {
-    const entity = await this.futuresConfig.getEntity();
-    if (!entity.enabled || this.futures.isRunning) return;
-
-    const intervalMs = Math.max(30, entity.decisionIntervalSec) * 1000;
-    const lastRun = entity.lastRunAt ? entity.lastRunAt.getTime() : 0;
-    if (Date.now() - lastRun < intervalMs) return;
-
-    const gate = this.futures.shouldSkipScheduledRun();
-    if (gate.skip) {
-      this.throttledWarn('futures-backoff', gate.reason ?? '合约处于冷却期', 10 * 60_000);
-      return;
-    }
-
-    // 实盘不自动下单：需人工携带二次确认 Token
-    if (entity.mode === 'live') {
-      this.throttledWarn(
-        'futures-live-skipped',
-        '合约实盘模式不支持自动下单：需通过前端手动下单并携带确认 Token',
-        10 * 60_000,
-      );
-      return;
-    }
-
+  /** dry-run 模式：按当前行情模拟触发网格挂单（真实模式由交易所触发） */
+  private async triggerDryRunOrders() {
     try {
-      const summary = await this.futures.runOnce('schedule');
-      this.logger.log(`合约决策: ${summary.action}（置信度 ${summary.confidence}）`);
+      const cfg = await this.futuresConfig.get();
+      if (cfg.mode !== 'dry_run') return;
+      const result = await this.futuresTrading.processDryRunGridOrders(cfg.symbol);
+      if (result.triggered > 0) {
+        this.logger.log(`dry-run 网格挂单触发 ${result.triggered} 笔`);
+      }
     } catch (err) {
-      this.logger.error(`合约决策失败: ${(err as Error).message}`);
+      this.throttledWarn('dry-run-trigger', `dry-run 挂单触发检查异常: ${(err as Error).message}`, 60_000);
     }
   }
 

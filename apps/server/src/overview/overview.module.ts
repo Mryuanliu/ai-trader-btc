@@ -6,6 +6,7 @@ import { NewsModule } from '../news/news.module';
 import { AccountModule } from '../account/account.module';
 import { TradingModule } from '../trading/trading.module';
 import { FuturesModule } from '../futures/futures.module';
+import { StrategyModule } from '../strategy/strategy.module';
 import { AgentModule } from '../agent/agent.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 
@@ -15,8 +16,10 @@ import { ExchangesModule } from '../exchanges/exchanges.module';
     NewsModule,
     AccountModule,
     TradingModule,
-    // 合约总览数据源：FuturesConfig/FuturesEngine/FuturesTrading/FuturesPosition
+    // 合约总览数据源：FuturesConfig/FuturesTrading/FuturesPosition
     FuturesModule,
+    // 策略运行状态（agentRunning = 是否已挂载策略）
+    StrategyModule,
     // LlmClient（判断 llmAvailable）
     AgentModule,
     // ExchangeRegistry（读合约钱包余额）

@@ -1,59 +1,30 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import {
-  AgentDecisionEntity,
-  FuturesAgentConfigEntity,
-  OrderEntity,
-  RiskEventEntity,
-  TradeFillEntity,
-} from '../database/entities';
+import { FuturesAgentConfigEntity, OrderEntity, TradeFillEntity } from '../database/entities';
 import { FuturesConfigService } from './futures-config.service';
 import { FuturesPositionService } from './futures-position.service';
-import { FuturesRiskService } from './futures-risk.service';
 import { FuturesTradingService } from './futures-trading.service';
-import { FuturesEngine } from './futures-engine.service';
-import { FuturesDecisionsService } from './futures-decisions.service';
 import { FuturesController } from './futures.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
-import { AgentModule } from '../agent/agent.module';
 import { NewsModule } from '../news/news.module';
 import { AccountModule } from '../account/account.module';
 
 /**
- * 合约模块（L4~L6 的合约实现 + 独立决策链路）。
+ * 合约模块：**只管执行，不管决策**。
  *
- * - L0~L3（指标/信号/策略/链路分派）通过 AgentModule 导出的 DecisionCoreService 复用
- * - L4~L6（执行/风控/持仓/下单）在这里独立实现
- * AccountModule 仅取 LotService 做仓位单记账（L5 持仓层共用数据模型）。
+ * 这里提供平台的下单/持仓/账户能力，供策略运行器（StrategyModule）与手动交易调用。
+ * 决策引擎、风控服务、决策记录已移除——何时开仓、何时平仓、风险多大，
+ * 全部由挂载的策略自行决定；平台只保证「指令正确送达交易所」。
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
-      FuturesAgentConfigEntity,
-      OrderEntity,
-      TradeFillEntity,
-      RiskEventEntity,
-      AgentDecisionEntity,
-    ]),
+    TypeOrmModule.forFeature([FuturesAgentConfigEntity, OrderEntity, TradeFillEntity]),
     ExchangesModule,
-    AgentModule,
     NewsModule,
     AccountModule,
   ],
-  providers: [
-    FuturesConfigService,
-    FuturesPositionService,
-    FuturesRiskService,
-    FuturesTradingService,
-    FuturesEngine,
-    FuturesDecisionsService,
-  ],
+  providers: [FuturesConfigService, FuturesPositionService, FuturesTradingService],
   controllers: [FuturesController],
-  exports: [
-    FuturesConfigService,
-    FuturesPositionService,
-    FuturesTradingService,
-    FuturesEngine,
-  ],
+  exports: [FuturesConfigService, FuturesPositionService, FuturesTradingService],
 })
 export class FuturesModule {}

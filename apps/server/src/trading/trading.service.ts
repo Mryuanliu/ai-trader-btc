@@ -11,7 +11,6 @@ import { In, Repository } from 'typeorm';
 import { OrderEntity, TradeFillEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import { EventBusService } from '../common/events';
-import { RiskService } from './risk.service';
 import { BusinessException } from '../common/business.exception';
 import { normalizePagination, toPageResult } from '../common/pagination';
 
@@ -33,7 +32,6 @@ export class TradingService {
     private readonly fillRepo: Repository<TradeFillEntity>,
     private readonly registry: ExchangeRegistry,
     private readonly events: EventBusService,
-    private readonly risk: RiskService,
   ) {}
 
   toDTO(order: OrderEntity): OrderDTO {
@@ -47,6 +45,7 @@ export class TradingService {
       side: order.side,
       type: order.type,
       price: order.price,
+      stopPrice: Number(order.stopPrice ?? 0),
       quantity: order.quantity,
       quoteAmount: order.quoteAmount,
       status: order.status,
@@ -54,82 +53,10 @@ export class TradingService {
       filledPrice: order.filledPrice,
       exchangeOrderId: order.exchangeOrderId,
       source: order.source,
-      decisionId: order.decisionId,
       error: order.error,
       createdAt: order.createdAt.toISOString(),
       updatedAt: order.updatedAt.toISOString(),
     };
-  }
-
-  async cancelOrder(id: string): Promise<OrderDTO> {
-    const order = await this.orderRepo.findOne({ where: { id } });
-    if (!order) throw new BusinessException('NOT_FOUND', '订单不存在');
-
-    if (order.mode === 'dry_run') {
-      order.status = 'CANCELED';
-      const saved = await this.orderRepo.save(order);
-      const dto = this.toDTO(saved);
-      this.events.emit('order', dto);
-      return dto;
-    }
-
-    try {
-      const adapter = await this.registry.get(order.exchange);
-      const result = await adapter.cancelOrder({
-        symbol: order.symbol,
-        exchangeOrderId: order.exchangeOrderId ?? undefined,
-        clientOrderId: order.clientOrderId ?? undefined,
-      });
-      order.status = result.status || 'CANCELED';
-      order.error = null;
-    } catch (err) {
-      order.error = (err as Error).message;
-      await this.risk.record('exchange_error', 'warn', `撤单失败: ${order.error}`, order.symbol);
-    }
-
-    const saved = await this.orderRepo.save(order);
-    const dto = this.toDTO(saved);
-    this.events.emit('order', dto);
-    return dto;
-  }
-
-  /** 同步未终结订单的最新状态 */
-  async syncOpenOrders(): Promise<number> {
-    const openOrders = await this.orderRepo.find({
-      where: { status: In(['NEW', 'PARTIALLY_FILLED']) },
-      take: 100,
-    });
-    if (openOrders.length === 0) return 0;
-
-    let updated = 0;
-    for (const order of openOrders) {
-      if (order.mode === 'dry_run') continue;
-      try {
-        const adapter = await this.registry.get(order.exchange);
-        const result = await adapter.getOrder({
-          symbol: order.symbol,
-          exchangeOrderId: order.exchangeOrderId ?? undefined,
-          clientOrderId: order.clientOrderId ?? undefined,
-        });
-        if (result.status !== order.status || result.filledQuantity !== order.filledQuantity) {
-          order.status = result.status;
-          order.filledQuantity = result.filledQuantity;
-          order.filledPrice = result.filledPrice;
-          // 通过 clientOrderId 首次回查成功后必须补写交易所单号。
-          // 否则合约成交对账会继续按“无交易所单号”跳过，
-          // 造成订单已 FILLED 但 trade_fills / position_lots 永久缺失。
-          if (!order.exchangeOrderId && result.exchangeOrderId) {
-            order.exchangeOrderId = result.exchangeOrderId;
-          }
-          await this.orderRepo.save(order);
-          this.events.emit('order', this.toDTO(order));
-          updated += 1;
-        }
-      } catch (err) {
-        this.logger.warn(`同步订单 ${order.id} 失败: ${(err as Error).message}`);
-      }
-    }
-    return updated;
   }
 
   async list(params: {
@@ -160,10 +87,6 @@ export class TradingService {
       take: limit,
     });
     return rows.map((r) => this.toDTO(r));
-  }
-
-  async getFills(orderId: string) {
-    return this.fillRepo.find({ where: { orderId }, order: { filledAt: 'ASC' } });
   }
 
   /**

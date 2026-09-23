@@ -1,41 +1,30 @@
-import { useMemo, useState } from 'react';
-import { App as AntApp, Button, Card, Col, InputNumber, Modal, Row, Select, Slider, Space, Switch, Table, Tag, Tooltip } from 'antd';
-import { PlayCircleOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { useState } from 'react';
+import { App as AntApp, Button, Card, Col, InputNumber, Row, Select, Slider, Space, Switch, Table, Tag, Tooltip } from 'antd';
+import { ExclamationCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import {
-  useBacktestStrategies,
   useFuturesConfig,
-  useFuturesHealth,
   useFuturesMargin,
   useFuturesPlaceOrder,
   useFuturesPositions,
   useOpenLots,
-  useRunFuturesEngine,
   useUpdateFuturesConfig,
 } from '@/api/hooks';
 import { useRequireAuth } from '@/components/AuthGate';
-import {
-  formatPrice,
-  formatTime,
-  lotStopPrice,
-  lotTakeProfitPrice,
-} from '@/utils/format';
-import { DEFAULT_FUTURES_AGENT_CONFIG } from '@ai-trader/shared';
+import { formatPrice, formatTime } from '@/utils/format';
 
 /**
- * 合约面板（独立链路）。
+ * 合约面板。
  *
- * 与现货 Agent 配置完全独立：独立开关、独立策略、独立杠杆与保证金模式。
- * 持仓以交易所 positionRisk 为权威（支持做空、强平价、逐仓保证金）。
+ * 平台侧只负责：链路开关、交易参数（杠杆/保证金模式）、持仓与仓位单的查看、
+ * 手动平掉某个仓位单。**策略参数与启停请到「策略管理」页**——
+ * 平台不做决策，也没有熔断。
  */
 export function AdminFutures() {
   const config = useFuturesConfig();
   const margin = useFuturesMargin();
   const positions = useFuturesPositions();
-  const health = useFuturesHealth();
   const update = useUpdateFuturesConfig();
-  const run = useRunFuturesEngine();
   const place = useFuturesPlaceOrder();
-  const strategies = useBacktestStrategies();
   // 本地合约仓位单（Lot）：订单级独立止盈止损，与交易所净持仓对照
   const { data: futuresLots = [] } = useOpenLots({ market: 'futures' });
   const { message, modal } = AntApp.useApp();
@@ -83,29 +72,48 @@ export function AdminFutures() {
     });
   };
 
-  /** 当前选中策略（含 paramSchema，用于动态渲染参数编辑表单） */
-  const currentStrategy = useMemo(
-    () => strategies.data?.find((s) => s.name === cfg?.strategyName) ?? strategies.data?.[0],
-    [strategies.data, cfg?.strategyName],
-  );
-  const paramProps = (currentStrategy?.paramSchema?.properties ?? {}) as Record<
-    string,
-    { type?: string; minimum?: number; maximum?: number; title?: string }
-  >;
-
-  /** 保存单个策略参数（合并进现有 strategyParams） */
-  const saveParam = (key: string, value: number | null) => {
-    const merged = { ...(cfg?.strategyParams ?? {}), [key]: value == null ? undefined : value };
-    if (value == null) delete merged[key];
-    savePatch({ strategyParams: merged });
-  };
-
   const saveEnabled = (checked: boolean) => {
     update.mutate({ enabled: checked }, { onError: (e) => message.error(e.message) });
   };
 
   const savePatch = (patch: Record<string, unknown>) => {
     update.mutate(patch, { onError: (e) => message.error(e.message) });
+  };
+
+  /**
+   * 切换运行模式。
+   *
+   * `live` 使用真实资金、且挂载的策略会自动下单，因此必须二次确认。
+   * 这是**防误操作**（不是平台风控）：平台不拦截任何交易，只在这里把
+   * 「你正在进入实盘」讲清楚，避免误点。
+   */
+  const onModeChange = (next: string) => {
+    if (next !== 'live') {
+      savePatch({ mode: next });
+      return;
+    }
+    modal.confirm({
+      title: '切换到实盘（真实资金）',
+      icon: <ExclamationCircleOutlined className="text-down" />,
+      width: 520,
+      content: (
+        <div className="space-y-2 text-[12px] leading-relaxed">
+          <div>
+            实盘模式下，<b>挂载的策略会用真实资金自动下单</b>，平台不做任何风控拦截。
+          </div>
+          <div>切换前请确认：</div>
+          <ul className="list-disc pl-5">
+            <li>该策略已在测试网充分验证</li>
+            <li>测试网仓位已全部平掉</li>
+            <li>清楚止损、强平与爆仓风险</li>
+          </ul>
+        </div>
+      ),
+      okText: '我确认，切换到实盘',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => savePatch({ mode: 'live' }),
+    });
   };
 
   return (
@@ -115,18 +123,9 @@ export function AdminFutures() {
           <ThunderboltOutlined className="text-btc" />
           <span className="text-[15px] font-semibold">币安合约面板</span>
           <Tag color={cfg?.enabled ? 'green' : 'default'}>{cfg?.enabled ? '运行中' : '已停止'}</Tag>
-          {health.data?.tripped ? <Tag color="red">已熔断</Tag> : null}
         </div>
         <Space>
           <Switch checked={cfg?.enabled} onChange={saveEnabled} checkedChildren="启用" unCheckedChildren="停用" />
-          <Button
-            type="primary"
-            icon={<PlayCircleOutlined />}
-            loading={run.isPending}
-            onClick={() => run.mutate(undefined, { onError: (e) => message.error(e.message) })}
-          >
-            手动触发一次决策
-          </Button>
         </Space>
       </div>
 
@@ -141,7 +140,7 @@ export function AdminFutures() {
         <Card size="small" className="glass-card">
           <div className="text-[12px] text-muted">当前杠杆</div>
           <div className="num text-[20px] font-semibold text-white">{cfg?.leverage ?? '--'}x</div>
-          <div className="text-[11px] text-muted">上限 {cfg?.maxLeverage ?? '--'}x</div>
+          <div className="text-[11px] text-muted">平台不设上限，由策略决定</div>
         </Card>
         <Card size="small" className="glass-card">
           <div className="text-[12px] text-muted">保证金模式</div>
@@ -151,13 +150,9 @@ export function AdminFutures() {
           <div className="text-[11px] text-muted">逐仓单仓风险隔离</div>
         </Card>
         <Card size="small" className="glass-card">
-          <div className="text-[12px] text-muted">熔断状态</div>
-          <div className={`text-[20px] font-semibold ${health.data?.tripped ? 'text-down' : 'text-up'}`}>
-            {health.data?.tripped ? '熔断中' : health.data?.running ? '运行中' : '正常'}
-          </div>
-          <div className="text-[11px] text-muted">
-            连续失败 {health.data?.consecutiveFailures ?? 0} 次
-          </div>
+          <div className="text-[12px] text-muted">未完结仓位单</div>
+          <div className="num text-[20px] font-semibold text-white">{futuresLots.length}</div>
+          <div className="text-[11px] text-muted">每单独立了结</div>
         </Card>
       </div>
 
@@ -225,7 +220,11 @@ export function AdminFutures() {
         title="合约仓位单（Lot，本地订单级）"
         className="glass-card"
         size="small"
-        extra={<span className="text-[11px] text-muted">与上方交易所净持仓对照 · 每单独立止盈止损</span>}
+        extra={
+          <span className="text-[11px] text-muted">
+            与上方交易所净持仓对照 · 出场由策略负责（平台不设逐层止盈止损）
+          </span>
+        }
       >
         <FuturesLotTotals lots={futuresLots} positions={positions.data ?? []} />
         <Table
@@ -247,27 +246,6 @@ export function AdminFutures() {
             {
               title: '开仓价', dataIndex: 'entryPrice', width: 120,
               render: (v: number) => <span className="num">{formatPrice(v)}</span>,
-            },
-            {
-              title: '止损/止盈', key: 'tpSl', width: 170,
-              render: (_, row) => (
-                <div className="flex flex-col leading-tight">
-                  <span className="text-[10px]">
-                    <span className="text-muted">SL </span>
-                    <span className="num text-down">
-                      {formatPrice(lotStopPrice(row.direction, Number(row.entryPrice), Number(row.stopLossPct) || 0))}
-                    </span>
-                    <span className="text-muted"> ({(row.stopLossPct * 100).toFixed(1)}%)</span>
-                  </span>
-                  <span className="text-[10px]">
-                    <span className="text-muted">TP </span>
-                    <span className="num text-up">
-                      {formatPrice(lotTakeProfitPrice(row.direction, Number(row.entryPrice), Number(row.takeProfitPct) || 0))}
-                    </span>
-                    <span className="text-muted"> ({(row.takeProfitPct * 100).toFixed(1)}%)</span>
-                  </span>
-                </div>
-              ),
             },
             {
               title: '浮动盈亏', key: 'pnl', width: 130,
@@ -303,17 +281,30 @@ export function AdminFutures() {
         />
       </Card>
 
-      <Card title="合约策略配置（与现货独立）" className="glass-card" size="small">
+      <Card title="交易参数" className="glass-card" size="small">
         <Row gutter={24}>
           <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">开仓杠杆（1 ~ {cfg?.maxLeverage ?? 10}x）</div>
+            <div className="mb-1 text-[12px] text-muted">运行模式</div>
+            <Select
+              value={cfg?.mode ?? 'dry_run'}
+              style={{ width: '100%' }}
+              options={[
+                { label: 'dry_run（本地模拟，不触交易所）', value: 'dry_run' },
+                { label: 'testnet（币安测试网）', value: 'testnet' },
+                { label: 'live（实盘 · 真实资金）', value: 'live' },
+              ]}
+              onChange={onModeChange}
+            />
+          </Col>
+          <Col xs={24} md={8}>
+            <div className="mb-1 text-[12px] text-muted">开仓杠杆（1 ~ 20x）</div>
             <Slider
               min={1}
-              max={cfg?.maxLeverage ?? 10}
+              max={20}
               step={1}
               value={cfg?.leverage ?? 5}
               onChange={(v) => savePatch({ leverage: v })}
-              marks={{ 1: '1x', 5: '5x', 10: '10x' }}
+              marks={{ 1: '1x', 5: '5x', 20: '20x' }}
             />
           </Col>
           <Col xs={24} md={8}>
@@ -326,140 +317,11 @@ export function AdminFutures() {
               onChange={(v) => savePatch({ positionPct: v })}
             />
           </Col>
-          <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">最低置信度</div>
-            <Slider
-              min={0}
-              max={1}
-              step={0.05}
-              value={cfg?.minConfidence ?? 0.6}
-              onChange={(v) => savePatch({ minConfidence: v })}
-            />
-          </Col>
-        </Row>
-        <Row gutter={24} className="mt-2">
-          <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">决策间隔（秒）</div>
-            <InputNumber
-              min={30}
-              max={3600}
-              step={30}
-              value={cfg?.decisionIntervalSec}
-              onChange={(v) => savePatch({ decisionIntervalSec: v })}
-              className="!w-full"
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">策略（与现货同一策略体系）</div>
-            <Select
-              value={cfg?.strategyName}
-              style={{ width: '100%' }}
-              placeholder="选择策略"
-              loading={strategies.isLoading}
-              options={(strategies.data ?? []).map((s) => ({
-                label: `${s.label}（${s.name}）`,
-                value: s.name,
-              }))}
-              onChange={(v) => savePatch({ strategyName: v })}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">决策链路</div>
-            <Select
-              value={cfg?.decisionLane}
-              style={{ width: '100%' }}
-              options={[
-                { label: 'strategy（纯策略，零 LLM）', value: 'strategy' },
-                { label: 'hybrid（AI 上下文 + 策略）', value: 'hybrid' },
-              ]}
-              onChange={(v) => savePatch({ decisionLane: v })}
-            />
-          </Col>
         </Row>
 
-        {/* 策略参数：按当前策略的 paramSchema 动态渲染，改完即保存 */}
-        {Object.keys(paramProps).length > 0 ? (
-          <div className="mt-4 rounded-xl border border-white/[0.07] bg-black/20 p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[12px] font-medium text-subtle">
-                策略参数 · {currentStrategy?.label ?? cfg?.strategyName}
-              </span>
-              <Tooltip title="留空表示使用策略默认值；数值改完即时保存到 strategyParams。调整后建议先在「策略回测」里用相同参数验证再实盘。">
-                <span className="cursor-help text-[11px] text-muted">修改需谨慎</span>
-              </Tooltip>
-            </div>
-            <Row gutter={12}>
-              {Object.entries(paramProps).map(([key, prop]) => {
-                const isBool = prop.type === 'boolean';
-                const current = (cfg?.strategyParams ?? {})[key];
-                // 回填显示：自定义值优先，未设置时显示策略默认值（defaultParams）
-                const display =
-                  typeof current === 'number'
-                    ? current
-                    : (currentStrategy?.defaultParams?.[key] as number | undefined);
-                return (
-                  <Col span={8} key={key}>
-                    <div className="mb-1 text-[11px] text-muted">{prop.title ?? key}</div>
-                    {isBool ? (
-                      <Switch
-                        size="small"
-                        checked={Boolean(current)}
-                        onChange={(checked) => saveParam(key, checked ? 1 : 0)}
-                      />
-                    ) : (
-                      <InputNumber
-                        min={prop.minimum}
-                        max={prop.maximum}
-                        step={0.01}
-                        value={display}
-                        placeholder={String(currentStrategy?.defaultParams?.[key] ?? '')}
-                        onChange={(v) => saveParam(key, v)}
-                        className="!w-full"
-                      />
-                    )}
-                  </Col>
-                );
-              })}
-            </Row>
-            <div className="mt-2 flex items-center justify-between">
-              <span className="text-[10px] text-subtle">{currentStrategy?.description ?? ''}</span>
-              <Button
-                size="small"
-                type="text"
-                onClick={() => {
-                  // 恢复默认：清空 strategyParams，让策略用 normalizeParams 的默认值
-                  if (Object.keys(cfg?.strategyParams ?? {}).length > 0) {
-                    savePatch({ strategyParams: {} });
-                  } else {
-                    message.info('当前已是默认参数');
-                  }
-                }}
-              >
-                恢复默认参数
-              </Button>
-            </div>
-          </div>
-        ) : null}
 
-        <div className="mt-3 flex items-center gap-3">
-          <Button
-            size="small"
-            icon={<SaveOutlined />}
-            onClick={() => {
-              const c = cfg ?? DEFAULT_FUTURES_AGENT_CONFIG;
-              savePatch({
-                leverage: c.leverage,
-                positionPct: c.positionPct,
-                minConfidence: c.minConfidence,
-                decisionIntervalSec: c.decisionIntervalSec,
-              });
-            }}
-          >
-            保存当前参数
-          </Button>
-          <span className="text-[11px] text-muted">
-            最后运行 {formatTime(cfg?.lastRunAt)}
-          </span>
+        <div className="mt-3 text-[11px] text-muted">
+          策略参数请在「策略管理」页按策略单独配置 · 最后运行 {formatTime(cfg?.lastRunAt)}
         </div>
       </Card>
     </div>

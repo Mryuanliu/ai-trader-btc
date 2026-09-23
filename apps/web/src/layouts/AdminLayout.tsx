@@ -3,12 +3,10 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Layout, Menu, Button, Tooltip, Badge } from 'antd';
 import {
   DashboardOutlined,
-  NodeIndexOutlined,
+  ThunderboltOutlined,
+  RadarChartOutlined,
   ReadOutlined,
-  ProfileOutlined,
   BankOutlined,
-  SafetyCertificateOutlined,
-  LineChartOutlined,
   FundOutlined,
   ReloadOutlined,
   MobileOutlined,
@@ -22,15 +20,14 @@ import { formatPct, formatPrice } from '@/utils/format';
 
 const { Sider, Header, Content } = Layout;
 
+/** 平台菜单：策略托管平台只保留「看行情、管策略、看账户」三类入口 */
 const MENU = [
   { key: '/admin', icon: <DashboardOutlined />, label: '总览看板' },
-  { key: '/admin/decisions', icon: <NodeIndexOutlined />, label: '决策历史' },
-  { key: '/admin/news', icon: <ReadOutlined />, label: '新闻与市场' },
-  { key: '/admin/orders', icon: <ProfileOutlined />, label: '订单成交' },
-  { key: '/admin/accounts', icon: <BankOutlined />, label: '交易所账户' },
-  { key: '/admin/risk', icon: <SafetyCertificateOutlined />, label: '风控事件' },
-  { key: '/admin/backtest', icon: <LineChartOutlined />, label: '策略回测' },
+  { key: '/admin/strategy', icon: <ThunderboltOutlined />, label: '策略管理' },
+  { key: '/admin/ai-market', icon: <RadarChartOutlined />, label: 'AI 行情' },
   { key: '/admin/futures', icon: <FundOutlined />, label: '合约面板' },
+  { key: '/admin/news', icon: <ReadOutlined />, label: '新闻与市场' },
+  { key: '/admin/accounts', icon: <BankOutlined />, label: '交易所账户' },
 ];
 
 export function AdminLayout() {
