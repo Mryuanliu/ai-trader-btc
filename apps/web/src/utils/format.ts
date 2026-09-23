@@ -60,3 +60,24 @@ export function formatRelative(input?: string | number | Date | null): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
   return `${Math.floor(diff / 86400)} 天前`;
 }
+
+/**
+ * 仓位单（Lot）的止损/止盈**价格点位**。
+ *
+ * 按方向换算：LONG 止损在下（entry×(1−sl)）、止盈在上；SHORT 相反。
+ * 前端三处（订单页/总览/合约面板）共用同一算法，保证展示口径一致，
+ * 与服务端 checkLotExit 的判定公式（entry×(1±pct)）严格对齐。
+ */
+export function lotStopPrice(direction: string, entryPrice: number, stopLossPct: number): number {
+  if (!(entryPrice > 0)) return 0;
+  return direction === 'LONG' ? entryPrice * (1 - stopLossPct) : entryPrice * (1 + stopLossPct);
+}
+
+export function lotTakeProfitPrice(
+  direction: string,
+  entryPrice: number,
+  takeProfitPct: number,
+): number {
+  if (!(entryPrice > 0)) return 0;
+  return direction === 'LONG' ? entryPrice * (1 + takeProfitPct) : entryPrice * (1 - takeProfitPct);
+}

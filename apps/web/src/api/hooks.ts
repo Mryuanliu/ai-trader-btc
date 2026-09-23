@@ -643,6 +643,35 @@ export function useUpdateFuturesConfig() {
   });
 }
 
+/** 合约手动下单入参（action 为策略语义，lotId 传了就平该 Lot） */
+export interface FuturesPlaceOrderInput {
+  action: 'BUY' | 'SELL';
+  symbol?: string;
+  lotId?: string;
+  type?: 'MARKET' | 'LIMIT';
+  price?: number;
+  quantity?: number;
+  leverage?: number;
+}
+
+/** 合约手动下单：手动平指定 Lot（带 lotId）或开仓（不带 lotId） */
+export function useFuturesPlaceOrder() {
+  const client = useQueryClient();
+  return useMutation<
+    { order: { id: string; status: string } | null; leverage: number; risk: { passed: boolean; note?: string } },
+    Error,
+    FuturesPlaceOrderInput
+  >({
+    mutationFn: (body) => http.post('/futures/order', body),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['futures', 'positions'] });
+      void client.invalidateQueries({ queryKey: ['futures', 'orders'] });
+      void client.invalidateQueries({ queryKey: ['lots'] });
+      void client.invalidateQueries({ queryKey: ['overview'] });
+    },
+  });
+}
+
 export function useRunFuturesEngine() {
   const client = useQueryClient();
   return useMutation<

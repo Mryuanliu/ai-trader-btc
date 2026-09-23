@@ -115,6 +115,12 @@ export class TradingService {
           order.status = result.status;
           order.filledQuantity = result.filledQuantity;
           order.filledPrice = result.filledPrice;
+          // 通过 clientOrderId 首次回查成功后必须补写交易所单号。
+          // 否则合约成交对账会继续按“无交易所单号”跳过，
+          // 造成订单已 FILLED 但 trade_fills / position_lots 永久缺失。
+          if (!order.exchangeOrderId && result.exchangeOrderId) {
+            order.exchangeOrderId = result.exchangeOrderId;
+          }
           await this.orderRepo.save(order);
           this.events.emit('order', this.toDTO(order));
           updated += 1;

@@ -1,17 +1,24 @@
-import { useMemo } from 'react';
-import { Button, Card, Col, InputNumber, Row, Select, Slider, Space, Switch, Table, Tag, Tooltip, message } from 'antd';
+import { useMemo, useState } from 'react';
+import { App as AntApp, Button, Card, Col, InputNumber, Modal, Row, Select, Slider, Space, Switch, Table, Tag, Tooltip } from 'antd';
 import { PlayCircleOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import {
   useBacktestStrategies,
   useFuturesConfig,
   useFuturesHealth,
   useFuturesMargin,
+  useFuturesPlaceOrder,
   useFuturesPositions,
   useOpenLots,
   useRunFuturesEngine,
   useUpdateFuturesConfig,
 } from '@/api/hooks';
-import { formatPrice, formatTime } from '@/utils/format';
+import { useRequireAuth } from '@/components/AuthGate';
+import {
+  formatPrice,
+  formatTime,
+  lotStopPrice,
+  lotTakeProfitPrice,
+} from '@/utils/format';
 import { DEFAULT_FUTURES_AGENT_CONFIG } from '@ai-trader/shared';
 
 /**
@@ -27,11 +34,54 @@ export function AdminFutures() {
   const health = useFuturesHealth();
   const update = useUpdateFuturesConfig();
   const run = useRunFuturesEngine();
+  const place = useFuturesPlaceOrder();
   const strategies = useBacktestStrategies();
   // 本地合约仓位单（Lot）：订单级独立止盈止损，与交易所净持仓对照
   const { data: futuresLots = [] } = useOpenLots({ market: 'futures' });
+  const { message, modal } = AntApp.useApp();
+  const { run: requireAuth } = useRequireAuth();
+  /** 正在平仓的 Lot（用于按钮 loading 态） */
+  const [closingLotId, setClosingLotId] = useState<string | null>(null);
 
   const cfg = config.data;
+
+  /** 手动平掉指定 Lot：全量 reduceOnly，带精确 lotId */
+  const closeLot = (lot: (typeof futuresLots)[number]) => {
+    const entry = Number(lot.entryPrice);
+    const qty = Number(lot.quantity);
+    modal.confirm({
+      title: `平掉 ${lot.direction === 'LONG' ? '多' : '空'}仓`,
+      content: (
+        <div className="text-[12px] leading-relaxed">
+          <div>交易对：{lot.symbol}　方向：{lot.direction === 'LONG' ? '做多' : '做空'}</div>
+          <div>
+            数量：<span className="num">{qty.toFixed(6)}</span>　开仓价：
+            <span className="num">{formatPrice(entry)}</span>
+          </div>
+          <div className="mt-1 text-muted">市价单，成交后该 Lot 全量了结并结算盈亏。</div>
+        </div>
+      ),
+      okText: '确认平仓',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () =>
+        requireAuth(async () => {
+          setClosingLotId(lot.id);
+          try {
+            await place.mutateAsync({
+              action: lot.direction === 'LONG' ? 'SELL' : 'BUY',
+              symbol: lot.symbol,
+              lotId: lot.id,
+            });
+            message.success(`已提交平仓：${lot.symbol} ${qty.toFixed(4)} ${lot.direction}`);
+          } catch (err) {
+            message.error((err as Error).message);
+          } finally {
+            setClosingLotId(null);
+          }
+        }),
+    });
+  };
 
   /** 当前选中策略（含 paramSchema，用于动态渲染参数编辑表单） */
   const currentStrategy = useMemo(
@@ -199,11 +249,24 @@ export function AdminFutures() {
               render: (v: number) => <span className="num">{formatPrice(v)}</span>,
             },
             {
-              title: '止损/止盈', key: 'tpSl', width: 130,
+              title: '止损/止盈', key: 'tpSl', width: 170,
               render: (_, row) => (
-                <span className="num text-[11px] text-subtle">
-                  SL {(row.stopLossPct * 100).toFixed(1)}% / TP {(row.takeProfitPct * 100).toFixed(1)}%
-                </span>
+                <div className="flex flex-col leading-tight">
+                  <span className="text-[10px]">
+                    <span className="text-muted">SL </span>
+                    <span className="num text-down">
+                      {formatPrice(lotStopPrice(row.direction, Number(row.entryPrice), Number(row.stopLossPct) || 0))}
+                    </span>
+                    <span className="text-muted"> ({(row.stopLossPct * 100).toFixed(1)}%)</span>
+                  </span>
+                  <span className="text-[10px]">
+                    <span className="text-muted">TP </span>
+                    <span className="num text-up">
+                      {formatPrice(lotTakeProfitPrice(row.direction, Number(row.entryPrice), Number(row.takeProfitPct) || 0))}
+                    </span>
+                    <span className="text-muted"> ({(row.takeProfitPct * 100).toFixed(1)}%)</span>
+                  </span>
+                </div>
               ),
             },
             {
@@ -220,6 +283,21 @@ export function AdminFutures() {
             {
               title: '开仓时间', dataIndex: 'openedAt', width: 140,
               render: (v: string) => <span className="num text-[11px] text-muted">{formatTime(v)}</span>,
+            },
+            {
+              title: '操作', key: 'action', width: 90,
+              render: (_, row) =>
+                row.status !== 'OPEN' ? null : (
+                  <Button
+                    size="small"
+                    danger
+                    loading={closingLotId === row.id || place.isPending}
+                    disabled={closingLotId !== null}
+                    onClick={() => closeLot(row)}
+                  >
+                    平仓
+                  </Button>
+                ),
             },
           ]}
         />

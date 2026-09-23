@@ -99,6 +99,16 @@ export class OrderEntity {
   @Column({ default: false })
   reduceOnly: boolean;
 
+  /**
+   * 目标仓位单（Lot）ID：仅平仓单有值（下单时精确记录要平掉哪个 Lot）。
+   *
+   * 用途：成交对账（syncPendingFills）用它**精确**结算，避免 demo 异步成交
+   * 走兜底时用 FIFO 猜最老 Lot 而结错仓。开仓单为 null。
+   */
+  @Index('IDX_orders_lotId')
+  @Column({ type: 'uuid', nullable: true })
+  lotId: string | null;
+
   @Column({ type: 'text', nullable: true })
   error: string | null;
 

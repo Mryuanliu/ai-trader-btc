@@ -551,11 +551,15 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     // 此时方向完全由 side + reduceOnly 表达：BUY/SELL 决定开仓方向，
     // reduceOnly 决定是平仓还是开仓。
     const mode = await this.getPositionMode();
-    if (mode === 'hedge' && input.positionSide) {
-      payload.positionSide = input.positionSide;
+    if (mode === 'hedge') {
+      // 双向持仓：平仓由「反向 side + positionSide」表达。
+      // ⚠️ hedge 模式**不接受 reduceOnly**（币安 -1106「Parameter 'reduceonly' sent when not required」），
+      // 之前同时下发两个参数导致所有平仓单被拒、Lot 永远无法结算（2026-09-02 实测修复）。
+      if (input.positionSide) payload.positionSide = input.positionSide;
+    } else {
+      // 单向持仓：禁止下发 positionSide（-4061），方向由 side + reduceOnly 表达
+      if (input.reduceOnly) payload.reduceOnly = 'true';
     }
-
-    if (input.reduceOnly) payload.reduceOnly = 'true';
     if (input.clientOrderId) payload.newClientOrderId = input.clientOrderId;
 
     const data = await this.signed<Record<string, any>>('POST', '/fapi/v1/order', payload);

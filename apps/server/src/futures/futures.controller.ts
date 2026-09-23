@@ -5,6 +5,7 @@ import { FuturesPositionService } from './futures-position.service';
 import { FuturesTradingService, PlaceFuturesOrderResult } from './futures-trading.service';
 import { FuturesEngine } from './futures-engine.service';
 import { FuturesDecisionsService } from './futures-decisions.service';
+import { LotService } from '../account/lot.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 
@@ -16,6 +17,7 @@ export class FuturesController {
     private readonly trading: FuturesTradingService,
     private readonly engine: FuturesEngine,
     private readonly decisions: FuturesDecisionsService,
+    private readonly lots: LotService,
   ) {}
 
   @UseGuards(JwtAuthGuard)
@@ -86,11 +88,34 @@ export class FuturesController {
       quantity?: number;
       leverage?: number;
       confirmToken?: string;
+      /**
+       * 手动平仓目标仓位单（Lot）：传了表示「全量平掉该 Lot」。
+       * 不传表示开仓（BUY 开多 / SELL 开空）。
+       */
+      lotId?: string;
     },
   ): Promise<PlaceFuturesOrderResult> {
     const action = body?.action;
     if (action !== 'BUY' && action !== 'SELL' && action !== 'HOLD') {
       throw new BusinessException('BAD_REQUEST', 'action 必须是 BUY / SELL / HOLD');
+    }
+    // 手动平仓必须带 lotId（每笔 Lot 全量平掉才算完结，避免碎单）
+    if (body.lotId) {
+      if (action === 'HOLD') {
+        throw new BusinessException('BAD_REQUEST', '平仓 Lot 时 action 不能为 HOLD');
+      }
+      const lot = await this.lots.getOpenLot(body.lotId);
+      if (!lot) {
+        throw new BusinessException('BAD_REQUEST', '未找到未完结的仓位单（lotId 无效或已平仓）');
+      }
+      // 校验方向：平 LONG 仓必须 SELL，平 SHORT 仓必须 BUY
+      const required = lot.direction === 'LONG' ? 'SELL' : 'BUY';
+      if (action !== required) {
+        throw new BusinessException(
+          'BAD_REQUEST',
+          `平 ${lot.direction} 仓必须用 ${required}（当前 action=${action}）`,
+        );
+      }
     }
     return this.trading.placeOrder({
       symbol: body.symbol,
@@ -100,6 +125,8 @@ export class FuturesController {
       quantity: body.quantity,
       leverage: body.leverage,
       confirmToken: body.confirmToken,
+      lotId: body.lotId,
+      exitReason: body.lotId ? 'MANUAL' : undefined,
       source: 'manual',
     });
   }

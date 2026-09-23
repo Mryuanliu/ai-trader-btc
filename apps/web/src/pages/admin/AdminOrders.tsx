@@ -6,7 +6,14 @@ import { useAllLots, useCancelOrder, useOrders, useOverview, useRoundTrips } fro
 import { ModeTag, OrderStatusTag, SideTag } from '@/components/OrderStatusTag';
 import { OrderCalendar } from '@/components/OrderCalendar';
 import { useRequireAuth } from '@/components/AuthGate';
-import { formatPrice, formatQty, formatTime, formatUsd } from '@/utils/format';
+import {
+  formatPrice,
+  formatQty,
+  formatTime,
+  formatUsd,
+  lotStopPrice,
+  lotTakeProfitPrice,
+} from '@/utils/format';
 
 const FILTERS = [
   { label: '全部', value: 'ALL' },
@@ -76,6 +83,15 @@ export function AdminOrders() {
     const m = new Map<string, (typeof allLots)[number]>();
     for (const lot of allLots) {
       if (lot.closeOrderId) m.set(lot.closeOrderId, lot);
+    }
+    return m;
+  }, [allLots]);
+
+  // 开仓订单 ID → 对应 Lot（开仓单也要能显示该仓的止盈止损价格点位）
+  const lotByOpenOrder = useMemo(() => {
+    const m = new Map<string, (typeof allLots)[number]>();
+    for (const lot of allLots) {
+      if (lot.openOrderId) m.set(lot.openOrderId, lot);
     }
     return m;
   }, [allLots]);
@@ -224,16 +240,35 @@ export function AdminOrders() {
             {
               title: '止盈止损',
               key: 'lotTpSl',
-              width: 120,
+              width: 170,
               align: 'right',
               render: (_, row) => {
-                const lot = lotByCloseOrder.get(row.id);
+                // 平仓单按 closeOrderId 关联；开仓单按 openOrderId 关联（展示该仓的价格点位）
+                const lot = lotByCloseOrder.get(row.id) ?? lotByOpenOrder.get(row.id);
                 if (!lot) return <span className="text-[11px] text-muted">--</span>;
+                const entry = Number(lot.entryPrice);
+                const sl = Number(lot.stopLossPct) || 0;
+                const tp = Number(lot.takeProfitPct) || 0;
+                const slPrice = lotStopPrice(lot.direction, entry, sl);
+                const tpPrice = lotTakeProfitPrice(lot.direction, entry, tp);
                 return (
-                  <div className="flex flex-col items-end leading-tight text-[10px] text-subtle">
-                    <span>开仓 {formatPrice(lot.entryPrice)}</span>
-                    <span>SL {(lot.stopLossPct * 100).toFixed(1)}% / TP {(lot.takeProfitPct * 100).toFixed(1)}%</span>
-                  </div>
+                  <Tooltip
+                    title={`${lot.direction === 'LONG' ? '多' : '空'}仓 · 开仓 ${formatPrice(entry)} · 止损 ${sl * 100}% / 止盈 ${tp * 100}%${lot.status === 'OPEN' ? ' · 持仓中' : ` · 已${lot.exitReason === 'TAKE_PROFIT' ? '止盈' : lot.exitReason === 'STOP_LOSS' ? '止损' : '平仓'}`}`}
+                  >
+                    <div className="flex flex-col items-end leading-tight">
+                      <span className="text-[10px] text-subtle">
+                        开仓 <span className="num text-white/90">{formatPrice(entry)}</span>
+                      </span>
+                      <span className="text-[10px]">
+                        <span className="text-muted">SL </span>
+                        <span className="num text-down">{formatPrice(slPrice)}</span>
+                      </span>
+                      <span className="text-[10px]">
+                        <span className="text-muted">TP </span>
+                        <span className="num text-up">{formatPrice(tpPrice)}</span>
+                      </span>
+                    </div>
+                  </Tooltip>
                 );
               },
             },

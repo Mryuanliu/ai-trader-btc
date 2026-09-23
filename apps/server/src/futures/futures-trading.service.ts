@@ -162,17 +162,30 @@ export class FuturesTradingService {
    * 因此每轮调度调用都安全，可放心高频执行。
    */
   async syncPendingFills(limit = 100): Promise<{ filled: number; lots: number; skipped: number }> {
-    // 已成交（FILLED / PARTIALLY_FILLED）且未写过成交明细的合约单
-    const rows = await this.orderRepo
-      .createQueryBuilder('o')
-      .leftJoin(TradeFillEntity, 'f', 'f."orderId" = o.id::text')
-      .where('o.market = :market', { market: 'futures' })
-      .andWhere('o.status IN (:...statuses)', { statuses: ['FILLED', 'PARTIALLY_FILLED'] })
-      .andWhere('o."exchangeOrderId" IS NOT NULL')
-      .andWhere('f.id IS NULL')
-      .orderBy('o."createdAt"', 'ASC')
-      .take(limit)
-      .getMany();
+    // 已成交（FILLED / PARTIALLY_FILLED）的合约单（有交易所单号才有对账意义）
+    const candidates = await this.orderRepo.find({
+      where: [
+        { market: 'futures', status: 'FILLED' },
+        { market: 'futures', status: 'PARTIALLY_FILLED' },
+      ],
+      order: { createdAt: 'ASC' },
+      take: limit * 2,
+    });
+
+    // 已写过成交明细的订单（内存差集，避免跨表 join 的 QueryBuilder 兼容性问题）
+    const withFillIds = new Set(
+      (
+        await this.fillRepo
+          .createQueryBuilder('f')
+          .select('f."orderId"', 'orderId')
+          .getRawMany<{ orderId: string }>()
+      ).map((r) => r.orderId),
+    );
+    const rows = candidates
+      // exchangeOrderId 为空但 clientOrderId 存在时也要回查：
+      // 这是 syncOpenOrders 历史上漏写交易所单号后的存量修复路径。
+      .filter((o) => (o.exchangeOrderId || o.clientOrderId) && !withFillIds.has(o.id))
+      .slice(0, limit);
 
     if (rows.length === 0) return { filled: 0, lots: 0, skipped: 0 };
 
@@ -188,6 +201,9 @@ export class FuturesTradingService {
           exchangeOrderId: order.exchangeOrderId ?? undefined,
           clientOrderId: order.clientOrderId ?? undefined,
         });
+        if (!order.exchangeOrderId && detail.exchangeOrderId) {
+          order.exchangeOrderId = detail.exchangeOrderId;
+        }
         if (!(detail.filledQuantity > 0)) {
           skipped += 1;
           this.logger.debug(`对账跳过（交易所未成交）：orderId=${order.id}`);
@@ -224,17 +240,32 @@ export class FuturesTradingService {
         order.filledPrice = fillPrice;
         await this.orderRepo.save(order);
 
-        // Lot 挂接：reduceOnly=平仓（结算同方向最老 Lot）；否则开仓（建 Lot）
+        // Lot 挂接：reduceOnly=平仓（优先按订单 lotId 精确结算）；否则开仓（建 Lot）
         if (order.reduceOnly) {
-          const target = await this.lots.findOldestOpenLot(
-            'futures',
-            order.symbol,
-            order.positionSide === 'SHORT' ? 'SHORT' : 'LONG',
-          );
+          const direction = order.positionSide === 'SHORT' ? 'SHORT' : 'LONG';
+          // 优先精确：placeOrder 已把目标 lotId 写入订单（P1 修复，2026-09-02）
+          let target: PositionLotEntity | null = null;
+          if (order.lotId) {
+            target = await this.lots.getOpenLot(order.lotId);
+            if (!target) {
+              // lotId 指定但 Lot 已完结 → 引擎已精确结算过（该订单不该再进来），
+              // 此时**不再 FIFO 兜底**，避免把另一笔还在持仓的 Lot 误结掉
+              this.logger.warn(
+                `对账：订单 lotId=${order.lotId} 对应 Lot 已不存在或已完结（orderId=${order.id}），` +
+                  `认为已被引擎结算，跳过（避免误结其他仓）`,
+              );
+              skipped += 1;
+              continue;
+            }
+          } else {
+            // 历史平仓单（lotId 为空，改造前无此列）：FIFO 猜最老同方向 Lot 兜底
+            target = await this.lots.findOldestOpenLot('futures', order.symbol, direction);
+          }
           if (!target) {
             this.logger.warn(
               `对账：平仓单未找到可结算的未完结 Lot（orderId=${order.id}），跳过结算`,
             );
+            skipped += 1;
           } else {
             await this.lots.settleFromCloseFill({
               lotId: target.id,
@@ -470,6 +501,8 @@ export class FuturesTradingService {
       leverage,
       positionSide: intent.positionSide,
       reduceOnly: intent.kind === 'close',
+      // 平仓单精确记录目标 Lot，供成交对账精确结算（避免 FIFO 猜错仓）
+      lotId: intent.kind === 'close' ? (input.lotId ?? null) : null,
     });
     order = await this.orderRepo.save(order);
 
