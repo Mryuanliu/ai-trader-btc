@@ -20,6 +20,30 @@ export interface ExchangeCredentials {
   environment: Environment;
 }
 
+/**
+ * 交易所资金流水。
+ *
+ * 完整反映账户资金的每一次变动，是**盈亏对账的权威口径**：
+ * - `REALIZED_PNL` —— 平仓已实现盈亏（基于实际成交价，已含滑点）
+ * - `COMMISSION`    —— 手续费（开仓 + 平仓）
+ * - `FUNDING_FEE`   —— 资金费（持仓期间的成本/收益）
+ *
+ * 净盈亏 = Σ 三类之和。成交回报（fill）只含 COMMISSION，
+ * 资金费必须从这里补——否则「按成交算的盈亏」和「交易所真实到账」永远对不上。
+ */
+export interface IncomeRecord {
+  /** 交易所流水号（幂等去重键） */
+  tranId: string;
+  /** 资金类型：REALIZED_PNL / COMMISSION / FUNDING_FEE / … */
+  incomeType: string;
+  symbol: string;
+  asset: string;
+  /** 金额：正为入账，负为出账 */
+  amount: number;
+  /** 发生时间（毫秒时间戳） */
+  time: number;
+}
+
 export interface PlaceOrderInput {
   symbol: string;
   side: OrderSide;
@@ -178,6 +202,17 @@ export interface ExchangeAdapter {
    * 获取失败时回落到兜底值而不抛异常，交由下单后的交易所错误来暴露。
    */
   getSymbolFilters(symbol: string): Promise<SymbolFilters>;
+
+  /**
+   * 资金流水（income）。
+   *
+   * **这是「交易所真实盈亏」的权威来源**：成交回报（fill）只带交易手续费，
+   * 而持仓期间的资金费（funding）、以及部分结算类盈亏都不走成交回报，
+   * 只有 income 流水能完整反映账户资金的每一次变动。
+   *
+   * 按 `tranId` 去重后可安全重复拉取。
+   */
+  getIncome(query?: { startTime?: number; endTime?: number; limit?: number }): Promise<IncomeRecord[]>;
   placeOrder(input: PlaceOrderInput): Promise<OrderResult>;
   cancelOrder(input: CancelOrderInput): Promise<OrderResult>;
   getOrder(query: OrderQuery): Promise<OrderResult>;

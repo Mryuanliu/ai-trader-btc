@@ -8,6 +8,7 @@ import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import { FuturesConfigService } from '../futures/futures-config.service';
 import { FuturesTradingService } from '../futures/futures-trading.service';
 import { StrategyRunner } from '../strategy/strategy-runner.service';
+import { IncomeService } from '../account/income.service';
 
 /**
  * 主循环。
@@ -22,6 +23,7 @@ export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
   private lastNewsAt = 0;
   private lastOrderSyncAt = 0;
+  private lastIncomeSyncAt = 0;
   /** 按 key 记录上次告警时间，避免高频刷屏 */
   private readonly warnThrottle = new Map<string, number>();
 
@@ -33,6 +35,7 @@ export class SchedulerService {
     private readonly futuresConfig: FuturesConfigService,
     private readonly futuresTrading: FuturesTradingService,
     private readonly strategy: StrategyRunner,
+    private readonly income: IncomeService,
   ) {}
 
   /** 主循环：行情、对账、挂单触发、策略驱动 */
@@ -64,6 +67,18 @@ export class SchedulerService {
           }
         })
         .catch((err) => this.logger.warn(`合约成交对账异常: ${err.message}`));
+    }
+
+    // 资金流水同步（含资金费/持仓费用）。
+    // 资金费不产生成交，只能从交易所流水取；不同步的话
+    // 本地算出的盈亏与账户真实到账永远对不上。滚动窗口 24h，tranId 幂等。
+    if (now - this.lastIncomeSyncAt > 300_000) {
+      this.lastIncomeSyncAt = now;
+      void this.income
+        .sync(24)
+        .catch((err) =>
+          this.throttledWarn('income-sync', `资金流水同步异常: ${err.message}`, 300_000),
+        );
     }
 
     // dry-run 的网格挂单需要每 tick 检查触发（否则要等一个对账周期才成交）

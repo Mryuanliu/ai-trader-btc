@@ -11,6 +11,7 @@ import type {
 } from '@ai-trader/shared';
 import { BasketEntity } from '../database/entities/basket.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
+import { IncomeService } from './income.service';
 
 /**
  * 篮子服务：维护「一次建仓 → 全部了结」周期的统计。
@@ -32,6 +33,7 @@ export class BasketService {
     private readonly basketRepo: Repository<BasketEntity>,
     @InjectRepository(PositionLotEntity)
     private readonly lotRepo: Repository<PositionLotEntity>,
+    private readonly income: IncomeService,
   ) {}
 
   /** 取该交易对当前的 OPEN 篮子；没有则新建（并分配编号） */
@@ -60,6 +62,7 @@ export class BasketService {
         closedQuantity: 0,
         avgExitPrice: null,
         feeTotal: 0,
+        fundingFee: 0,
         realizedPnl: 0,
         returnPct: null,
         exitReason: null,
@@ -148,6 +151,18 @@ export class BasketService {
       basket.status = 'CLOSED';
       basket.closedAt = basket.closedAt ?? last?.closedAt ?? new Date();
       basket.exitReason = last?.exitReason ?? null;
+
+      // 资金费（持仓费用）：不产生成交，只能从交易所资金流水取。
+      // 取「篮子存续期间」该交易对的实际收取额——这才是账户真实扣掉的那部分。
+      try {
+        basket.fundingFee = await this.income.fundingFeeBetween(
+          basket.symbol,
+          basket.openedAt,
+          basket.closedAt,
+        );
+      } catch (err) {
+        this.logger.warn(`篮子 ${basket.code} 资金费取数失败：${(err as Error).message}`);
+      }
     }
 
     return this.basketRepo.save(basket);
@@ -254,6 +269,7 @@ export class BasketService {
       closedQuantity: num(basket.closedQuantity),
       avgExitPrice: basket.avgExitPrice === null ? null : num(basket.avgExitPrice),
       realizedPnl: num(basket.realizedPnl),
+      fundingFee: num(basket.fundingFee),
       returnPct: basket.returnPct === null ? null : num(basket.returnPct),
       openQuantity: openQty,
       unrealizedPnl: unrealized,

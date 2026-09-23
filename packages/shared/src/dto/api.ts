@@ -307,8 +307,15 @@ export interface BasketSummary {
   closedQuantity: number;
   /** 平仓均价（未平完时为部分口径） */
   avgExitPrice: number | null;
-  /** 整体盈亏 = Σ 各层净盈亏（含双边手续费） */
+  /** 整体盈亏 = Σ 各层净盈亏（含开仓 + 平仓手续费） */
   realizedPnl: number;
+  /**
+   * 资金费（持仓费用）：篮子存续期内交易所实际收取/支付之和（可正可负）。
+   *
+   * 不产生成交，所以只能从交易所资金流水取——做多做空方向不同，
+   * 可能是成本也可能是收益。
+   */
+  fundingFee: number;
   /** 整体收益率 = 整体盈亏 / 开仓名义 */
   returnPct: number | null;
   /** 未平仓数量（= 总数量 − 已平数量） */

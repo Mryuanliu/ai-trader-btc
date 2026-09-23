@@ -18,6 +18,7 @@ import { FuturesTradingService } from '../futures/futures-trading.service';
 import { LlmClient } from '../agent/llm.client';
 import { PositionService } from '../account/position.service';
 import { BasketService } from '../account/basket.service';
+import { IncomeService } from '../account/income.service';
 import { TradingService } from '../trading/trading.service';
 import { FuturesPositionService } from '../futures/futures-position.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -43,6 +44,7 @@ export class OverviewService {
     private readonly trading: TradingService,
     private readonly positions: PositionService,
     private readonly baskets: BasketService,
+    private readonly income: IncomeService,
     private readonly futuresPositions: FuturesPositionService,
     private readonly registry: ExchangeRegistry,
     private readonly dataSource: DataSource,
@@ -65,11 +67,16 @@ export class OverviewService {
     ]);
     const trips: RoundTrip[] = futuresTrips.trips;
 
-    // 今日盈亏 = 已实现（今日平仓回合）+ 浮动（当前合约持仓，交易所口径）
+    // 今日盈亏：已实现优先取**交易所资金流水**（REALIZED_PNL + COMMISSION + FUNDING_FEE）——
+    // 这才是账户真实到账的盈亏，按成交算会漏掉资金费（持仓费用）
+    const incomeToday = await this.income
+      .summary({ from: new Date(startOfToday()) })
+      .catch(() => null);
     const pnlBreakdown = buildPnlBreakdown({
       trips,
       fillCount: futuresTrips.fillCount,
       futuresPositions,
+      incomeToday,
     });
     const pnlByOrder = buildPnlByOrder(trips);
 
@@ -278,17 +285,29 @@ export class OverviewService {
 }
 
 /**
- * 今日盈亏 = 已实现（今日平仓回合）+ 浮动（合约持仓，交易所 unrealizedProfit）。
+ * 今日盈亏 = 已实现（今日平仓）+ 浮动（合约持仓，交易所 unrealizedProfit）。
  *
  * 口径要点：
- * - 已实现取回合净盈亏，与订单页「回合盈亏」同源同口径（已扣手续费）
- * - 合约浮动取交易所 positionRisk 的 unrealizedProfit（本地无法还原保证金与资金费）
+ * - **已实现优先取交易所资金流水**（`REALIZED_PNL + COMMISSION + FUNDING_FEE`）：
+ *   这才是账户真实到账的盈亏——只按成交算会漏掉资金费（每 8 小时独立结算、
+ *   不产生成交），导致本地盈亏与账户实际变动对不上。
+ *   流水数据缺失时（首次同步前）回退到回合口径（已扣双边手续费）。
+ * - 合约浮动取交易所 positionRisk 的 unrealizedProfit
  * - hasBaseline：既无成交也无持仓时，盈亏没有数据支撑，前端应展示 `--` 而非 0
  */
 export function buildPnlBreakdown(input: {
   trips: RoundTrip[];
   fillCount: number;
   futuresPositions: FuturesPositionSnapshot[];
+  /** 今日资金流水汇总（交易所权威口径）；未同步到数据时传 null */
+  incomeToday?: {
+    realizedPnl: number;
+    commission: number;
+    fundingFee: number;
+    other: number;
+    net: number;
+    count: number;
+  } | null;
 }): {
   realizedPnlToday: number;
   unrealizedPnlToday: number;
@@ -297,9 +316,12 @@ export function buildPnlBreakdown(input: {
 } {
   const todayStart = startOfToday();
 
-  const realizedPnlToday = input.trips
-    .filter((t) => t.closedAt >= todayStart)
-    .reduce((acc, t) => acc + t.netPnl, 0);
+  const usingIncome = (input.incomeToday?.count ?? 0) > 0;
+  const realizedPnlToday = usingIncome
+    ? input.incomeToday!.net
+    : input.trips
+        .filter((t) => t.closedAt >= todayStart)
+        .reduce((acc, t) => acc + t.netPnl, 0);
 
   const unrealizedPnlToday = input.futuresPositions.reduce((acc, p) => acc + p.unrealizedPnl, 0);
 
@@ -309,7 +331,7 @@ export function buildPnlBreakdown(input: {
     realizedPnlToday: Number(realizedPnlToday.toFixed(8)),
     unrealizedPnlToday: Number(unrealizedPnlToday.toFixed(8)),
     pnlToday: Number((realizedPnlToday + unrealizedPnlToday).toFixed(8)),
-    hasBaseline: input.fillCount > 0 || holdingQty > 0,
+    hasBaseline: input.fillCount > 0 || holdingQty > 0 || usingIncome,
   };
 }
 

@@ -84,6 +84,15 @@ export class BasketEntity {
   @Column({ type: 'decimal', precision: 28, scale: 10, default: 0 })
   feeTotal: number;
 
+  /**
+   * 资金费（持仓费用）：篮子存续期间交易所实际收取/支付的和。
+   *
+   * 资金费**不产生成交**（每 8 小时独立结算），所以从 fill 里永远算不出来，
+   * 必须从交易所 income 流水取。做多做空方向不同，可能为负（成本）或正（收益）。
+   */
+  @Column({ type: 'decimal', precision: 28, scale: 10, default: 0 })
+  fundingFee: number;
+
   /** 整体盈亏 = Σ Lot.realizedPnl（已含双边手续费） */
   @Column({ type: 'decimal', precision: 28, scale: 10, default: 0 })
   realizedPnl: number;

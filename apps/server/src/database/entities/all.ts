@@ -1,5 +1,6 @@
 import {
   BasketEntity,
+  ExchangeIncomeEntity,
   FuturesAgentConfigEntity,
   ExchangeAccountEntity,
   MarketCandleEntity,
@@ -17,6 +18,7 @@ export const ALL_ENTITIES = [
   ExchangeAccountEntity,
   FuturesAgentConfigEntity,
   BasketEntity,
+  ExchangeIncomeEntity,
   OrderEntity,
   TradeFillEntity,
   PositionLotEntity,

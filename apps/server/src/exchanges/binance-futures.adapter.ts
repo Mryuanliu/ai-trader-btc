@@ -20,6 +20,7 @@ import {
   CancelOrderInput,
   ExchangeError,
   FuturesExchangeAdapter,
+  IncomeRecord,
   OrderQuery,
   OrderResult,
   PlaceOrderInput,
@@ -200,6 +201,45 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
       `HTTP_${response?.status ?? code ?? 'NETWORK'}`,
       `币安合约请求失败 ${url} -> ${detail}`,
     );
+  }
+
+  /**
+   * 资金流水（含手续费、资金费、已实现盈亏）。
+   *
+   * 币安一次最多返回 1000 条；不传 startTime 时默认给最近 24 小时，
+   * 避免首次调用拉回全量历史。
+   */
+  async getIncome(query: {
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  } = {}): Promise<IncomeRecord[]> {
+    const params: Record<string, unknown> = {
+      limit: Math.min(1000, Math.max(1, query.limit ?? 1000)),
+      // 默认最近 24h：收入流水是增量对账用的，不需要每次拉全量历史
+      startTime: query.startTime ?? Date.now() - 24 * 60 * 60 * 1000,
+    };
+    if (query.endTime) params.endTime = query.endTime;
+
+    const rows = await this.signed<
+      Array<{
+        tranId: number | string;
+        incomeType: string;
+        symbol: string;
+        asset: string;
+        income: string;
+        time: number;
+      }>
+    >('GET', '/fapi/v1/income', params);
+
+    return rows.map((r) => ({
+      tranId: String(r.tranId),
+      incomeType: r.incomeType,
+      symbol: r.symbol,
+      asset: r.asset,
+      amount: Number(r.income),
+      time: Number(r.time),
+    }));
   }
 
   // ---------------------------------------------------------------- 公共接口

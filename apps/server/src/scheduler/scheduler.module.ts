@@ -6,6 +6,7 @@ import { NewsModule } from '../news/news.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { FuturesModule } from '../futures/futures.module';
 import { StrategyModule } from '../strategy/strategy.module';
+import { AccountModule } from '../account/account.module';
 
 /**
  * 调度模块。
@@ -23,6 +24,8 @@ import { StrategyModule } from '../strategy/strategy.module';
     FuturesModule,
     // StrategyRunner：主循环每 5 秒驱动一次策略 tick
     StrategyModule,
+    // IncomeService：周期性同步交易所资金流水（含资金费）
+    AccountModule,
   ],
   providers: [SchedulerService],
 })

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   BasketEntity,
+  ExchangeIncomeEntity,
   OrderEntity,
   PositionLotEntity,
   TradeFillEntity,
@@ -9,6 +10,7 @@ import {
 import { PositionService } from './position.service';
 import { LotService } from './lot.service';
 import { BasketService } from './basket.service';
+import { IncomeService } from './income.service';
 import { LotsController } from './lots.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { MarketModule } from '../market/market.module';
@@ -25,12 +27,18 @@ import { MarketModule } from '../market/market.module';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([OrderEntity, TradeFillEntity, PositionLotEntity, BasketEntity]),
+    TypeOrmModule.forFeature([
+      OrderEntity,
+      TradeFillEntity,
+      PositionLotEntity,
+      BasketEntity,
+      ExchangeIncomeEntity,
+    ]),
     ExchangesModule,
     MarketModule,
   ],
-  providers: [PositionService, LotService, BasketService],
+  providers: [PositionService, LotService, BasketService, IncomeService],
   controllers: [LotsController],
-  exports: [PositionService, LotService, BasketService],
+  exports: [PositionService, LotService, BasketService, IncomeService],
 })
 export class AccountModule {}

@@ -550,10 +550,12 @@ export function AdminOverview() {
               key: 'pnl',
               align: 'right',
               render: (_, row) => {
-                // 未了结的篮子还没有已实现盈亏，用浮盈补上——
-                // 否则这一列会一直显示 0，看不出这一轮在赚还是在亏
+                // 交易所口径净收益 = 各层已实现（含开平手续费）+ 资金费（持仓费用）+ 未平浮盈。
+                // 资金费不产生成交，只有算进来才与账户真实到账一致。
                 const pnl =
-                  row.status === 'CLOSED' ? row.realizedPnl : row.realizedPnl + row.unrealizedPnl;
+                  row.realizedPnl +
+                  row.fundingFee +
+                  (row.status === 'CLOSED' ? 0 : row.unrealizedPnl);
                 return (
                   <div className={clsx('num leading-tight', trendClass(pnl))}>
                     <div>{formatSignedUsd(pnl)}</div>
@@ -563,6 +565,18 @@ export function AdminOverview() {
                   </div>
                 );
               },
+            },
+            {
+              title: '资金费',
+              dataIndex: 'fundingFee',
+              align: 'right',
+              render: (v: number) => (
+                <Tooltip title="持仓费用（交易所每 8 小时结算，不产生成交）">
+                  <span className={clsx('num', v === 0 ? 'text-muted' : trendClass(v))}>
+                    {formatSignedUsd(v)}
+                  </span>
+                </Tooltip>
+              ),
             },
             {
               title: '收益率',
