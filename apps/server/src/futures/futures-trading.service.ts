@@ -694,6 +694,8 @@ export class FuturesTradingService {
     positionSide: PositionSide;
     stopPrice: number;
     quantity: number;
+    /** 杠杆覆盖（策略声明）；不传用配置值 */
+    leverage?: number;
     source: OrderSource;
     /** 用途说明（仅日志留痕，如 grid-long-L2） */
     note?: string;
@@ -747,7 +749,7 @@ export class FuturesTradingService {
       status: 'NEW',
       clientOrderId,
       source: input.source,
-      leverage: Math.max(1, Math.floor(cfg.leverage)),
+      leverage: Math.max(1, Math.floor(input.leverage ?? cfg.leverage)),
       // hedge 模式下开仓单必须带 positionSide，否则交易所无法判断挂在哪个方向
       positionSide: input.positionSide,
       reduceOnly: false,
@@ -828,6 +830,27 @@ export class FuturesTradingService {
     const saved = await this.orderRepo.save(order);
     this.logger.log(`已撤单：${order.side} ${order.quantity} ${order.symbol}（orderId=${orderId}）`);
     return this.toDTO(saved);
+  }
+
+  /**
+   * 有**在途平仓委托**的 Lot id 列表。
+   *
+   * 平仓单从「下单」到「成交回调落库」之间有时间差：这段时间 Lot 仍是 OPEN，
+   * 篮子判定会以为「没平掉」而再次下单——同一个 Lot 被平两次，
+   * 第二次在已无仓位时就会变成**反向开仓**（reduceOnly 被交易所拒绝或被当新仓）。
+   * 策略据此跳过重复出场。
+   */
+  async listPendingCloseLotIds(symbol?: string): Promise<string[]> {
+    const rows = await this.orderRepo.find({
+      where: symbol
+        ? { market: 'futures', symbol, reduceOnly: true, status: 'NEW' }
+        : { market: 'futures', reduceOnly: true, status: 'NEW' },
+      select: { lotId: true },
+      take: 200,
+    });
+    return rows
+      .map((r) => r.lotId)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0);
   }
 
   /** 未成交订单（策略的网格待成交层）：运行器构造 ctx.openOrders 用它 */

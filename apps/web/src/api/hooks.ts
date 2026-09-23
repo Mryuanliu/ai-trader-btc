@@ -372,11 +372,12 @@ export function useStartStrategy() {
   return useMutation<
     StrategyStartResult,
     Error,
-    { name: string; params?: Record<string, unknown> }
+    { name: string; params?: Record<string, unknown>; adoptExisting?: boolean }
   >({
     mutationFn: (body) => http.post('/strategy/start', body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['strategy-status'] });
+      void qc.invalidateQueries({ queryKey: ['lots'] });
     },
   });
 }

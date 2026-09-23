@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
 import { OrderEntity } from '../database/entities/order.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
+import { BasketService } from './basket.service';
 
 @Injectable()
 export class LotService {
@@ -12,6 +13,7 @@ export class LotService {
   constructor(
     @InjectRepository(PositionLotEntity)
     private readonly lotRepo: Repository<PositionLotEntity>,
+    private readonly baskets: BasketService,
   ) {}
 
   /**
@@ -48,6 +50,9 @@ export class LotService {
       openedAt: new Date(),
     });
     const saved = await this.lotRepo.save(lot);
+    // 挂到当前篮子上：一次「建仓 → 全部了结」的周期就是一个篮子，
+    // 有了它才能算出「这一轮整体赚了多少」——单看每一层毫无意义（加层时中间层都在浮亏）
+    await this.baskets.attachLot(saved, order.source);
     this.logger.log(
       `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price}`,
     );
@@ -93,6 +98,8 @@ export class LotService {
     lot.status = 'CLOSED';
     lot.closedAt = new Date();
     const saved = await this.lotRepo.save(lot);
+    // 重算篮子统计；若这是最后一层，篮子会被关闭并落定整体盈亏
+    await this.baskets.onLotSettled(lot.basketId);
     this.logger.log(
       `Lot 结算 ${lot.market} ${lot.direction} ${lot.symbol} ${exitReason}: pnl=${realizedPnl} (${(returnPct * 100).toFixed(2)}%)`,
     );
@@ -175,6 +182,7 @@ export class LotService {
       market: lot.market,
       symbol: lot.symbol,
       direction: lot.direction,
+      basketId: lot.basketId ?? null,
       openOrderId: lot.openOrderId,
       closeOrderId: lot.closeOrderId,
       quantity: Number(lot.quantity),

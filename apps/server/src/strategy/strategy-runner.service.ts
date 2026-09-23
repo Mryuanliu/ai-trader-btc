@@ -64,8 +64,21 @@ export class StrategyRunner {
     return this.registry.list();
   }
 
-  /** 启动策略：无运行中策略 + 无未完结仓位单才放行 */
-  async start(name: string, rawParams?: Record<string, unknown>): Promise<StrategyStartResult> {
+  /**
+   * 启动策略。
+   *
+   * 默认拒绝在「存在未完结仓位单」时启动——那是上一个策略留下的仓位，
+   * 两套策略的仓位混在一起无法归因。
+   *
+   * 但**服务重启后策略状态会丢失**（runner 是内存状态），此时自己的仓位
+   * 反而会把自己挡住，形成死锁。因此提供 `adoptExisting`：确认这些仓位
+   * 由当前策略接管，则跳过拦截直接启动（前端会弹窗让用户明确选择）。
+   */
+  async start(
+    name: string,
+    rawParams?: Record<string, unknown>,
+    opts?: { adoptExisting?: boolean },
+  ): Promise<StrategyStartResult> {
     if (this.current) {
       return {
         ok: false,
@@ -80,13 +93,21 @@ export class StrategyRunner {
     }
 
     const blockingLots = await this.getBlockingLots();
-    if (blockingLots.length > 0) {
+    if (blockingLots.length > 0 && !opts?.adoptExisting) {
       return {
         ok: false,
         status: await this.getStatus(),
         blockingLots,
-        message: `还有 ${blockingLots.length} 个仓位单未平仓，请先在合约面板手动平掉后再启动策略`,
+        message:
+          `还有 ${blockingLots.length} 个仓位单未平仓。` +
+          '若这是同一个策略留下的（例如服务重启），可选择「接管并启动」继续管理；' +
+          '否则请先在合约面板手动平掉。',
       };
+    }
+    if (blockingLots.length > 0) {
+      this.logger.warn(
+        `接管已有仓位启动（${blockingLots.length} 个未完结仓位单），出场将由本策略负责`,
+      );
     }
 
     const params = strategy.normalizeParams(rawParams);
@@ -252,12 +273,15 @@ export class StrategyRunner {
     }
 
     const candles: Candle[] = this.market.getCandles(symbol, '1m', CONTEXT_CANDLE_LIMIT);
-    const [openLots, openOrders, availableMargin, netQty] = await Promise.all([
+    const [openLots, openOrders, availableMargin, netQty, pendingCloseLots] = await Promise.all([
       this.lots.listOpen('futures', symbol),
       this.trading.listOpenOrders(symbol),
       this.safeAvailableMargin(),
       this.positions.getNetQuantity(symbol),
+      // 在途平仓委托：策略据此避免对同一 Lot 重复平仓
+      this.trading.listPendingCloseLotIds(symbol),
     ]);
+    const pendingCloseSet = new Set(pendingCloseLots);
 
     return {
       symbol,
@@ -273,6 +297,7 @@ export class StrategyRunner {
           entryPrice: dto.entryPrice,
           unrealizedPnl: dto.unrealizedPnl ?? 0,
           openedAt: dto.openedAt,
+          hasPendingClose: pendingCloseSet.has(dto.id),
         };
       }),
       openOrders: openOrders.map((o) => ({

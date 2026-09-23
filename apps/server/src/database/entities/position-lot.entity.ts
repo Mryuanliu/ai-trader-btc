@@ -25,6 +25,7 @@ import {
 @Entity('position_lots')
 @Index('IDX_lots_market_symbol_status', ['market', 'symbol', 'status'])
 @Index('IDX_lots_open_order', ['openOrderId'])
+@Index('IDX_lots_basket', ['basketId'])
 export class PositionLotEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -38,6 +39,16 @@ export class PositionLotEntity {
   /** 仓位方向：现货恒 LONG；合约 hedge 下 LONG/SHORT 可共存（锁仓） */
   @Column({ type: 'varchar', length: 8 })
   direction: LotDirection;
+
+  /**
+   * 所属篮子（一次「建仓 → 全部了结」的周期）。
+   *
+   * 加层过程中中间层必然浮亏，单看某一层没有意义；
+   * 挂到篮子上才能算出「这一轮整体赚了多少」。
+   * 历史数据（篮子功能上线前建的 Lot）为 null，前端显示为「未归档」。
+   */
+  @Column({ type: 'uuid', nullable: true })
+  basketId: string | null;
 
   /** 开仓订单（1:1，唯一） */
   @Column({ type: 'uuid' })

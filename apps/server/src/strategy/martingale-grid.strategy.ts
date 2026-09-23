@@ -18,7 +18,7 @@ const PARAM_SCHEMA = {
     maxLayersPerSide: { type: 'integer', title: '每侧最大层数', minimum: 1, maximum: 12 },
     firstStepAtrMult: { type: 'number', title: '首单距离(×ATR)', minimum: 0.1 },
     stepAtrMult: { type: 'number', title: '网格间距(×ATR)', minimum: 0.1 },
-    minStepPct: { type: 'number', title: '间距下限(比例)', minimum: 0.0001 },
+    minStepPct: { type: 'number', title: '间距下限(比例,成本地板)', minimum: 0.0001 },
     maxStepPct: { type: 'number', title: '间距上限(比例)', minimum: 0.001 },
     enabledSides: { type: 'string', title: '交易方向', enum: ['both', 'longOnly', 'shortOnly'] },
     useTrendFilter: { type: 'boolean', title: '单侧金字塔过滤(EA语义)' },
@@ -38,12 +38,15 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   maxLayersPerSide: 6,
   firstStepAtrMult: 1.0,
   stepAtrMult: 1.0,
-  minStepPct: 0.002,
-  maxStepPct: 0.03,
+  // 间距下限 = 成本地板：币安合约 taker 往返约 0.1%，间距须远高于它
+  // 才不至于「每层手续费吃掉全部利润」。0.3% ≈ 成本 × 3 ≈ BTC 1m ATR14。
+  minStepPct: 0.003,
+  // 上限收紧到 1.5%：ATR 飙升时不让间距失控（主流现货 1.5%~3% ÷ 10 倍杠杆）
+  maxStepPct: 0.015,
   enabledSides: 'both',
   useTrendFilter: true,
   trendMaPeriod: 30,
-  leverage: 5,
+  leverage: 10,
   pendingMode: true,
   basketStartPct: 0.015,
   basketGivebackPct: 0.005,
@@ -87,6 +90,33 @@ export class MartingaleGridStrategy implements TradingStrategy {
   /** 最近一次 tick 的决策摘要，供前端展示 */
   private lastNote = '';
 
+  /**
+   * 可观测快照：纯派生数据，不参与任何决策。
+   *
+   * 用户看到「只下了一单就不动了」时，需要能回答「它在等什么」——
+   * 是等价格走到加层线，还是等净收益触及止盈启动线。
+   * 没有这些数字，正常的等待与真的卡死无法区分。
+   */
+  private lastObs: {
+    price: number;
+    step: number;
+    longLayers: number;
+    shortLayers: number;
+    pendingLong: number;
+    pendingShort: number;
+    netPct: number;
+    nextAddLong: number | null;
+    nextAddShort: number | null;
+    maxLayers: number;
+    leverage: number;
+    basketStartPct: number;
+    basketGivebackPct: number;
+    ladder: {
+      long: Array<{ layer: number; price: number; qty: number }>;
+      short: Array<{ layer: number; price: number; qty: number }>;
+    };
+  } | null = null;
+
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown> {
     const src = raw ?? {};
     const num = (key: string, min: number, max: number): number => {
@@ -128,7 +158,27 @@ export class MartingaleGridStrategy implements TradingStrategy {
   }
 
   getState(): Record<string, unknown> {
-    return { basketPeakPct: this.basketPeakPct, note: this.lastNote };
+    const o = this.lastObs;
+    return {
+      basketPeakPct: this.basketPeakPct,
+      note: this.lastNote,
+      // 可观测信息：回答「为什么现在不动」
+      ...(o
+        ? {
+            price: o.price,
+            step: o.step,
+            netPct: o.netPct,
+            leverage: o.leverage,
+            layers: { long: o.longLayers, short: o.shortLayers },
+            pending: { long: o.pendingLong, short: o.pendingShort },
+            nextAdd: { long: o.nextAddLong, short: o.nextAddShort },
+            maxLayers: o.maxLayers,
+            basketStartPct: o.basketStartPct,
+            basketGivebackPct: o.basketGivebackPct,
+            ladder: o.ladder,
+          }
+        : {}),
+    };
   }
 
   async onTick(ctx: StrategyContext, exec: StrategyExecutor): Promise<void> {
@@ -145,6 +195,119 @@ export class MartingaleGridStrategy implements TradingStrategy {
 
     // ---- 3. 网格挂单 ----
     await this.ensureGrid(ctx, exec, allowLong, allowShort);
+
+    // ---- 4. 记录可观测快照（只读，供前端展示「在等什么」）----
+    this.recordObservability(ctx);
+  }
+
+  /**
+   * 记录可观测快照。
+   *
+   * 纯派生数据，只用于前端回答「策略现在在等什么」——
+   * 用户看到「只下了一单就不动了」时，需要知道是在等加层价还是等止盈线，
+   * 而不是以为策略卡死了。
+   */
+  /**
+   * 阶梯预览。
+   *
+   * 逐格推进每次只挂一层，用户看不到整条阶梯的空间布局，
+   * 于是「间距是不是太宽」只能靠猜。这里按当前状态把 1~N 层的触发价
+   * 全部推演出来（纯计算，不产生任何挂单），让阶梯在页面上可见。
+   */
+  private buildLadder(
+    lots: StrategyLotView[],
+    dir: LotDirection,
+    ctx: StrategyContext,
+    step: number,
+  ): Array<{ layer: number; price: number; qty: number }> {
+    const p = ctx.params as {
+      baseQty: number;
+      lotMultiplier: number;
+      maxLayersPerSide: number;
+      firstStepAtrMult: number;
+    };
+    // 多头越跌越买（阶梯向下），空头越涨越卖（阶梯向上）
+    const down = dir === 'LONG';
+    const firstStep = Math.max(step, this.atrOf(ctx.candles) * p.firstStepAtrMult);
+    const filled = lots.length;
+    const worst =
+      filled > 0
+        ? down
+          ? Math.min(...lots.map((l) => l.entryPrice))
+          : Math.max(...lots.map((l) => l.entryPrice))
+        : 0;
+
+    const rows: Array<{ layer: number; price: number; qty: number }> = [];
+    for (let k = 1; k <= p.maxLayersPerSide; k++) {
+      // 无持仓时首层距现价 firstStep，往后每层再远 1 个网格；
+      // 已有持仓时从最不利持仓价继续向外按 1 个网格延伸。
+      const price =
+        filled === 0
+          ? down
+            ? ctx.price + firstStep - (k - 1) * step
+            : ctx.price - firstStep + (k - 1) * step
+          : down
+            ? worst - (k - filled) * step
+            : worst + (k - filled) * step;
+      rows.push({
+        layer: k,
+        price,
+        qty: Number((p.baseQty * Math.pow(p.lotMultiplier, k - 1)).toFixed(8)),
+      });
+    }
+    return rows;
+  }
+
+  private recordObservability(ctx: StrategyContext): void {
+    const p = ctx.params as {
+      maxLayersPerSide: number;
+      leverage: number;
+      basketStartPct: number;
+      basketGivebackPct: number;
+    };
+    const longs = ctx.openLots.filter((l) => l.direction === 'LONG');
+    const shorts = ctx.openLots.filter((l) => l.direction === 'SHORT');
+    const pendingLong = ctx.openOrders.filter((o) => o.side === 'BUY').length;
+    const pendingShort = ctx.openOrders.filter((o) => o.side === 'SELL').length;
+
+    // 与 checkBasketExit 同口径：净收益率已扣预估平仓手续费
+    const netNotional = ctx.openLots.reduce((a, l) => a + l.entryPrice * l.quantity, 0);
+    const netPct =
+      netNotional > 0
+        ? (ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0) - netNotional * EXIT_FEE_RATE) /
+          netNotional
+        : 0;
+
+    const step = this.gridStep(ctx);
+    const nextAddFor = (lots: StrategyLotView[], dir: LotDirection): number | null => {
+      if (lots.length === 0) return null;
+      const worst =
+        dir === 'LONG'
+          ? Math.min(...lots.map((l) => l.entryPrice))
+          : Math.max(...lots.map((l) => l.entryPrice));
+      // 与 ensureSide 的 goneFar 判定保持一致（1 个网格）
+      return dir === 'LONG' ? worst - step : worst + step;
+    };
+
+    this.lastObs = {
+      price: ctx.price,
+      step,
+      longLayers: longs.length,
+      shortLayers: shorts.length,
+      pendingLong,
+      pendingShort,
+      netPct,
+      nextAddLong: nextAddFor(longs, 'LONG'),
+      nextAddShort: nextAddFor(shorts, 'SHORT'),
+      maxLayers: p.maxLayersPerSide,
+      leverage: p.leverage,
+      basketStartPct: p.basketStartPct,
+      basketGivebackPct: p.basketGivebackPct,
+      ladder: {
+        long: this.buildLadder(longs, 'LONG', ctx, step),
+        short: this.buildLadder(shorts, 'SHORT', ctx, step),
+      },
+    };
   }
 
   // ---------------------------------------------------------------- 出场
@@ -182,9 +345,23 @@ export class MartingaleGridStrategy implements TradingStrategy {
       return false;
     }
 
-    // 全平：先撤掉所有挂单，再逐 Lot 市价全平（Lot 模型禁止部分平仓）
+    // 出场已在进行中（平仓单在途）：本 tick 只等结果，不重复下单也不挂新单。
+    // 缺这道闸会让同一个 Lot 被平两次——第二次在已无仓位时就成了反向开仓。
+    const inflight = ctx.openLots.filter((l) => l.hasPendingClose).length;
+    if (inflight > 0) {
+      this.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
+      return true;
+    }
+
+    // 全平：先撤掉所有挂单，再逐 Lot 市价全平（Lot 模型禁止部分平仓）。
+    // 撤单失败必须中止本轮出场——否则挂单可能在平仓的同时被触发建新仓。
     for (const order of ctx.openOrders) {
-      await exec.cancelOrder(order.id);
+      const r = await exec.cancelOrder(order.id);
+      if (!r.ok) {
+        this.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
+        this.logger.warn(this.lastNote);
+        return true;
+      }
     }
     for (const lot of ctx.openLots) {
       const r = await exec.closeLot(lot.id, reason);
@@ -310,9 +487,11 @@ export class MartingaleGridStrategy implements TradingStrategy {
         dir === 'LONG'
           ? Math.min(...lots.map((l) => l.entryPrice))
           : Math.max(...lots.map((l) => l.entryPrice));
-      // 价格须相对最不利持仓再走远 2 个网格，才允许加层
-      const goneFar =
-        dir === 'LONG' ? ctx.price <= worst - 2 * step : ctx.price >= worst + 2 * step;
+      // 加层触发：EA 原样是「现价相对最不利持仓走远 1 个网格」
+      // （mq5: target_price <= buy_lowest_position - buy_step）。
+      // 曾误写成 2 个网格，等于把加层线翻倍——6 层需要 3.6%+ 的价格区间才铺得开，
+      // 实际表现就是「只下一单、再也不加层」。
+      const goneFar = dir === 'LONG' ? ctx.price <= worst - step : ctx.price >= worst + step;
       if (!goneFar) return;
       // 在现价外侧一步处挂突破单：等价格回头确认再进
       stopPrice = dir === 'LONG' ? ctx.price + step : ctx.price - step;
@@ -330,6 +509,8 @@ export class MartingaleGridStrategy implements TradingStrategy {
       direction: dir,
       stopPrice,
       quantity: qty,
+      // 策略自己声明杠杆，避免「参数写 5x、实际按配置 12x 下单」的不一致
+      leverage: p.leverage,
       reason: `grid-${dir.toLowerCase()}-L${layers + 1}`,
     });
     if (r.orderId) {

@@ -30,6 +30,8 @@ export class StrategyExecutorService implements StrategyExecutor {
         // 合约语义：BUY 恒开多 / SELL 恒开空（hedge mode 下多空可共存）
         action: input.direction === 'LONG' ? 'BUY' : 'SELL',
         quantity: input.quantity,
+        // 策略声明的杠杆优先于平台配置
+        leverage: input.leverage,
         source: 'strategy',
       });
       if (!result.order) {
@@ -75,6 +77,7 @@ export class StrategyExecutorService implements StrategyExecutor {
         positionSide: input.direction,
         stopPrice: input.stopPrice,
         quantity: input.quantity,
+        leverage: input.leverage,
         source: 'strategy',
         note: input.reason,
       });

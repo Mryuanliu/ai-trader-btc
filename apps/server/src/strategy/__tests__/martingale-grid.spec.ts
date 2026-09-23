@@ -23,6 +23,8 @@ function makeLot(overrides: Partial<StrategyLotView> = {}): StrategyLotView {
     entryPrice: 100_000,
     unrealizedPnl: 0,
     openedAt: new Date().toISOString(),
+    // 默认无在途平仓委托；需要模拟「出场进行中」的用例显式覆盖为 true
+    hasPendingClose: false,
     ...overrides,
   };
 }

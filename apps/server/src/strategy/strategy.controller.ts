@@ -26,13 +26,27 @@ export class StrategyController {
     return this.runner.getStatus();
   }
 
-  /** 启动策略：name + 可选 params（params 会经 normalizeParams 归一化） */
+  /**
+   * 启动策略：name + 可选 params（会经 normalizeParams 归一化）。
+   *
+   * `adoptExisting=true` 表示接管现有的未完结仓位单（服务重启后恢复运行用），
+   * 否则有未平仓单时会被拦下并返回明细。
+   */
   @Post('start')
-  async start(@Body() body: { name?: string; params?: Record<string, unknown> }) {
+  async start(
+    @Body()
+    body: {
+      name?: string;
+      params?: Record<string, unknown>;
+      adoptExisting?: boolean;
+    },
+  ) {
     if (!body?.name) {
       throw new BusinessException('BAD_REQUEST', '缺少策略名 name');
     }
-    const result = await this.runner.start(body.name, body.params);
+    const result = await this.runner.start(body.name, body.params, {
+      adoptExisting: body.adoptExisting === true,
+    });
     if (!result.ok && !result.blockingLots) {
       throw new BusinessException('BAD_REQUEST', result.message);
     }

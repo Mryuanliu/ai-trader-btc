@@ -76,44 +76,87 @@ export function AdminFutures() {
     update.mutate({ enabled: checked }, { onError: (e) => message.error(e.message) });
   };
 
-  const savePatch = (patch: Record<string, unknown>) => {
-    update.mutate(patch, { onError: (e) => message.error(e.message) });
+  /**
+   * 交易参数的本地草稿。
+   *
+   * 杠杆/保证金这类参数改错代价高，所以不走「拖动即保存」——
+   * 先改草稿，点「确定」才落库。`null` 表示「未编辑，显示服务端值」。
+   */
+  const [draft, setDraft] = useState<{
+    mode: string;
+    leverage: number;
+    positionPct: number;
+  } | null>(null);
+
+  const cur = {
+    mode: draft?.mode ?? cfg?.mode ?? 'dry_run',
+    leverage: draft?.leverage ?? cfg?.leverage ?? 5,
+    positionPct: draft?.positionPct ?? cfg?.positionPct ?? 0.1,
   };
 
+  /** 是否存在未保存的改动 */
+  const dirty =
+    !!cfg &&
+    (cur.mode !== cfg.mode ||
+      cur.leverage !== cfg.leverage ||
+      Math.abs(cur.positionPct - cfg.positionPct) > 1e-9);
+
   /**
-   * 切换运行模式。
+   * 保存交易参数（点「确定」才走这里）。
    *
-   * `live` 使用真实资金、且挂载的策略会自动下单，因此必须二次确认。
-   * 这是**防误操作**（不是平台风控）：平台不拦截任何交易，只在这里把
-   * 「你正在进入实盘」讲清楚，避免误点。
+   * `live` 使用真实资金、且挂载的策略会自动下单，因此提交前二次确认。
+   * 这是**防误操作**（不是平台风控）：平台不拦截任何交易，
+   * 只在这里把「你正在进入实盘」讲清楚，避免误点。
    */
-  const onModeChange = (next: string) => {
-    if (next !== 'live') {
-      savePatch({ mode: next });
+  const saveTradeParams = () => {
+    if (!cfg || !dirty) return;
+
+    // 只提交真正变化的字段，避免把未动的参数重写一遍
+    const patch: Record<string, unknown> = {};
+    if (cur.mode !== cfg.mode) patch.mode = cur.mode;
+    if (cur.leverage !== cfg.leverage) patch.leverage = cur.leverage;
+    if (Math.abs(cur.positionPct - cfg.positionPct) > 1e-9) {
+      patch.positionPct = cur.positionPct;
+    }
+    if (Object.keys(patch).length === 0) return;
+
+    const commit = async () => {
+      try {
+        await update.mutateAsync(patch);
+        // 保存成功后交给服务端值接管显示，避免本地草稿与后端长期不一致
+        setDraft(null);
+        message.success('交易参数已保存');
+      } catch (err) {
+        message.error((err as Error).message);
+      }
+    };
+
+    if (patch.mode === 'live') {
+      modal.confirm({
+        title: '切换到实盘（真实资金）',
+        icon: <ExclamationCircleOutlined className="text-down" />,
+        width: 520,
+        content: (
+          <div className="space-y-2 text-[12px] leading-relaxed">
+            <div>
+              实盘模式下，<b>挂载的策略会用真实资金自动下单</b>，平台不做任何风控拦截。
+            </div>
+            <div>切换前请确认：</div>
+            <ul className="list-disc pl-5">
+              <li>该策略已在测试网充分验证</li>
+              <li>测试网仓位已全部平掉</li>
+              <li>清楚止损、强平与爆仓风险</li>
+            </ul>
+          </div>
+        ),
+        okText: '我确认，切换到实盘',
+        okButtonProps: { danger: true },
+        cancelText: '取消',
+        onOk: commit,
+      });
       return;
     }
-    modal.confirm({
-      title: '切换到实盘（真实资金）',
-      icon: <ExclamationCircleOutlined className="text-down" />,
-      width: 520,
-      content: (
-        <div className="space-y-2 text-[12px] leading-relaxed">
-          <div>
-            实盘模式下，<b>挂载的策略会用真实资金自动下单</b>，平台不做任何风控拦截。
-          </div>
-          <div>切换前请确认：</div>
-          <ul className="list-disc pl-5">
-            <li>该策略已在测试网充分验证</li>
-            <li>测试网仓位已全部平掉</li>
-            <li>清楚止损、强平与爆仓风险</li>
-          </ul>
-        </div>
-      ),
-      okText: '我确认，切换到实盘',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: () => savePatch({ mode: 'live' }),
-    });
+    void commit();
   };
 
   return (
@@ -281,44 +324,75 @@ export function AdminFutures() {
         />
       </Card>
 
-      <Card title="交易参数" className="glass-card" size="small">
+      <Card
+        title="交易参数"
+        className="glass-card"
+        size="small"
+        extra={
+          <Space>
+            <Button size="small" disabled={!dirty} onClick={() => setDraft(null)}>
+              重置
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              disabled={!dirty}
+              loading={update.isPending}
+              onClick={saveTradeParams}
+            >
+              确定
+            </Button>
+          </Space>
+        }
+      >
         <Row gutter={24}>
           <Col xs={24} md={8}>
             <div className="mb-1 text-[12px] text-muted">运行模式</div>
             <Select
-              value={cfg?.mode ?? 'dry_run'}
+              value={cur.mode}
               style={{ width: '100%' }}
               options={[
                 { label: 'dry_run（本地模拟，不触交易所）', value: 'dry_run' },
                 { label: 'testnet（币安测试网）', value: 'testnet' },
                 { label: 'live（实盘 · 真实资金）', value: 'live' },
               ]}
-              onChange={onModeChange}
+              onChange={(v) => setDraft({ ...cur, mode: v })}
             />
           </Col>
           <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">开仓杠杆（1 ~ 20x）</div>
+            <div className="mb-1 text-[12px] text-muted">
+              开仓杠杆（1 ~ 20x）　
+              <span className="num text-white">{cur.leverage}x</span>
+            </div>
             <Slider
               min={1}
               max={20}
               step={1}
-              value={cfg?.leverage ?? 5}
-              onChange={(v) => savePatch({ leverage: v })}
-              marks={{ 1: '1x', 5: '5x', 20: '20x' }}
+              value={cur.leverage}
+              onChange={(v) => setDraft({ ...cur, leverage: v })}
+              marks={{ 1: '1x', 5: '5x', 10: '10x', 20: '20x' }}
             />
           </Col>
           <Col xs={24} md={8}>
-            <div className="mb-1 text-[12px] text-muted">保证金占用比例（positionPct）</div>
+            <div className="mb-1 text-[12px] text-muted">
+              保证金占用比例（positionPct）　
+              <span className="num text-white">{(cur.positionPct * 100).toFixed(0)}%</span>
+            </div>
             <Slider
               min={0.01}
               max={1}
               step={0.01}
-              value={cfg?.positionPct ?? 0.1}
-              onChange={(v) => savePatch({ positionPct: v })}
+              value={cur.positionPct}
+              onChange={(v) => setDraft({ ...cur, positionPct: v })}
             />
           </Col>
         </Row>
 
+        {dirty ? (
+          <div className="mt-2 text-[11px] text-up">
+            有未保存的修改 —— 点右上角「确定」后生效
+          </div>
+        ) : null}
 
         <div className="mt-3 text-[11px] text-muted">
           策略参数请在「策略管理」页按策略单独配置 · 最后运行 {formatTime(cfg?.lastRunAt)}

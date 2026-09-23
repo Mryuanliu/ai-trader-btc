@@ -1,12 +1,14 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
+  BasketEntity,
   OrderEntity,
   PositionLotEntity,
   TradeFillEntity,
 } from '../database/entities';
 import { PositionService } from './position.service';
 import { LotService } from './lot.service';
+import { BasketService } from './basket.service';
 import { LotsController } from './lots.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { MarketModule } from '../market/market.module';
@@ -23,12 +25,12 @@ import { MarketModule } from '../market/market.module';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([OrderEntity, TradeFillEntity, PositionLotEntity]),
+    TypeOrmModule.forFeature([OrderEntity, TradeFillEntity, PositionLotEntity, BasketEntity]),
     ExchangesModule,
     MarketModule,
   ],
-  providers: [PositionService, LotService],
+  providers: [PositionService, LotService, BasketService],
   controllers: [LotsController],
-  exports: [PositionService, LotService],
+  exports: [PositionService, LotService, BasketService],
 })
 export class AccountModule {}

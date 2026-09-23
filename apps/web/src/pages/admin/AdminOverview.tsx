@@ -6,6 +6,7 @@ import {
   MARKET_LABELS,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
+  type BasketSummary,
   type OrderStatus,
   type Timeframe,
 } from '@ai-trader/shared';
@@ -101,8 +102,8 @@ export function AdminOverview() {
           hint={
             hasBalances ? (
               <>
-                现货持仓 {formatQty(totals?.btcAmount ?? 0)} BTC · 未平 {totals?.openOrders ?? 0} 单
-                {totals?.futuresOpenOrders ? ` · 合约未平 ${totals.futuresOpenOrders} 单` : ''}
+                合约未平 {totals?.openOrders ?? 0} 单 · 今日成交 {totals?.filledToday ?? 0} 笔
+                {totals?.btcAmount ? ` · 现货余额 ${formatQty(totals.btcAmount)} BTC` : ''}
               </>
             ) : (
               '未读取到账户余额'
@@ -382,102 +383,211 @@ export function AdminOverview() {
         )}
       </section>
 
-      {/* 近期订单：是否平仓 + 盈亏 */}
+      {/* 近期篮子：一轮「建仓 → 全部了结」的整体表现 + 各层明细 */}
       <section className="glass-card p-4">
         <div className="mb-3 flex items-center gap-1.5">
-          <span className="section-title">近期订单</span>
+          <span className="section-title">近期篮子</span>
           <InfoHint
             text={
               <div className="text-[11px] leading-relaxed">
-                <div>· 「回合盈亏」只在平仓单上有值（配对到对应的开仓成本，已扣手续费）</div>
-                <div>· 开仓单没有盈亏概念，显示 --</div>
-                <div className="mt-1 text-white/60">与订单页「回合盈亏」列同口径</div>
+                <div>· 一个篮子 = 一轮「建仓 → 全部了结」的完整周期（马丁网格的一个循环）</div>
+                <div>· 「整体盈亏」把该篮子所有层合起来算，已含双边手续费</div>
+                <div>· 加层时中间层必然浮亏，单笔订单盈亏没有意义，所以按篮子看</div>
+                <div className="mt-1 text-white/60">展开某一行可看该篮子每一层的开平仓与盈亏</div>
               </div>
             }
           />
         </div>
-        <Table
+        <Table<BasketSummary>
           size="small"
           rowKey="id"
           pagination={false}
-          scroll={{ x: 900 }}
-          dataSource={data?.recentOrders ?? []}
-          locale={{ emptyText: <span className="text-[12px] text-muted">暂无订单</span> }}
+          scroll={{ x: 1040 }}
+          dataSource={data?.recentBaskets ?? []}
+          locale={{ emptyText: <span className="text-[12px] text-muted">暂无篮子</span> }}
+          expandable={{
+            expandedRowRender: (basket) => (
+              <Table<BasketSummary['lots'][number]>
+                size="small"
+                rowKey="id"
+                pagination={false}
+                dataSource={basket.lots}
+                locale={{
+                  emptyText: <span className="text-[12px] text-muted">该篮子暂无仓位单</span>,
+                }}
+                columns={[
+                  {
+                    title: '层',
+                    dataIndex: 'layer',
+                    width: 46,
+                    render: (v: number) => <span className="num text-muted">L{v}</span>,
+                  },
+                  {
+                    title: '方向',
+                    dataIndex: 'direction',
+                    render: (v: string) => <SideTag side={v === 'LONG' ? 'BUY' : 'SELL'} />,
+                  },
+                  {
+                    title: '数量',
+                    dataIndex: 'quantity',
+                    align: 'right',
+                    render: (v: number) => <span className="num">{formatQty(v)}</span>,
+                  },
+                  {
+                    title: '开仓价',
+                    dataIndex: 'entryPrice',
+                    align: 'right',
+                    render: (v: number) => <span className="num">{formatPrice(v)}</span>,
+                  },
+                  {
+                    title: '平仓价',
+                    dataIndex: 'exitPrice',
+                    align: 'right',
+                    render: (v: number | null) =>
+                      v === null ? (
+                        <span className="num text-[11px] text-muted">--</span>
+                      ) : (
+                        <span className="num">{formatPrice(v)}</span>
+                      ),
+                  },
+                  {
+                    title: '层盈亏',
+                    dataIndex: 'realizedPnl',
+                    align: 'right',
+                    render: (v: number | null, lot) =>
+                      v === null ? (
+                        <span className="text-[11px] text-muted">持仓中</span>
+                      ) : (
+                        <div className="num leading-tight">
+                          <span className={trendClass(v)}>{formatSignedUsd(v)}</span>
+                          {lot.returnPct !== null ? (
+                            <div className="text-[10px] text-muted">
+                              {formatPct(lot.returnPct * 100)}
+                            </div>
+                          ) : null}
+                        </div>
+                      ),
+                  },
+                  {
+                    title: '开仓单号',
+                    dataIndex: 'openOrderId',
+                    render: (v: string) => (
+                      <span className="num text-[10px] text-muted">{v.slice(0, 8)}</span>
+                    ),
+                  },
+                  {
+                    title: '开仓时间',
+                    dataIndex: 'openedAt',
+                    render: (v: string) => (
+                      <span className="num text-[11px] text-muted">{formatTime(v)}</span>
+                    ),
+                  },
+                ]}
+              />
+            ),
+          }}
           columns={[
             {
-              title: '时间',
-              dataIndex: 'createdAt',
-              render: (v: string) => (
-                <span className="num text-[11px] text-muted">{formatTime(v)}</span>
+              title: '篮子编号',
+              dataIndex: 'code',
+              render: (v: string, row) => (
+                <div className="flex items-center gap-1.5">
+                  <span className="num text-[12px] text-white">{v}</span>
+                  {row.status === 'OPEN' ? (
+                    <Tag color="processing" className="!mr-0">
+                      持仓中
+                    </Tag>
+                  ) : (
+                    <Tag className="!mr-0">已了结</Tag>
+                  )}
+                </div>
               ),
-            },
-            {
-              title: '市场',
-              dataIndex: 'market',
-              render: (v: 'spot' | 'futures') => <Tag color={v === 'futures' ? 'purple' : 'blue'}>{MARKET_LABELS[v]}</Tag>,
             },
             {
               title: '方向',
-              dataIndex: 'side',
-              render: (v: 'BUY' | 'SELL') => <SideTag side={v} />,
-            },
-            {
-              title: '类型',
-              dataIndex: 'type',
-              render: (v: string) => (v === 'MARKET' ? '市价' : '限价'),
-            },
-            {
-              title: '成交均价',
-              dataIndex: 'filledPrice',
-              align: 'right',
-              render: (v: number) => (
-                <span className="num">{formatPrice(orDash(v))}</span>
-              ),
-            },
-            {
-              title: '数量',
-              dataIndex: 'quantity',
-              align: 'right',
-              render: (v: number) => <span className="num">{formatQty(v)}</span>,
-            },
-            {
-              title: '金额',
-              dataIndex: 'quoteAmount',
-              align: 'right',
-              render: (v: number) => <span className="num text-white">{formatUsd(orDash(v))}</span>,
-            },
-            {
-              title: '平仓/售出',
-              key: 'closing',
-              align: 'center',
-              render: (_, row) =>
-                row.roundTripPnl === null ? (
-                  <span className="text-[11px] text-muted">开仓</span>
+              dataIndex: 'direction',
+              render: (v: string) =>
+                v === 'MIXED' ? (
+                  <Tag color="gold">双向</Tag>
                 ) : (
-                  <Tag color="orange">已平仓</Tag>
+                  <SideTag side={v === 'LONG' ? 'BUY' : 'SELL'} />
                 ),
             },
             {
-              title: '回合盈亏',
+              title: '来源',
+              dataIndex: 'origin',
+              render: (v: string) => (
+                <span className="text-[11px] text-muted">
+                  {v === 'strategy' ? '策略' : v === 'manual' ? '手动' : '混合'}
+                </span>
+              ),
+            },
+            {
+              title: '层数',
+              dataIndex: 'layerCount',
+              align: 'right',
+              render: (v: number) => <span className="num">{v}</span>,
+            },
+            {
+              title: '开仓均价',
+              dataIndex: 'avgEntryPrice',
+              align: 'right',
+              render: (v: number) => <span className="num">{formatPrice(v)}</span>,
+            },
+            {
+              title: '平仓均价',
+              dataIndex: 'avgExitPrice',
+              align: 'right',
+              render: (v: number | null) =>
+                v === null ? (
+                  <span className="num text-[11px] text-muted">--</span>
+                ) : (
+                  <span className="num">{formatPrice(v)}</span>
+                ),
+            },
+            {
+              title: '整体盈亏',
               key: 'pnl',
               align: 'right',
               render: (_, row) => {
-                if (row.roundTripPnl === null) {
-                  return <span className="num text-[11px] text-muted">--</span>;
-                }
+                // 未了结的篮子还没有已实现盈亏，用浮盈补上——
+                // 否则这一列会一直显示 0，看不出这一轮在赚还是在亏
+                const pnl =
+                  row.status === 'CLOSED' ? row.realizedPnl : row.realizedPnl + row.unrealizedPnl;
                 return (
-                  <div className={clsx('num leading-tight', trendClass(row.roundTripPnl))}>
-                    <div>{formatSignedUsd(row.roundTripPnl)}</div>
-                    <div className="text-[10px]">{formatPct((row.roundTripReturnPct ?? 0) * 100)}</div>
+                  <div className={clsx('num leading-tight', trendClass(pnl))}>
+                    <div>{formatSignedUsd(pnl)}</div>
+                    <div className="text-[10px] text-muted">
+                      {row.status === 'CLOSED' ? '已实现' : '含浮动'}
+                    </div>
                   </div>
                 );
               },
             },
             {
-              title: '状态',
-              dataIndex: 'status',
+              title: '收益率',
+              dataIndex: 'returnPct',
               align: 'right',
-              render: (v: OrderStatus) => <OrderStatusTag status={v} />,
+              render: (v: number | null) =>
+                v === null ? (
+                  <span className="text-[11px] text-muted">--</span>
+                ) : (
+                  <span className={clsx('num', trendClass(v))}>{formatPct(v * 100)}</span>
+                ),
+            },
+            {
+              title: '开仓时间',
+              dataIndex: 'openedAt',
+              render: (v: string) => (
+                <span className="num text-[11px] text-muted">{formatTime(v)}</span>
+              ),
+            },
+            {
+              title: '了结时间',
+              dataIndex: 'closedAt',
+              render: (v: string | null) => (
+                <span className="num text-[11px] text-muted">{v ? formatTime(v) : '--'}</span>
+              ),
             },
           ]}
         />

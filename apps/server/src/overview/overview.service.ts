@@ -17,6 +17,7 @@ import { StrategyRunner } from '../strategy/strategy-runner.service';
 import { FuturesTradingService } from '../futures/futures-trading.service';
 import { LlmClient } from '../agent/llm.client';
 import { PositionService } from '../account/position.service';
+import { BasketService } from '../account/basket.service';
 import { TradingService } from '../trading/trading.service';
 import { FuturesPositionService } from '../futures/futures-position.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -41,6 +42,7 @@ export class OverviewService {
     private readonly llm: LlmClient,
     private readonly trading: TradingService,
     private readonly positions: PositionService,
+    private readonly baskets: BasketService,
     private readonly futuresPositions: FuturesPositionService,
     private readonly registry: ExchangeRegistry,
     private readonly dataSource: DataSource,
@@ -94,6 +96,12 @@ export class OverviewService {
       };
     });
 
+    // 近期篮子：以「一轮建仓 → 全部了结」为单位展示，附各层明细。
+    // 传入现价是为了估算未平部分的浮盈——篮子没结束时 realizedPnl 恒为 0。
+    const recentBaskets = await this.baskets.listRecent(6, 'futures', (sym) => {
+      return this.market.getTicker(sym)?.price ?? 0;
+    });
+
     const newsResult = await this.news.list({ pageSize: 8 });
     const keywordTrends = await this.news.keywordTrends(10);
 
@@ -111,8 +119,10 @@ export class OverviewService {
       realizedPnlToday: pnlBreakdown.realizedPnlToday,
       unrealizedPnlToday: pnlBreakdown.unrealizedPnlToday,
       hasPnlBaseline: pnlBreakdown.hasBaseline,
-      openOrders: 0,
-      filledToday: 0,
+      // 平台只剩合约：顶层字段直接用合约口径。
+      // 原先是现货口径（写死 0），前端读的正是它，导致「挂单」永远显示 0。
+      openOrders: stats.byMarket.futures.open,
+      filledToday: stats.byMarket.futures.filled,
       futuresOpenOrders: stats.byMarket.futures.open,
       futuresFilledToday: stats.byMarket.futures.filled,
     };
@@ -129,6 +139,10 @@ export class OverviewService {
       totals,
       marketPulse,
       recentOrders,
+      // 近期篮子：一次「建仓 → 全部了结」周期的整体表现。
+      // 马丁网格加层时中间层必然浮亏，单笔订单看不出这一轮赚没赚，
+      // 所以看板按篮子展示并给出整体盈亏列。
+      recentBaskets,
       news: newsResult.items,
       keywordTrends,
       dataSources: await this.dataSources(balanceSource),

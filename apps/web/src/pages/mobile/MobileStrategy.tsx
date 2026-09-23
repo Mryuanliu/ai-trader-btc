@@ -57,16 +57,19 @@ export function MobileStrategy() {
     });
   };
 
-  const onStart = (name: string, label: string) =>
+  const onStart = (name: string, label: string, adoptExisting?: boolean) =>
     confirmLiveIfNeeded(() => requireAuth(async () => {
       setBusyId(name);
       try {
-        const result = await start.mutateAsync({ name });
+        const result = await start.mutateAsync({ name, adoptExisting });
         if (!result.ok) {
           if (result.blockingLots?.length) {
-            modal.warning({
+            modal.confirm({
               title: '还有仓位单未平仓',
-              okText: '知道了',
+              width: '86%',
+              okText: '接管并启动',
+              okButtonProps: { danger: true },
+              cancelText: '取消',
               content: (
                 <div className="text-[12px] leading-relaxed">
                   <div className="mb-2 text-muted">{result.message}</div>
@@ -85,6 +88,7 @@ export function MobileStrategy() {
                   ))}
                 </div>
               ),
+              onOk: () => onStart(name, label, true),
             });
             return;
           }

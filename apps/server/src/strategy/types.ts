@@ -15,6 +15,13 @@ export interface StrategyLotView {
   /** 按当前价计的浮动盈亏（已扣开仓手续费） */
   unrealizedPnl: number;
   openedAt: string;
+  /**
+   * 该仓位单是否已有**在途平仓委托**（已下单、尚未成交回调）。
+   *
+   * 平仓从「下单」到「落库结算」之间有时间差，这段时间 Lot 仍是 OPEN。
+   * 策略据此判断「出场是否已在进行中」，避免同一个 Lot 被平两次。
+   */
+  hasPendingClose: boolean;
 }
 
 /** 策略运行时看到的挂单（未成交的 STOP / 限价单） */
@@ -72,6 +79,11 @@ export interface StrategyContext {
 export interface OpenLotRequest {
   direction: LotDirection;
   quantity: number;
+  /**
+   * 杠杆覆盖。不传则用平台配置值。
+   * 策略自己声明杠杆，避免「策略参数写着 5x、实际按配置 12x 下单」这类不一致。
+   */
+  leverage?: number;
   /** 开仓原因（审计留痕） */
   reason: string;
 }
@@ -82,6 +94,8 @@ export interface PlaceStopOrderRequest {
   /** STOP_MARKET：BUY 价格上破 stopPrice 触发 / SELL 价格下破触发 */
   stopPrice: number;
   quantity: number;
+  /** 杠杆覆盖（不传用平台配置值） */
+  leverage?: number;
   /** 挂单用途标记，便于策略区分自己挂的网格单 */
   reason: string;
 }

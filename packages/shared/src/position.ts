@@ -22,6 +22,20 @@ export type LotDirection = 'LONG' | 'SHORT';
 export type LotStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
 /** 出场原因：信号出场（预留）/止损/止盈/手动/反手解除 */
 export type LotExitReason = 'SIGNAL' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'MANUAL' | 'REVERSE';
+
+// ---------------------------------------------------------------- 篮子（Basket）
+
+/**
+ * 篮子（Basket）：一次「建仓 → 全部了结」的完整周期。
+ *
+ * 马丁网格的一个循环（首层 → 加层 → 篮子止盈全平）就是一个篮子。
+ * 把整轮仓位归到一个带编号的篮子里，才能回答「这一轮整体赚了多少」——
+ * 单看某一层的订单是没有意义的（加层本身都在浮亏）。
+ */
+export type BasketDirection = LotDirection | 'MIXED';
+export type BasketStatus = 'OPEN' | 'CLOSED';
+/** 篮子来源：整轮都由策略建 / 整轮手动 / 两种混在一起 */
+export type BasketOrigin = 'strategy' | 'manual' | 'mixed';
 /** Lot 结算：净盈亏（已扣双边手续费）与名义收益率 */
 export function settleLotPnl(params: {
   direction: LotDirection;

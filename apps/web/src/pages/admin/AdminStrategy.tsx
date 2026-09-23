@@ -61,12 +61,78 @@ export function AdminStrategy() {
   const st = status.data;
   const running = st?.running ?? false;
 
-  /** 把未平仓拦截的明细渲染成表格 */
-  const showBlockingLots = (lots: BlockingLot[], text: string) => {
-    modal.warning({
+  // 策略状态里的可观测字段（后端 getState 输出）
+  const s = (st?.state ?? {}) as Record<string, unknown>;
+  const numOf = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const layers = (s.layers ?? {}) as Record<string, number>;
+  const pending = (s.pending ?? {}) as Record<string, number>;
+  const nextAdd = (s.nextAdd ?? {}) as Record<string, number | null>;
+  /** 阶梯预览：1~N 层的推演价位（逐格推进时看不到整条阶梯，这里摊开展示） */
+  const ladder = (s.ladder ?? null) as
+    | {
+        long?: Array<{ layer: number; price: number; qty: number }>;
+        short?: Array<{ layer: number; price: number; qty: number }>;
+      }
+    | null;
+  const maxLayers = numOf(s.maxLayers) ?? 6;
+  const netPct = numOf(s.netPct);
+  const startPct = numOf(s.basketStartPct);
+  const price = numOf(s.price);
+  const step = numOf(s.step);
+  const leverage = numOf(s.leverage);
+
+  // 心跳：本轮 tick 距今多久。
+  // 「显示运行中」不等于「真的在动」——给一个可验证的时间证据，
+  // 用户才不会把「正常等待」和「卡死」搞混（也避免怀疑状态是假的）。
+  const tickAgoSec = st?.lastTickAt
+    ? Math.max(0, Math.round((Date.now() - new Date(st.lastTickAt).getTime()) / 1000))
+    : null;
+  const tickStale = tickAgoSec !== null && tickAgoSec > 30;
+
+  /**
+   * 把策略状态翻译成「它在等什么」。
+   *
+   * 马丁网格大部分时间都在等待（等挂单触发 / 等价格到加层线 / 等止盈线），
+   * 不写清楚，用户会以为策略卡死了。
+   */
+  const waiting = (() => {
+    const parts: string[] = [];
+    const pL = pending.long ?? 0;
+    const pS = pending.short ?? 0;
+    if (pL + pS > 0) parts.push(`已挂 ${pL + pS} 张 STOP 单，等价格触发`);
+    if (nextAdd.long != null && (layers.long ?? 0) > 0) {
+      parts.push(`多头加层需跌破 ${formatPrice(nextAdd.long)}`);
+    }
+    if (nextAdd.short != null && (layers.short ?? 0) > 0) {
+      parts.push(`空头加层需涨破 ${formatPrice(nextAdd.short)}`);
+    }
+    if (netPct != null && startPct != null && startPct > 0 && netPct < startPct) {
+      parts.push(
+        `止盈需净收益达 ${(startPct * 100).toFixed(2)}%（当前 ${(netPct * 100).toFixed(2)}%）`,
+      );
+    }
+    return parts.join(' · ');
+  })();
+
+  /**
+   * 未平仓拦截提示。
+   *
+   * 「未平仓单」有两种性质，必须让用户明确区分：
+   * - 本策略留下的（服务重启后 runner 状态丢失）→ 可「接管并启动」继续管理
+   * - 别的策略留下的 → 必须先手动了结，否则两套策略的仓位无法归因
+   */
+  const showBlockingLots = (
+    strategy: StrategyDescriptor,
+    params: Record<string, unknown> | undefined,
+    lots: BlockingLot[],
+    text: string,
+  ) => {
+    modal.confirm({
       title: '还有仓位单未平仓',
       width: 720,
-      okText: '知道了',
+      okText: '接管并启动',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
       content: (
         <div className="space-y-3">
           <div className="text-[12px] text-muted">{text}</div>
@@ -105,10 +171,12 @@ export function AdminStrategy() {
             ]}
           />
           <div className="text-[12px] text-muted">
-            请到「合约面板」逐个平仓，全部了结后即可启动新策略。
+            若这些仓位是本策略留下的（例如服务重启），点「接管并启动」继续由它管理；
+            否则请先到「合约面板」逐个平仓。
           </div>
         </div>
       ),
+      onOk: () => doStart(strategy, params, true),
     });
   };
 
@@ -140,13 +208,17 @@ export function AdminStrategy() {
     });
   };
 
-  const doStart = (strategy: StrategyDescriptor, params?: Record<string, unknown>) =>
+  const doStart = (
+    strategy: StrategyDescriptor,
+    params?: Record<string, unknown>,
+    adoptExisting?: boolean,
+  ) =>
     confirmLiveIfNeeded(() => requireAuth(async () => {
       try {
-        const result = await start.mutateAsync({ name: strategy.name, params });
+        const result = await start.mutateAsync({ name: strategy.name, params, adoptExisting });
         if (!result.ok) {
           if (result.blockingLots?.length) {
-            showBlockingLots(result.blockingLots, result.message);
+            showBlockingLots(strategy, params, result.blockingLots, result.message);
           } else {
             message.error(result.message);
           }
@@ -209,7 +281,10 @@ export function AdminStrategy() {
             </Button>
           </Space>
         ) : (
-          <Tag>未运行</Tag>
+          <Space>
+            <Tag className="!mr-0">未运行</Tag>
+            <span className="text-[11px] text-muted">在下方选一个策略点「启动」即可挂载</span>
+          </Space>
         )}
       </div>
 
@@ -224,21 +299,113 @@ export function AdminStrategy() {
               <Stat label="启动时间" value={st.startedAt ? formatTime(st.startedAt) : '--'} />
             </Col>
             <Col xs={12} md={6}>
-              <Stat label="最近 tick" value={st.lastTickAt ? formatTime(st.lastTickAt) : '--'} />
+              <Stat
+                label="最近 tick（心跳）"
+                value={tickAgoSec === null ? '--' : `${tickAgoSec} 秒前`}
+              />
             </Col>
             <Col xs={12} md={6}>
               <Stat
-                label="篮子净收益率峰值"
+                label="篮子净收益率"
                 value={
-                  st.state && typeof st.state.basketPeakPct === 'number'
-                    ? `${(st.state.basketPeakPct * 100).toFixed(2)}%`
-                    : '--'
+                  netPct != null
+                    ? `${(netPct * 100).toFixed(2)}%`
+                    : typeof s.basketPeakPct === 'number'
+                      ? `${(s.basketPeakPct * 100).toFixed(2)}%`
+                      : '--'
                 }
               />
             </Col>
           </Row>
+
+          {/* 网格进度：回答「为什么现在不动」 */}
+          <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.06] pt-3 text-[12px] sm:grid-cols-4">
+            <div>
+              <span className="text-muted">多头层数 </span>
+              <span className="num text-white">
+                {layers.long ?? 0}/{maxLayers}
+              </span>
+              {pending.long ? <span className="text-muted">（{pending.long} 单待触发）</span> : null}
+            </div>
+            <div>
+              <span className="text-muted">空头层数 </span>
+              <span className="num text-white">
+                {layers.short ?? 0}/{maxLayers}
+              </span>
+              {pending.short ? (
+                <span className="text-muted">（{pending.short} 单待触发）</span>
+              ) : null}
+            </div>
+            <div>
+              <span className="text-muted">当前价 </span>
+              <span className="num text-white">{price != null ? formatPrice(price) : '--'}</span>
+              {step != null ? (
+                <span className="text-muted"> · 网格 {step.toFixed(1)}</span>
+              ) : null}
+            </div>
+            <div>
+              <span className="text-muted">杠杆 </span>
+              <span className="num text-white">{leverage != null ? `${leverage}x` : '--'}</span>
+            </div>
+          </div>
+
+          {/* 阶梯预览：逐格推进只能挂一层，把整条阶梯摊开才看得出间距是否合理 */}
+          {ladder ? (
+            <div className="mt-3 grid grid-cols-1 gap-4 border-t border-white/[0.06] pt-3 sm:grid-cols-2">
+              {(['long', 'short'] as const).map((sideKey) => {
+                const rows = ladder[sideKey] ?? [];
+                if (rows.length === 0) return null;
+                const filledN = (sideKey === 'long' ? layers.long : layers.short) ?? 0;
+                return (
+                  <div key={sideKey}>
+                    <div className="mb-1 text-[12px] text-muted">
+                      {sideKey === 'long' ? '多头阶梯（越跌越买）' : '空头阶梯（越涨越卖）'}
+                    </div>
+                    <div className="space-y-[3px]">
+                      {rows.map((r) => {
+                        const done = r.layer <= filledN;
+                        return (
+                          <div
+                            key={r.layer}
+                            className="flex items-center justify-between text-[11px]"
+                          >
+                            <span className={done ? 'text-up' : 'text-subtle'}>
+                              L{r.layer} {done ? '已成交' : '待触发'}
+                            </span>
+                            <span className={`num ${done ? 'text-up' : 'text-white'}`}>
+                              {formatPrice(r.price)}
+                            </span>
+                            <span className="num text-subtle">{r.qty}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {/* 心跳：证明策略真的在动（而不是只是"显示在运行"） */}
+          <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+            <span className={tickStale ? 'text-down' : 'text-up'}>●</span>
+            <span className={tickStale ? 'text-down' : 'text-subtle'}>
+              {tickAgoSec === null
+                ? '尚未产生心跳'
+                : tickStale
+                  ? `心跳已停 ${tickAgoSec} 秒 —— 策略可能卡死，请查看下方错误信息`
+                  : `心跳正常（${tickAgoSec} 秒前），策略每 5 秒决策一次`}
+            </span>
+          </div>
+
+          {waiting ? (
+            <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2 text-[11px] text-subtle">
+              等待中：{waiting}
+            </div>
+          ) : null}
+
           {st.state && typeof st.state.note === 'string' && st.state.note ? (
-            <div className="mt-3 text-[12px] text-subtle">
+            <div className="mt-2 text-[12px] text-subtle">
               <span className="muted-text">最近动作：</span>
               {st.state.note}
             </div>
