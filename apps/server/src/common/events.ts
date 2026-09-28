@@ -1,6 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { Observable, Subject, filter, map } from 'rxjs';
-import { Candle, NewsItemDTO, OrderDTO, PriceTick, Timeframe } from '@ai-trader/shared';
+import {
+  BasketDirection,
+  Candle,
+  LotDirection,
+  LotExitReason,
+  MarketType,
+  NewsItemDTO,
+  OrderDTO,
+  OrderSource,
+  PriceTick,
+  RunMode,
+  Timeframe,
+} from '@ai-trader/shared';
 
 /**
  * 进程内事件（网关据此向前端广播）。
@@ -13,6 +25,54 @@ export interface AppEventMap {
   candle: { symbol: string; interval: Timeframe; candle: Candle };
   order: OrderDTO;
   news: NewsItemDTO;
+  /** 开仓成交（逐 Lot 建仓）：供飞书等外推通知订阅 */
+  lotOpened: LotOpenedEvent;
+  /** 平仓结算（逐 Lot 结束）：带净盈亏 */
+  lotClosed: LotClosedEvent;
+  /** 篮子整轮了结：一次建仓→全部平仓的周期汇总 */
+  basketClosed: BasketClosedEvent;
+}
+
+export interface LotOpenedEvent {
+  symbol: string;
+  market: MarketType;
+  direction: LotDirection;
+  quantity: number;
+  entryPrice: number;
+  fee: number;
+  strategyInstanceId: string | null;
+  source: OrderSource;
+  mode: RunMode;
+  ts: number;
+}
+
+export interface LotClosedEvent {
+  symbol: string;
+  market: MarketType;
+  direction: LotDirection;
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  realizedPnl: number;
+  returnPct: number;
+  exitReason: LotExitReason;
+  strategyInstanceId: string | null;
+  basketCode: string | null;
+  mode: RunMode;
+  ts: number;
+}
+
+export interface BasketClosedEvent {
+  code: string;
+  symbol: string;
+  direction: BasketDirection;
+  layerCount: number;
+  realizedPnl: number;
+  returnPct: number | null;
+  feeTotal: number;
+  fundingFee: number;
+  mode: RunMode;
+  ts: number;
 }
 
 export type AppEventType = keyof AppEventMap;

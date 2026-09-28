@@ -7,6 +7,7 @@ packages:
 allowBuilds:
   esbuild: true
   '@nestjs/core': true
+  protobufjs: set this to true or false
 
 # 运行脚本前不自动触发 install，避免开发时反复校验依赖
 verifyDepsBeforeRun: false

@@ -19,6 +19,7 @@ import { GatewayModule } from './gateway/gateway.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { OverviewModule } from './overview/overview.module';
 import { StrategyModule } from './strategy/strategy.module';
+import { FeishuModule } from './feishu/feishu.module';
 import { AllExceptionsFilter } from './common/all-exception.filter';
 
 /**
@@ -60,6 +61,7 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     StrategyModule,
     GatewayModule,
     SchedulerModule,
+    FeishuModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

@@ -8,12 +8,14 @@ import type {
   LotDirection,
   MarketType,
   OrderSource,
+  RunMode,
 } from '@ai-trader/shared';
 import { BasketEntity } from '../database/entities/basket.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 import { IncomeService } from './income.service';
 import { FUTURES_TAKER_FEE_RATE } from '@ai-trader/shared';
 import { FuturesAgentConfigEntity } from '../database/entities/futures-agent-config.entity';
+import { EventBusService } from '../common/events';
 
 /**
  * 篮子服务：维护「一次建仓 → 全部了结」周期的统计。
@@ -41,6 +43,7 @@ export class BasketService {
     // 若 AccountModule 反向导入 FuturesModule 就成循环依赖，Nest 会启动失败。
     @InjectRepository(FuturesAgentConfigEntity)
     private readonly configRepo: Repository<FuturesAgentConfigEntity>,
+    private readonly events: EventBusService,
   ) {}
 
   /** 取该交易对当前的 OPEN 篮子；没有则新建（并分配编号） */
@@ -127,9 +130,16 @@ export class BasketService {
   }
 
   /** Lot 结算后重算篮子（平完最后一层会自动关闭篮子） */
-  async onLotSettled(basketId: string | null): Promise<void> {
+  async onLotSettled(basketId: string | null, mode?: RunMode): Promise<void> {
     if (!basketId) return;
-    await this.recompute(basketId);
+    await this.recompute(basketId, mode);
+  }
+
+  /** 取篮子编号（通知卡片展示用） */
+  async codeOf(basketId: string | null): Promise<string | null> {
+    if (!basketId) return null;
+    const basket = await this.basketRepo.findOne({ where: { id: basketId }, select: ['code'] });
+    return basket?.code ?? null;
   }
 
   /**
@@ -138,9 +148,11 @@ export class BasketService {
    * 用「全量重算」而不是「增量累加」：无论平仓顺序、重试、重复回调，
    * 结果都收敛到同一个值，不会因为某次漏加而永久漂移。
    */
-  async recompute(basketId: string): Promise<BasketEntity | null> {
+  async recompute(basketId: string, mode?: RunMode): Promise<BasketEntity | null> {
     const basket = await this.basketRepo.findOne({ where: { id: basketId } });
     if (!basket) return null;
+    // 记录重算前状态，用于识别「本次是否首次由 OPEN 转为 CLOSED」（避免对已关篮子重复推送）
+    const wasClosed = basket.status === 'CLOSED';
 
     const lots = await this.lotRepo.find({
       where: { basketId },
@@ -191,7 +203,23 @@ export class BasketService {
       }
     }
 
-    return this.basketRepo.save(basket);
+    const saved = await this.basketRepo.save(basket);
+    // 整轮了结（首次由 OPEN 转 CLOSED）：发篮子汇总事件供飞书等外推通知订阅
+    if (!wasClosed && saved.status === 'CLOSED') {
+      this.events.emit('basketClosed', {
+        code: saved.code,
+        symbol: saved.symbol,
+        direction: saved.direction,
+        layerCount: saved.layerCount,
+        realizedPnl: Number(saved.realizedPnl),
+        returnPct: saved.returnPct === null ? null : Number(saved.returnPct),
+        feeTotal: Number(saved.feeTotal),
+        fundingFee: Number(saved.fundingFee),
+        mode: mode ?? 'live',
+        ts: Date.now(),
+      });
+    }
+    return saved;
   }
 
   /**

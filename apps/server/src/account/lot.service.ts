@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
-import { DailyRealizedPnl, LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
+import { DailyRealizedPnl, LotDirection, LotExitReason, MarketType, RunMode, settleLotPnl } from '@ai-trader/shared';
 import { OrderEntity } from '../database/entities/order.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 import { BasketService } from './basket.service';
+import { EventBusService } from '../common/events';
 
 @Injectable()
 export class LotService {
@@ -14,6 +15,7 @@ export class LotService {
     @InjectRepository(PositionLotEntity)
     private readonly lotRepo: Repository<PositionLotEntity>,
     private readonly baskets: BasketService,
+    private readonly events: EventBusService,
   ) {}
 
   /**
@@ -59,6 +61,19 @@ export class LotService {
     this.logger.log(
       `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price}`,
     );
+    // 开仓成交事件：供飞书等外推通知订阅（mode 决定 dry_run 是否过滤）
+    this.events.emit('lotOpened', {
+      symbol: saved.symbol,
+      market: saved.market,
+      direction: saved.direction,
+      quantity: Number(saved.quantity),
+      entryPrice: Number(saved.entryPrice),
+      fee: Number(saved.entryFeeUsdt),
+      strategyInstanceId: saved.strategyInstanceId ?? null,
+      source: order.source,
+      mode: order.mode,
+      ts: Date.now(),
+    });
     return saved;
   }
 
@@ -74,8 +89,10 @@ export class LotService {
     closeOrderId: string;
     fill: { price: number; quantity: number; fee: number };
     exitReason: LotExitReason;
+    /** 结算所属运行模式（dry_run/testnet/live）：供通知层过滤 */
+    mode: RunMode;
   }): Promise<PositionLotEntity | null> {
-    const { lotId, closeOrderId, fill, exitReason } = params;
+    const { lotId, closeOrderId, fill, exitReason, mode } = params;
     const lot = await this.getOpenLot(lotId);
     if (!lot) {
       this.logger.warn(`平仓结算未找到未完结 Lot（lotId=${lotId}），跳过`);
@@ -102,10 +119,27 @@ export class LotService {
     lot.closedAt = new Date();
     const saved = await this.lotRepo.save(lot);
     // 重算篮子统计；若这是最后一层，篮子会被关闭并落定整体盈亏
-    await this.baskets.onLotSettled(lot.basketId);
+    await this.baskets.onLotSettled(lot.basketId, mode);
     this.logger.log(
       `Lot 结算 ${lot.market} ${lot.direction} ${lot.symbol} ${exitReason}: pnl=${realizedPnl} (${(returnPct * 100).toFixed(2)}%)`,
     );
+    // 平仓结束事件：带净盈亏，供飞书等外推通知订阅
+    const basketCode = await this.baskets.codeOf(saved.basketId);
+    this.events.emit('lotClosed', {
+      symbol: saved.symbol,
+      market: saved.market,
+      direction: saved.direction,
+      quantity: closedQty,
+      entryPrice: Number(saved.entryPrice),
+      exitPrice: Number(saved.exitPrice ?? fill.price),
+      realizedPnl,
+      returnPct,
+      exitReason,
+      strategyInstanceId: saved.strategyInstanceId ?? null,
+      basketCode,
+      mode,
+      ts: Date.now(),
+    });
     return saved;
   }
 

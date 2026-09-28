@@ -170,6 +170,7 @@ export class FuturesTradingService {
           closeOrderId: order.id,
           fill,
           exitReason: input.exitReason ?? 'MANUAL',
+          mode: order.mode,
         });
       } else {
         await this.lots.createFromOpenFill({ order, fill });
@@ -380,6 +381,7 @@ export class FuturesTradingService {
               closeOrderId: order.id,
               fill: { price: fillPrice, quantity: detail.filledQuantity, fee },
               exitReason: 'MANUAL',
+              mode: order.mode,
             });
             lots += 1;
           }

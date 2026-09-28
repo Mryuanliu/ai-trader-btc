@@ -50,6 +50,12 @@ export interface AppEnv {
   NEWS_FETCH_INTERVAL_SEC: number;
   NEWS_SOURCES: string;
   CORS_ORIGIN: string;
+  // 飞书推送（自建应用 + SDK）：订单成交/结束主动推送到指定群
+  FEISHU_PUSH_ENABLED: boolean;
+  FEISHU_APP_ID: string;
+  FEISHU_APP_SECRET: string;
+  /** 推送目标群 chat_id（把机器人拉进群后获取） */
+  FEISHU_CHAT_ID: string;
 }
 
 export const envSchema = Joi.object({
@@ -109,6 +115,12 @@ export const envSchema = Joi.object({
   NEWS_SOURCES: Joi.string().default(''),
 
   CORS_ORIGIN: Joi.string().default('http://localhost:5173'),
+
+  // 缺 APP_ID/SECRET/CHAT_ID 时飞书推送整体 no-op；ENABLED 作总开关
+  FEISHU_PUSH_ENABLED: Joi.boolean().default(true),
+  FEISHU_APP_ID: Joi.string().allow('').default(''),
+  FEISHU_APP_SECRET: Joi.string().allow('').default(''),
+  FEISHU_CHAT_ID: Joi.string().allow('').default(''),
 }).unknown(true);
 
 export default () => {
