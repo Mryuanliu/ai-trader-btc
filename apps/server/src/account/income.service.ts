@@ -74,20 +74,32 @@ export class IncomeService {
       .getRawMany<{ tranId: string }>();
     const known = new Set(existing.map((e) => e.tranId));
 
-    const fresh = rows.filter((r) => !known.has(r.tranId));
+    // 批内先去重：币安 income 分页边界或同一交易拆多条时，rows 可能自带重复 tranId，
+    // 不过 known 的是入库前快照，两道都会进入 save 导致唯一索引冲突。
+    const seenInBatch = new Set<string>();
+    const fresh = rows.filter((r) => {
+      if (known.has(r.tranId) || seenInBatch.has(r.tranId)) return false;
+      seenInBatch.add(r.tranId);
+      return true;
+    });
     if (fresh.length > 0) {
-      await this.repo.save(
-        fresh.map((r) =>
-          this.repo.create({
+      // orIgnore 等同 INSERT ... ON CONFLICT DO NOTHING：与唯一索引 IDX_incomes_tran 配对，
+      // 可安全处理并发 sync / 重启瞬间旧新两进程重叠的写入竞态。
+      await this.repo
+        .createQueryBuilder()
+        .insert()
+        .orIgnore()
+        .values(
+          fresh.map((r) => ({
             tranId: r.tranId,
             incomeType: r.incomeType,
             symbol: r.symbol ?? '',
             asset: r.asset ?? 'USDT',
             amount: r.amount,
             time: new Date(r.time),
-          }),
-        ),
-      );
+          })),
+        )
+        .execute();
     }
 
     if (fresh.length > 0) {
