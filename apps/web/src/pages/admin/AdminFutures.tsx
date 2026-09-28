@@ -6,7 +6,9 @@ import {
   useFuturesMargin,
   useFuturesPlaceOrder,
   useFuturesPositions,
+  useOpenLots,
   useUpdateFuturesConfig,
+  type FuturesPositionDTO,
 } from '@/api/hooks';
 import { useRequireAuth } from '@/components/AuthGate';
 import { formatPrice, formatTime } from '@/utils/format';
@@ -24,12 +26,70 @@ export function AdminFutures() {
   const positions = useFuturesPositions();
   const update = useUpdateFuturesConfig();
   const place = useFuturesPlaceOrder();
-  // 本地合约仓位单（Lot）：订单级独立止盈止损，与交易所净持仓对照
+  // 本地合约仓位单（Lot）：订单级独立止盈止损，与交易所净持仓对照。
+  // 平仓以 Lot 为最小单位（每笔全量平掉才算完结），故按「标的+方向」聚合本地方位单。
+  const { data: openLots = [] } = useOpenLots({ market: 'futures' });
   const { message, modal } = AntApp.useApp();
   const { run: requireAuth } = useRequireAuth();
-  /** 正在平仓的 Lot（用于按钮 loading 态） */
+  /** 正在平仓的行（`symbol-方向`，用于按钮 loading 态） */
+  const [closingKey, setClosingKey] = useState<string | null>(null);
 
   const cfg = config.data;
+
+  /** 某标的+方向下，本地可平（OPEN）的仓位单 */
+  const lotsFor = (symbol: string, side: 'LONG' | 'SHORT') =>
+    openLots.filter(
+      (l) => l.market === 'futures' && l.symbol === symbol && l.direction === side && l.status === 'OPEN',
+    );
+
+  /**
+   * 市价平掉某标的+方向的**全部**本地仓位单（Lot）。
+   *
+   * 平台以 Lot 为平仓口径（每笔全量了结），交易所净持仓只是展示权威。
+   * 若交易所显示有仓但本地无对应 Lot（如在币安 App 手动开的仓），
+   * 这里无法平——引导用户到交易所处理，避免误开反向新仓。
+   */
+  const closeRow = (row: FuturesPositionDTO) => {
+    const side = row.positionSide;
+    if (!side) return;
+    const key = `${row.symbol}-${side}`;
+    const lots = lotsFor(row.symbol, side);
+    if (lots.length === 0) {
+      message.warning('该方向无本地仓位单（Lot）可平，可能是在交易所手动开的仓，请到币安处理');
+      return;
+    }
+    modal.confirm({
+      title: `市价平掉 ${row.symbol} ${side === 'LONG' ? '多头' : '空头'} 全部仓位单`,
+      icon: <ExclamationCircleOutlined className="text-down" />,
+      content: (
+        <div className="text-[12px] leading-relaxed">
+          将逐个市价全平 <b>{lots.length}</b> 笔仓位单（Lot），合计数量{' '}
+          <span className="num">{lots.reduce((s, l) => s + l.quantity, 0).toFixed(6)}</span>。
+          平仓以交易所成交为准。
+        </div>
+      ),
+      okText: '确认平仓',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setClosingKey(key);
+        try {
+          for (const lot of lots) {
+            await place.mutateAsync({
+              action: lot.direction === 'LONG' ? 'SELL' : 'BUY',
+              symbol: lot.symbol,
+              lotId: lot.id,
+            });
+          }
+          message.success(`已提交平仓：${lots.length} 笔仓位单`);
+        } catch (err) {
+          message.error((err as Error).message);
+        } finally {
+          setClosingKey(null);
+        }
+      },
+    });
+  };
 
   const saveEnabled = (checked: boolean) => {
     update.mutate({ enabled: checked }, { onError: (e) => message.error(e.message) });
@@ -156,10 +216,11 @@ export function AdminFutures() {
       <Card title="合约持仓（以交易所 positionRisk 为权威）" className="glass-card" size="small">
         <Table
           size="small"
-          rowKey="symbol"
+          rowKey={(r) => `${r.symbol}-${r.positionSide ?? 'NET'}`}
           dataSource={(positions.data ?? []).filter((p) => Math.abs(p.quantity) > 0)}
           locale={{ emptyText: '当前无持仓' }}
           pagination={false}
+          scroll={{ x: 'max-content' }}
           columns={[
             {
               title: '标的', dataIndex: 'symbol', width: 110,
@@ -208,6 +269,32 @@ export function AdminFutures() {
                     <span className={`num ${v < 0.15 ? 'text-down' : 'text-subtle'}`}>{(v * 100).toFixed(1)}%</span>
                   </Tooltip>
                 ),
+            },
+            {
+              title: '操作', key: 'action', width: 88, fixed: 'right',
+              render: (_: unknown, row: FuturesPositionDTO) => {
+                const side = row.positionSide;
+                const closable = side ? lotsFor(row.symbol, side).length > 0 : false;
+                if (!closable) {
+                  return (
+                    <Tooltip title="无本地仓位单（Lot）可平，可能是在交易所手动开的仓，请到币安处理">
+                      <Button size="small" danger disabled>
+                        平仓
+                      </Button>
+                    </Tooltip>
+                  );
+                }
+                return (
+                  <Button
+                    size="small"
+                    danger
+                    loading={closingKey === `${row.symbol}-${side}`}
+                    onClick={() => closeRow(row)}
+                  >
+                    平仓
+                  </Button>
+                );
+              },
             },
           ]}
         />

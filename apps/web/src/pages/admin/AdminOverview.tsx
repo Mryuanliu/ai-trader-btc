@@ -4,15 +4,15 @@ import clsx from 'clsx';
 import { Activity, Flame, Gauge, HelpCircle, Wallet } from 'lucide-react';
 import {
   ENVIRONMENT_LABELS,
-  MARKET_LABELS,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
   type BasketSummary,
   type OrderStatus,
   type Timeframe,
 } from '@ai-trader/shared';
-import { useCandles, useMarketPulse, useOpenLots, useOverview } from '@/api/hooks';
+import { useCandles, useMarketPulse, useOverview } from '@/api/hooks';
 import { KlineChart } from '@/components/KlineChart';
+import { PnlCalendar } from '@/components/PnlCalendar';
 import { StatCard } from '@/components/StatCard';
 import { OrderStatusTag, SideTag } from '@/components/OrderStatusTag';
 import { KeywordBars } from '@/components/Sparkline';
@@ -50,8 +50,6 @@ export function AdminOverview() {
   const [interval, setInterval] = useState<Timeframe>('5m');
   const { data: candles = [] } = useCandles('BTCUSDT', interval, 300);
   const { data: pulse } = useMarketPulse('BTCUSDT');
-  // 当前未完结仓位单（Lot）：每笔独立止盈止损，全量平掉才完结（仅合约）
-  const { data: openLots = [] } = useOpenLots({ market: 'futures', symbol: 'BTCUSDT' });
 
   if (isLoading && !data) {
     return <Skeleton active paragraph={{ rows: 10 }} />;
@@ -274,131 +272,8 @@ export function AdminOverview() {
         </div>
 
         <div className="glass-card p-4 lg:col-span-2">
-          <span className="section-title">账户余额</span>
-          <Table
-            className="mt-3"
-            size="small"
-            rowKey={(row) => `${row.exchange}-${row.asset}`}
-            pagination={false}
-            dataSource={data?.balances ?? []}
-            locale={{ emptyText: <span className="text-[12px] text-muted">未读取到余额</span> }}
-            columns={[
-              { title: '资产', dataIndex: 'asset', render: (v: string) => <span className="text-white">{v}</span> },
-              {
-                title: '可用',
-                dataIndex: 'free',
-                align: 'right',
-                render: (v: number) => <span className="num">{formatUsd(v, 6)}</span>,
-              },
-              {
-                title: '冻结',
-                dataIndex: 'locked',
-                align: 'right',
-                render: (v: number) => <span className="num text-subtle">{formatUsd(v, 6)}</span>,
-              },
-              {
-                title: '合计',
-                dataIndex: 'total',
-                align: 'right',
-                render: (v: number) => <span className="num text-white">{formatUsd(v, 6)}</span>,
-              },
-              {
-                title: 'USDT 估值',
-                dataIndex: 'usdtValue',
-                align: 'right',
-                render: (v: number) => (
-                  <span className="num text-btc-light">{formatUsd(v)}</span>
-                ),
-              },
-            ]}
-          />
-          <p className="mt-2 text-[11px] text-muted">
-            估值以 BTCUSDT 现价折算，仅 USDT / BTC 参与折价；其余资产估值为 0，不计入总估值。
-          </p>
+          <PnlCalendar data={data?.pnlCalendar ?? []} />
         </div>
-      </section>
-
-      {/* 当前仓位单（Lot）：订单级独立止盈止损 */}
-      <section className="glass-card p-4">
-        <div className="mb-3 flex items-center gap-1.5">
-          <span className="section-title">当前仓位单</span>
-          <InfoHint
-            text={
-              <div className="text-[11px] leading-relaxed">
-                <div>· 每笔开仓 = 一个仓位单，独立止盈止损（本单落库快照）</div>
-                <div>· 浮动盈亏按现价计算；多头与空头（合约锁仓）分别显示</div>
-                <div>· 触发止盈止损或手动平仓后全量了结，该单才算完结</div>
-                <div className="mt-1 text-white/60">出场 = 全量平掉对应仓位单，不做部分卖出</div>
-              </div>
-            }
-          />
-        </div>
-        {openLots.length > 0 ? (
-          <Table
-            size="small"
-            rowKey="id"
-            pagination={false}
-            dataSource={openLots}
-            scroll={{ x: 900 }}
-            columns={[
-              {
-                title: '市场',
-                dataIndex: 'market',
-                width: 90,
-                render: (v: 'spot' | 'futures') => (
-                  <Tag color={v === 'futures' ? 'purple' : 'blue'}>{MARKET_LABELS[v]}</Tag>
-                ),
-              },
-              {
-                title: '方向',
-                dataIndex: 'direction',
-                width: 90,
-                render: (v: 'LONG' | 'SHORT') => (
-                  <span className={v === 'LONG' ? 'text-up' : 'text-down'}>{v === 'LONG' ? '做多' : '做空'}</span>
-                ),
-              },
-              {
-                title: '开仓数量',
-                dataIndex: 'quantity',
-                width: 110,
-                align: 'right',
-                render: (v: number) => <span className="num">{formatQty(v)} BTC</span>,
-              },
-              {
-                title: '入场价',
-                dataIndex: 'entryPrice',
-                width: 120,
-                align: 'right',
-                render: (v: number) => <span className="num">{formatPrice(v)}</span>,
-              },
-              {
-                title: '浮动盈亏',
-                key: 'unrealizedPnl',
-                width: 140,
-                align: 'right',
-                render: (_, row) => {
-                  if (row.unrealizedPnl === null)
-                    return <span className="text-[11px] text-muted">--</span>;
-                  return (
-                    <span className={`num ${trendClass(row.unrealizedPnl)}`}>
-                      {formatSignedUsd(row.unrealizedPnl)} USDT
-                    </span>
-                  );
-                },
-              },
-              {
-                title: '开仓时间',
-                dataIndex: 'openedAt',
-                width: 160,
-                render: (v: string) => (
-                  <span className="num text-[11px] text-muted">{formatTime(v)}</span>
-                ),
-              },
-            ]}
-          />
-        ) : (
-          <div className="py-6 text-center text-[12px] text-muted">当前没有持仓中的仓位单</div>
-        )}
       </section>
 
       {/* 近期篮子：一轮「建仓 → 全部了结」的整体表现 + 各层明细 */}

@@ -12,6 +12,14 @@ const FUTURES_EXCHANGE = 'binance-futures' as const;
 export interface IncomeSummary {
   /** 平仓已实现盈亏（基于实际成交价，已含滑点） */
   realizedPnl: number;
+  /**
+   * REALIZED_PNL 流水条数。
+   *
+   * 关键：demo/testnet 的 `/fapi/v1/income` **不回报 REALIZED_PNL**（只有 COMMISSION/FUNDING_FEE），
+   * 若仅凭 `count>0` 就把 income.net 当已实现权威，会把真实价格盈亏吞成只剩手续费。
+   * 上层据此判断 income 是否真的覆盖了已实现，未覆盖时回退到按成交回合推导。
+   */
+  realizedCount: number;
   /** 手续费（开仓 + 平仓，通常为负） */
   commission: number;
   /** 资金费 / 持仓费用（可正可负） */
@@ -104,6 +112,7 @@ export class IncomeService {
 
     const result: IncomeSummary = {
       realizedPnl: 0,
+      realizedCount: 0,
       commission: 0,
       fundingFee: 0,
       other: 0,
@@ -113,8 +122,10 @@ export class IncomeService {
     for (const r of rows) {
       const total = Number(r.total) || 0;
       result.count += Number(r.cnt) || 0;
-      if (r.type === 'REALIZED_PNL') result.realizedPnl += total;
-      else if (r.type === 'COMMISSION') result.commission += total;
+      if (r.type === 'REALIZED_PNL') {
+        result.realizedPnl += total;
+        result.realizedCount += Number(r.cnt) || 0;
+      } else if (r.type === 'COMMISSION') result.commission += total;
       else if (r.type === 'FUNDING_FEE') result.fundingFee += total;
       else result.other += total;
     }

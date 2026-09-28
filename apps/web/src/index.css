@@ -134,3 +134,30 @@ body {
 .ant-slider-handle::after {
   box-shadow: 0 0 0 2px #f7931a !important;
 }
+
+/* 盈亏日历（antd Calendar）深色适配：去面板边框、压缩单元格、弱化表头 */
+.pnl-calendar .ant-picker-calendar .ant-picker-panel {
+  background: transparent;
+  border: none;
+}
+.pnl-calendar .ant-picker-header {
+  padding: 0 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.pnl-calendar .ant-picker-calendar-mode-switch {
+  display: none;
+}
+.pnl-calendar .ant-picker-content th {
+  height: 28px;
+  color: #6b7688;
+  font-weight: 400;
+}
+.pnl-calendar .ant-picker-calendar-date {
+  margin: 2px 0 0;
+  padding: 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.pnl-calendar .ant-picker-calendar-date-today .ant-picker-calendar-date-value,
+.pnl-calendar .ant-picker-calendar-date-selected .ant-picker-calendar-date-value {
+  color: inherit;
+}

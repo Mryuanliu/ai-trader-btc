@@ -552,9 +552,23 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
     const current = await this.getPositionMode();
     if ((current === 'hedge') === dual) return current;
 
-    await this.signed('POST', '/fapi/v1/positionSide/dual', {
-      dualSidePosition: dual ? 'true' : 'false',
-    });
+    try {
+      await this.signed('POST', '/fapi/v1/positionSide/dual', {
+        dualSidePosition: dual ? 'true' : 'false',
+      });
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      // -4059「无需切换」：多为 getPositionMode() 因网络抖动兜底成 one-way 后发出的多余 POST。
+      // 交易所侧其实已是目标模式 → 视为成功，不因一次误判把启动判死。
+      if (/4059|No need to change position side|position side is already/i.test(msg)) {
+        this.positionModeCache = dual ? 'hedge' : 'one-way';
+        this.logger.log(
+          `合约持仓模式已在目标：${dual ? '双向持仓（hedge）' : '单向持仓'}（无需切换）`,
+        );
+        return this.positionModeCache;
+      }
+      throw err;
+    }
     // 切换成功后失效缓存，让后续读取拿到新模式
     this.positionModeCache = dual ? 'hedge' : 'one-way';
     this.logger.log(`合约持仓模式已切换为：${dual ? '双向持仓（hedge）' : '单向持仓'}`);

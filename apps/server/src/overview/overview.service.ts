@@ -19,6 +19,7 @@ import { LlmClient } from '../agent/llm.client';
 import { PositionService } from '../account/position.service';
 import { BasketService } from '../account/basket.service';
 import { IncomeService } from '../account/income.service';
+import { LotService } from '../account/lot.service';
 import { TradingService } from '../trading/trading.service';
 import { FuturesPositionService } from '../futures/futures-position.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
@@ -45,6 +46,7 @@ export class OverviewService {
     private readonly positions: PositionService,
     private readonly baskets: BasketService,
     private readonly income: IncomeService,
+    private readonly lots: LotService,
     private readonly futuresPositions: FuturesPositionService,
     private readonly registry: ExchangeRegistry,
     private readonly dataSource: DataSource,
@@ -114,6 +116,10 @@ export class OverviewService {
     const newsResult = await this.news.list({ pageSize: 8 });
     const keywordTrends = await this.news.keywordTrends(10);
 
+    // 盈亏日历：近 13 周（~91 天）每日已实现盈亏，供首页日历图热热力使用。
+    // 取已平仓 Lot 按日聚合（不依赖 income，demo 环境 income 不回报 REALIZED_PNL）。
+    const pnlCalendar = await this.lots.realizedPnlByDay(91).catch(() => []);
+
     const usdtValue = balances.reduce((acc, r) => acc + r.usdtValue, 0);
     // 起始权益 = 当前权益 − 今日盈亏，用于把盈亏换算成收益率；
     // 与盈亏同源，避免再依赖可能缺失的余额快照
@@ -152,6 +158,7 @@ export class OverviewService {
       // 马丁网格加层时中间层必然浮亏，单笔订单看不出这一轮赚没赚，
       // 所以看板按篮子展示并给出整体盈亏列。
       recentBaskets,
+      pnlCalendar,
       referencePrice,
       news: newsResult.items,
       keywordTrends,
@@ -305,6 +312,8 @@ export function buildPnlBreakdown(input: {
   /** 今日资金流水汇总（交易所权威口径）；未同步到数据时传 null */
   incomeToday?: {
     realizedPnl: number;
+    /** REALIZED_PNL 流水条数：demo/testnet 恒为 0（交易所不回报已实现） */
+    realizedCount: number;
     commission: number;
     fundingFee: number;
     other: number;
@@ -319,12 +328,18 @@ export function buildPnlBreakdown(input: {
 } {
   const todayStart = startOfToday();
 
-  const usingIncome = (input.incomeToday?.count ?? 0) > 0;
+  // 只有当交易所流水**真的回报了 REALIZED_PNL** 时，才整体以 income.net 为已实现权威。
+  // demo/testnet 的 income 只有 COMMISSION/FUNDING_FEE、没有 REALIZED_PNL，
+  // 此时 income.net 会退化成「只剩手续费」——必须回退到按成交回合推导的价格盈亏
+  // （trips.netPnl 已扣双边手续费），再补上流水里的资金费。
+  const income = input.incomeToday;
+  const usingIncome = (income?.realizedCount ?? 0) > 0;
+  const tripsRealizedToday = input.trips
+    .filter((t) => t.closedAt >= todayStart)
+    .reduce((acc, t) => acc + t.netPnl, 0);
   const realizedPnlToday = usingIncome
-    ? input.incomeToday!.net
-    : input.trips
-        .filter((t) => t.closedAt >= todayStart)
-        .reduce((acc, t) => acc + t.netPnl, 0);
+    ? income!.net
+    : tripsRealizedToday + (income?.fundingFee ?? 0);
 
   const unrealizedPnlToday = input.futuresPositions.reduce((acc, p) => acc + p.unrealizedPnl, 0);
 
@@ -334,7 +349,7 @@ export function buildPnlBreakdown(input: {
     realizedPnlToday: Number(realizedPnlToday.toFixed(8)),
     unrealizedPnlToday: Number(unrealizedPnlToday.toFixed(8)),
     pnlToday: Number((realizedPnlToday + unrealizedPnlToday).toFixed(8)),
-    hasBaseline: input.fillCount > 0 || holdingQty > 0 || usingIncome,
+    hasBaseline: input.fillCount > 0 || holdingQty > 0 || (income?.count ?? 0) > 0,
   };
 }
 

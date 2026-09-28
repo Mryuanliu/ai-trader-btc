@@ -260,3 +260,24 @@ export class ExchangeError extends Error {
     this.name = 'ExchangeError';
   }
 }
+
+/**
+ * 是否为「可重试的瞬时网络/网关错误」。
+ *
+ * 代理链路（本地 Clash/mihomo）偶发 ECONNRESET、超时、5xx 网关抖动——这类值得退避重试；
+ * 而交易所业务错误（HTTP 4xx + 业务码如 -4067 仍有持仓、-4061 参数错）重试无意义，应立即上抛。
+ * 依据 `wrapError` 生成的 code 形态区分：`HTTP_<3位状态码>` 为有响应，否则为无响应的连接类错误。
+ */
+export function isTransientNetworkError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code ?? '';
+  const message = (err as { message?: string })?.message ?? '';
+  // 4xx：交易所明确拒绝的业务错误，不重试
+  if (/^HTTP_4\d\d$/.test(code)) return false;
+  // 5xx 网关抖动，或无 HTTP 响应的连接类错误（ECONNRESET/ETIMEDOUT/EAI_AGAIN…）：可重试
+  return (
+    /^HTTP_5\d\d$/.test(code) ||
+    /ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|ECONNREFUSED|SOCKET_HANG|socket hang up|HTTP_NETWORK|UND_ERR|请求超时|网络错误/i.test(
+      `${code} ${message}`,
+    )
+  );
+}

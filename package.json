@@ -13,10 +13,18 @@
     "dev:web": "pnpm shared:build && pnpm -F @ai-trader/web dev",
     "build": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' build",
     "start": "pnpm -F @ai-trader/server start:prod",
+    "start:pm2": "pm2 start ecosystem.config.js",
+    "deploy:pm2": "pnpm build && pm2 restart ai-trader-server --update-env",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs ai-trader-server",
+    "pm2:restart": "pm2 restart ai-trader-server",
+    "pm2:stop": "pm2 stop ai-trader-server",
+    "pm2:delete": "pm2 delete ai-trader-server",
     "typecheck": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' typecheck",
     "db:init": "psql -d postgres -h localhost -f scripts/init-db.sql"
   },
   "devDependencies": {
+    "pm2": "^5.4.3",
     "typescript": "5.6.3"
   }
 }

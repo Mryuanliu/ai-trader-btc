@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
-import { LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
+import { DailyRealizedPnl, LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
 import { OrderEntity } from '../database/entities/order.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 import { BasketService } from './basket.service';
@@ -194,6 +194,35 @@ export class LotService {
       where: symbol ? { market, symbol } : { market },
       order: { openedAt: 'DESC' },
     });
+  }
+
+  /**
+   * 近 N 日的**已实现盈亏日历**：按自然日（Asia/Shanghai）聚合已平仓 Lot 的 realizedPnl。
+   *
+   * 用 Lot.realizedPnl 而非 exchange income——demo/testnet 的 income 不回报 REALIZED_PNL，
+   * 只有 income 会漏掉全部价格盈亏。Lot 由成交推导，任何环境都可靠，且与篮子「已实现」同口径。
+   * 不含资金费（Funding）——那是独立的持仓成本，不计入交易已实现盈亏。
+   */
+  async realizedPnlByDay(days: number): Promise<DailyRealizedPnl[]> {
+    const since = new Date();
+    since.setHours(0, 0, 0, 0);
+    since.setDate(since.getDate() - (Math.max(1, Math.floor(days)) - 1));
+    const rows = await this.lotRepo.query(
+      `SELECT to_char(date_trunc('day', "closedAt" AT TIME ZONE 'Asia/Shanghai'), 'YYYY-MM-DD') AS date,
+              SUM("realizedPnl") AS pnl,
+              COUNT(*) AS count
+       FROM position_lots
+       WHERE status = 'CLOSED' AND "realizedPnl" IS NOT NULL AND "closedAt" >= $1
+       GROUP BY 1 ORDER BY 1 ASC`,
+      [since.toISOString()],
+    );
+    return (rows as Array<{ date: string; pnl: string | number; count: string | number }>).map(
+      (r) => ({
+        date: String(r.date),
+        realizedPnl: Number(r.pnl ?? 0),
+        trades: Number(r.count ?? 0),
+      }),
+    );
   }
 
   // countOpenByDirection（按方向计数）已移除：它只为已删的决策引擎

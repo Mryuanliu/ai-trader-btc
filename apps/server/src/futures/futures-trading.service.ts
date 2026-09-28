@@ -21,7 +21,12 @@ import {
 import { Repository } from 'typeorm';
 import { OrderEntity, PositionLotEntity, TradeFillEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
-import { isFuturesAdapter } from '../exchanges/adapter.interface';
+import {
+  FuturesExchangeAdapter,
+  isFuturesAdapter,
+  isTransientNetworkError,
+  OrderResult,
+} from '../exchanges/adapter.interface';
 import { EventBusService } from '../common/events';
 import { BusinessException } from '../common/business.exception';
 import { FuturesConfigService } from './futures-config.service';
@@ -105,6 +110,16 @@ const DRY_RUN_SLIPPAGE_BPS = 5;
 const FUTURES_FEE_BPS = 10;
 
 /**
+ * 市价单成交确认轮询节奏（毫秒）。
+ *
+ * demo/testnet 的 `POST /fapi/v1/order` 响应常 `executedQty=0`（成交异步完成），
+ * 若直接交给 60s 一次的 `syncPendingFills` 对账，一键平仓后页面要等很久才刷新。
+ * 市价单几乎秒级成交，这里做一段短暂回查（累计约 2.8s），命中即当场结算 Lot，
+ * 让前端 mutation 后的即时刷新能看到最新状态；仍未成交再回落对账兜底。
+ */
+const MARKET_FILL_CONFIRM_DELAYS_MS = [300, 500, 800, 1200];
+
+/**
  * 合约执行器：把策略动作翻译成合约订单并执行。
  *
  * 与现货 TradingService 平行，不复用其内部逻辑——
@@ -158,6 +173,32 @@ export class FuturesTradingService {
       // Lot 记账失败不应让下单流程失败，但必须留痕排查
       this.logger.error(`Lot 挂接失败（orderId=${order.id}）: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * 市价单成交确认回查：下单响应未含成交量时，短暂轮询交易所直到成交落地。
+   *
+   * 命中返回成交明细（filledQuantity>0），超时仍未成交返回 null（交给对账兜底）。
+   * 回查异常不中断轮询（demo 偶发 ECONNRESET），最后一轮仍失败才放弃。
+   */
+  private async confirmMarketFill(
+    adapter: FuturesExchangeAdapter,
+    order: OrderEntity,
+  ): Promise<OrderResult | null> {
+    for (const delay of MARKET_FILL_CONFIRM_DELAYS_MS) {
+      await new Promise((r) => setTimeout(r, delay));
+      try {
+        const detail = await adapter.getOrder({
+          symbol: order.symbol,
+          exchangeOrderId: order.exchangeOrderId ?? undefined,
+          clientOrderId: order.clientOrderId ?? undefined,
+        });
+        if (detail.filledQuantity > 0) return detail;
+      } catch (err) {
+        this.logger.debug(`市价成交回查失败（orderId=${order.id}），继续下一轮：${(err as Error).message}`);
+      }
+    }
+    return null;
   }
 
   /**
@@ -366,11 +407,30 @@ export class FuturesTradingService {
    * 交易所侧要求无持仓才能切换，切换前由引擎/用户保证净持仓为零；
    * 若交易所拒绝（仍有持仓/-4067），异常上抛由调用方记为决策失败，绝不静默降级——
    * 单向模式下多空 Lot 语义无法成立。
+   *
+   * 代理链路（本地 Clash/mihomo）偶发 ECONNRESET/超时：对瞬时网络错误做有界退避重试，
+   * 避免「网络抖一下」就把策略启动判死；业务错误（-4067 等）不重试，立即上抛。
    */
   async ensureHedgeMode(): Promise<void> {
     const adapter = await this.registry.get(FUTURES_EXCHANGE);
     if (!isFuturesAdapter(adapter) || !adapter.setPositionMode) return;
-    await adapter.setPositionMode(true);
+    // 适配器内部已对单次请求重试 3 次；这里再包一层退避，把总容忍窗口拉到 ~7s，扛住稍长的抖动。
+    const backoffs = [0, 1000, 2000, 4000];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < backoffs.length; attempt++) {
+      if (backoffs[attempt]) await new Promise((r) => setTimeout(r, backoffs[attempt]));
+      try {
+        await adapter.setPositionMode(true);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientNetworkError(err)) throw err; // 业务错误不重试
+        this.logger.warn(
+          `双向持仓切换遇瞬时网络错误（第 ${attempt + 1}/${backoffs.length} 次），重试中：${(err as Error).message}`,
+        );
+      }
+    }
+    throw lastErr;
   }
 
   /**
@@ -595,9 +655,54 @@ export class FuturesTradingService {
             quantity: result.filledQuantity,
             fee: filledFee,
           });
+        } else if (type === 'MARKET') {
+          // 市价单下单响应未含成交量（demo/testnet 异步成交）：短暂回查确认，
+          // 命中即当场写成交、结算 Lot——让一键平仓后前端刷新能看到最新状态，
+          // 而不是干等 60s 一次的对账任务。仍未成交再回落对账兜底。
+          const confirmed = await this.confirmMarketFill(adapter, order);
+          if (confirmed && confirmed.filledQuantity > 0) {
+            const fillPrice = confirmed.filledPrice > 0 ? confirmed.filledPrice : price;
+            const filledFee =
+              confirmed.fee ??
+              confirmed.filledQuantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
+            order.status =
+              confirmed.status === 'PARTIALLY_FILLED' ||
+              confirmed.filledQuantity < Number(order.quantity)
+                ? 'PARTIALLY_FILLED'
+                : 'FILLED';
+            order.filledQuantity = confirmed.filledQuantity;
+            order.filledPrice = fillPrice;
+            order = await this.orderRepo.save(order);
+            await this.fillRepo.save(
+              this.fillRepo.create({
+                orderId: order.id,
+                symbol,
+                price: fillPrice,
+                quantity: confirmed.filledQuantity,
+                fee: filledFee,
+                feeAsset: confirmed.feeAsset ?? 'USDT',
+                filledAt: new Date(),
+              }),
+            );
+            await this.settleOrOpenLot(input, intent, order, {
+              price: fillPrice,
+              quantity: confirmed.filledQuantity,
+              fee: filledFee,
+            });
+            this.logger.log(
+              `[${mode}][合约] 市价成交确认（回查）：${intent.kind} ${intent.positionSide} ` +
+                `${confirmed.filledQuantity} ${symbol} @ ${fillPrice.toFixed(2)} orderId=${order.id}`,
+            );
+          } else {
+            // 回查窗口内仍未成交：交给调度器的 syncPendingFills 对账补记
+            this.logger.warn(
+              `[${mode}][合约] 市价单响应未含成交量且回查未确认（status=${result.status}，` +
+                `exchangeOrderId=${result.exchangeOrderId}），成交明细与 Lot 将由对账任务补记 ` +
+                `orderId=${order.id}`,
+            );
+          }
         } else {
-          // ⚠️ 关键留痕：下单响应未含成交量（demo 环境 executedQty 可能为 0）。
-          // 成交明细与 Lot 由调度器的 syncPendingFills 对账补记；若不补记，盈亏将无法计算。
+          // 限价单未即时成交属正常挂单，成交明细与 Lot 由调度器的 syncPendingFills 对账补记
           this.logger.warn(
             `[${mode}][合约] 下单响应未含成交量（status=${result.status}，` +
               `exchangeOrderId=${result.exchangeOrderId}），成交明细与 Lot 将由对账任务补记 ` +

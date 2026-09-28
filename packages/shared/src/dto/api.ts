@@ -86,10 +86,22 @@ export interface OverviewDTO {
   recentOrders: RecentOrderItem[];
   /** 近期篮子（一轮建仓 → 了结的整体表现，含各层明细） */
   recentBaskets: BasketSummary[];
+  /** 已实现盈亏日历（按自然日聚合已平仓 Lot，供首页盈亏日历图） */
+  pnlCalendar: DailyRealizedPnl[];
   news: NewsItemDTO[];
   keywordTrends: KeywordTrend[];
   dataSources: DataSourceStatus[];
   updatedAt: string;
+}
+
+/** 某一日的已实现盈亏（仅统计当日平仓/了结的 Lot，已扣双边手续费） */
+export interface DailyRealizedPnl {
+  /** 自然日，格式 YYYY-MM-DD（Asia/Shanghai 时区） */
+  date: string;
+  /** 当日已实现盈亏合计（USDT） */
+  realizedPnl: number;
+  /** 当日了结的 Lot 笔数 */
+  trades: number;
 }
 
 export interface RecentOrderItem {
