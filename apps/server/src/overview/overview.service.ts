@@ -56,6 +56,8 @@ export class OverviewService {
 
     const ticker = this.market.getTicker(symbol);
     const marketPulse = this.market.getMarketPulse(symbol);
+    // 当前环境的 REST 校验价：与 WS 实时价同源交叉校验（demo→demo-fapi，实盘→fapi.binance.com）
+    const referencePrice = await this.market.getReferencePrice(symbol).catch(() => 0);
     const { rows: balances, source: balanceSource } = await this.getBalancesSafe(config.mode);
     const stats = await this.trading.statsToday();
 
@@ -150,6 +152,7 @@ export class OverviewService {
       // 马丁网格加层时中间层必然浮亏，单笔订单看不出这一轮赚没赚，
       // 所以看板按篮子展示并给出整体盈亏列。
       recentBaskets,
+      referencePrice,
       news: newsResult.items,
       keywordTrends,
       dataSources: await this.dataSources(balanceSource),

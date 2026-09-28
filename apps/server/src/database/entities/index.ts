@@ -11,3 +11,4 @@ export { PositionLotEntity } from './position-lot.entity';
 export { TradeFillEntity } from './trade-fill.entity';
 export { MarketCandleEntity } from './market-candle.entity';
 export { NewsItemEntity } from './news-item.entity';
+export { StrategyInstanceEntity } from './strategy-instance.entity';

@@ -42,8 +42,11 @@ export class FuturesPositionService {
   async getNetQuantity(symbol: string): Promise<number> {
     try {
       const rows = await this.listPositions(symbol);
-      const row = rows.find((r) => r.symbol === symbol);
-      return row?.quantity ?? 0;
+      // hedge 模式下同一标的返回两行（多/空各一行），必须全行求和才是净持仓；
+      // 之前用 find 只取第一行，双向持仓时会把另一侧当成 0（2026-09-28 修复）
+      return rows
+        .filter((r) => r.symbol === symbol)
+        .reduce((a, r) => a + r.quantity, 0);
     } catch (err) {
       this.logger.warn(`读取 ${symbol} 合约持仓失败，按无持仓处理: ${(err as Error).message}`);
       return 0;

@@ -1,0 +1,86 @@
+{
+  "name": "trend_following",
+  "label": "趋势跟踪",
+  "description": "双均线判定趋势方向，顺势开仓并带固定止盈止损；趋势反转时反手。与马丁网格思路相反——不逆势加仓，靠趋势段获利。",
+  "enabled": true,
+  "version": "1.0.0",
+  "author": "platform-internal",
+  "capabilities": {
+    "timeframes": [
+      "1m"
+    ],
+    "needsTicker": true,
+    "markets": [
+      "futures"
+    ],
+    "autoExit": true,
+    "suggestedMaxLayers": 1
+  },
+  "riskNotes": [
+    "震荡行情中双均线会频繁交叉，容易产生连续小额亏损（假突破）",
+    "只做顺势单、不加仓，因此单笔亏损即全部止损，不会摊薄成本",
+    "趋势末段的反转会造成回撤，止损位决定单笔最大亏损",
+    "平台不做任何风控：止损止盈由策略参数控制，平台不会代为干预"
+  ],
+  "defaultParams": {
+    "baseQty": 0.01,
+    "emaFast": 9,
+    "emaSlow": 21,
+    "takeProfitPct": 0.02,
+    "stopLossPct": 0.01,
+    "minTrendStrength": 0.0015,
+    "leverage": 10,
+    "cooldownSec": 60
+  },
+  "paramSchema": {
+    "type": "object",
+    "properties": {
+      "baseQty": {
+        "type": "number",
+        "title": "单次开仓数量(BTC)",
+        "minimum": 0.0001
+      },
+      "emaFast": {
+        "type": "integer",
+        "title": "快线周期",
+        "minimum": 2,
+        "maximum": 100
+      },
+      "emaSlow": {
+        "type": "integer",
+        "title": "慢线周期",
+        "minimum": 3,
+        "maximum": 200
+      },
+      "takeProfitPct": {
+        "type": "number",
+        "title": "止盈(比例)",
+        "minimum": 0.0005,
+        "maximum": 0.5
+      },
+      "stopLossPct": {
+        "type": "number",
+        "title": "止损(比例)",
+        "minimum": 0.0005,
+        "maximum": 0.5
+      },
+      "minTrendStrength": {
+        "type": "number",
+        "title": "最小趋势强度(快慢慢线偏离比例)",
+        "minimum": 0
+      },
+      "leverage": {
+        "type": "integer",
+        "title": "杠杆",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "cooldownSec": {
+        "type": "integer",
+        "title": "平仓后冷却(秒)",
+        "minimum": 0,
+        "maximum": 3600
+      }
+    }
+  }
+}

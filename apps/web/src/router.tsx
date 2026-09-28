@@ -7,6 +7,7 @@ import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
 import { AdminStrategy } from '@/pages/admin/AdminStrategy';
+import { AdminStrategyDetail } from '@/pages/admin/AdminStrategyDetail';
 import { AdminAiMarket } from '@/pages/admin/AdminAiMarket';
 import { AdminNews } from '@/pages/admin/AdminNews';
 import { AdminAccounts } from '@/pages/admin/AdminAccounts';
@@ -73,6 +74,8 @@ export function AppRoutes() {
       >
         <Route index element={<AdminOverview />} />
         <Route path="strategy" element={<AdminStrategy />} />
+        {/* 二级页：运行状态 / 阶梯 / 绩效（列表页只展示策略，详情按递进关系收纳） */}
+        <Route path="strategy/:name" element={<AdminStrategyDetail />} />
         <Route path="ai-market" element={<AdminAiMarket />} />
         <Route path="futures" element={<AdminFutures />} />
         <Route path="news" element={<AdminNews />} />

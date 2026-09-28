@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   BasketEntity,
   ExchangeIncomeEntity,
+  FuturesAgentConfigEntity,
   OrderEntity,
   PositionLotEntity,
   TradeFillEntity,
@@ -33,6 +34,8 @@ import { MarketModule } from '../market/market.module';
       PositionLotEntity,
       BasketEntity,
       ExchangeIncomeEntity,
+      // 篮子归因要读当前运行策略名（避免反向依赖 FuturesModule）
+      FuturesAgentConfigEntity,
     ]),
     ExchangesModule,
     MarketModule,

@@ -47,6 +47,13 @@ export interface PlaceFuturesOrderInput {
   lotId?: string;
   /** 平仓原因（结算 Lot 用） */
   exitReason?: LotExitReason;
+  /**
+   * 策略运行实例（P2 多实例隔离）：`策略名:交易对`。
+   *
+   * 写到订单上，Lot 再从订单继承——这是「每个实例只看到自己的仓位」的
+   * 数据基础。手动单不传（null）。
+   */
+  strategyInstanceId?: string;
 }
 
 /**
@@ -499,6 +506,7 @@ export class FuturesTradingService {
       reduceOnly: intent.kind === 'close',
       // 平仓单精确记录目标 Lot，供成交对账精确结算（避免 FIFO 猜错仓）
       lotId: intent.kind === 'close' ? (input.lotId ?? null) : null,
+      strategyInstanceId: input.strategyInstanceId ?? null,
     });
     order = await this.orderRepo.save(order);
 
@@ -697,6 +705,8 @@ export class FuturesTradingService {
     /** 杠杆覆盖（策略声明）；不传用配置值 */
     leverage?: number;
     source: OrderSource;
+    /** 策略运行实例（P2 多实例隔离） */
+    strategyInstanceId?: string;
     /** 用途说明（仅日志留痕，如 grid-long-L2） */
     note?: string;
   }): Promise<OrderDTO> {
@@ -753,6 +763,7 @@ export class FuturesTradingService {
       // hedge 模式下开仓单必须带 positionSide，否则交易所无法判断挂在哪个方向
       positionSide: input.positionSide,
       reduceOnly: false,
+      strategyInstanceId: input.strategyInstanceId ?? null,
     });
     order = await this.orderRepo.save(order);
 
@@ -851,6 +862,56 @@ export class FuturesTradingService {
     return rows
       .map((r) => r.lotId)
       .filter((v): v is string => typeof v === 'string' && v.length > 0);
+  }
+
+  /**
+   * 补建缺失的 Lot：已成交的开仓单若没有对应 Lot，用成交明细补建。
+   *
+   * 为什么需要单独这一步：主对账 `syncPendingFills` 是按「**有没有 fill**」过滤的
+   * （有 fill 的订单直接跳过，避免重复回查）。但 Lot 是在**记账**时建的，
+   * 下单与记账之间任何一步出问题（响应未带成交量、进程重启、异常中断），
+   * 都会留下「订单 FILLED、fill 也写了、唯独没有 Lot」的记录——
+   * 这类记录会被主对账永久跳过，表现为**有仓位却算不出盈亏、也平不掉**。
+   *
+   * 幂等：`createFromOpenFill` 按 openOrderId 去重，重复执行安全。
+   */
+  async repairMissingLots(limit = 50): Promise<{ repaired: number }> {
+    const orders = await this.orderRepo.find({
+      where: [
+        { market: 'futures', status: 'FILLED', reduceOnly: false },
+        { market: 'futures', status: 'PARTIALLY_FILLED', reduceOnly: false },
+      ],
+      order: { createdAt: 'DESC' },
+      take: limit * 2,
+    });
+    if (orders.length === 0) return { repaired: 0 };
+
+    let repaired = 0;
+    for (const order of orders.slice(0, limit)) {
+      try {
+        const existing = await this.lots.findByOpenOrderId(order.id);
+        if (existing) continue;
+        const fill = await this.fillRepo.findOne({ where: { orderId: order.id } });
+        if (!fill) continue;
+        const created = await this.lots.createFromOpenFill({
+          order,
+          fill: {
+            price: Number(fill.price),
+            quantity: Number(fill.quantity),
+            fee: Number(fill.fee),
+          },
+        });
+        if (created) {
+          repaired += 1;
+          this.logger.warn(
+            `补建缺失 Lot：订单 ${order.id.slice(0, 8)} ${order.side} ${order.quantity} ${order.symbol}`,
+          );
+        }
+      } catch (err) {
+        this.logger.warn(`补建 Lot 失败（orderId=${order.id}）：${(err as Error).message}`);
+      }
+    }
+    return { repaired };
   }
 
   /** 未成交订单（策略的网格待成交层）：运行器构造 ctx.openOrders 用它 */

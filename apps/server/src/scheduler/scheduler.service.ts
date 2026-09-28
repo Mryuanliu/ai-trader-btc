@@ -67,6 +67,15 @@ export class SchedulerService {
           }
         })
         .catch((err) => this.logger.warn(`合约成交对账异常: ${err.message}`));
+
+      // 补建缺失 Lot：主对账会跳过「已有 fill」的订单，
+      // 那些「成交了但没建 Lot」的仓位只能靠这一步捞回来
+      void this.futuresTrading
+        .repairMissingLots()
+        .then((r) => {
+          if (r.repaired > 0) this.logger.warn(`补建缺失 Lot ${r.repaired} 个`);
+        })
+        .catch((err) => this.logger.warn(`补建缺失 Lot 异常: ${err.message}`));
     }
 
     // 资金流水同步（含资金费/持仓费用）。

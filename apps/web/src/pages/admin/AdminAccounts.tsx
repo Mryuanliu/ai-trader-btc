@@ -7,6 +7,7 @@ import {
   Input,
   Row,
   Segmented,
+  Space,
   Switch,
   Tag,
   Tooltip,
@@ -22,6 +23,7 @@ import {
 } from '@ai-trader/shared';
 import { useAccounts, useTestAccount, useUpdateAccount } from '@/api/hooks';
 import { useRequireAuth } from '@/components/AuthGate';
+import { DevDocsButton } from '@/components/DevDocsDrawer';
 import { LivePulse } from '@/components/StatusBits';
 
 interface AccountFormValues {
@@ -106,7 +108,15 @@ export function AdminAccounts() {
         {!token ? (
           <Tag color="orange">登录后才能查看与修改密钥配置</Tag>
         ) : (
-          <LivePulse ok={Boolean(data?.some((a) => a.configured && a.reachable))} text="已配置账户" />
+          <Space>
+            {/* 放在页头而不是表单内：表单只在展开某个账户时才渲染，
+                入口藏在里面等于没有 */}
+            <DevDocsButton />
+            <LivePulse
+              ok={Boolean(data?.some((a) => a.configured && a.reachable))}
+              text="已配置账户"
+            />
+          </Space>
         )}
       </div>
 
@@ -194,6 +204,7 @@ export function AdminAccounts() {
                   >
                     测试连接
                   </Button>
+                  <DevDocsButton />
                   <Button type="text" onClick={() => void refetch()} loading={isLoading}>
                     刷新
                   </Button>

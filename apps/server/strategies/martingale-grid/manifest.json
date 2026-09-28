@@ -1,0 +1,45 @@
+{
+  "name": "martingale_grid",
+  "label": "马丁网格",
+  "description": "双向 STOP 挂单网格 + 马丁倍率加层 + 单侧金字塔过滤 + 篮子追踪止盈（移植自黄金 EA king-v4-balance）",
+  "enabled": true,
+  "version": "1.2.0",
+  "author": "platform-internal",
+  "capabilities": {
+    "timeframes": [
+      "1m"
+    ],
+    "needsTicker": true,
+    "markets": [
+      "futures"
+    ],
+    "autoExit": true,
+    "suggestedMaxLayers": 6
+  },
+  "riskNotes": [
+    "马丁式加仓：价格朝不利方向持续运行时会不断加层，层数越深敞口越大",
+    "6 层满仓时累计手数约为首层的 20 倍，务必确保保证金充足（10x 杠杆下约需首层名义的 2 倍保证金）",
+    "篮子止盈是「整轮净收益达标」才平仓，在此之前中间层会长期浮亏，属正常现象",
+    "平台不做任何风控：不会因亏损扩大而自动止损、降杠杆或限制加层",
+    "单边趋势行情是该策略的主要亏损来源，历史最大回撤可能很高"
+  ],
+  "defaultParams": {
+    "baseQty": 0.01,
+    "lotMultiplier": 1.5,
+    "maxLayersPerSide": 6,
+    "firstStepAtrMult": 1,
+    "stepAtrMult": 1,
+    "minStepPct": 0.003,
+    "maxStepPct": 0.015,
+    "enabledSides": "both",
+    "useTrendFilter": true,
+    "trendMaPeriod": 30,
+    "leverage": 10,
+    "pendingMode": true,
+    "firstOrderMarket": true,
+    "basketStartPct": 0.025,
+    "basketGivebackPct": 0.008,
+    "basketStopLossPct": 0,
+    "netExposureCapPct": 0
+  }
+}

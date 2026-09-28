@@ -25,6 +25,7 @@ const PARAM_SCHEMA = {
     trendMaPeriod: { type: 'integer', title: '趋势均线周期', minimum: 5 },
     leverage: { type: 'integer', title: '杠杆', minimum: 1, maximum: 20 },
     pendingMode: { type: 'boolean', title: '挂单模式(STOP单)' },
+    firstOrderMarket: { type: 'boolean', title: '首层市价开仓(不等突破)' },
     basketStartPct: { type: 'number', title: '篮子追踪止盈启动(比例)', minimum: 0 },
     basketGivebackPct: { type: 'number', title: '篮子追踪回撤(比例)', minimum: 0 },
     basketStopLossPct: { type: 'number', title: '篮子止损(比例,0=关)', minimum: 0 },
@@ -33,7 +34,9 @@ const PARAM_SCHEMA = {
 } as const;
 
 const DEFAULT_PARAMS: Record<string, unknown> = {
-  baseQty: 0.001,
+  // 首层 0.01 BTC：测试阶段放大 10 倍，让每轮的盈亏与手续费占比都更接近
+  // 真实交易量级（0.001 时手续费占比被放大，盈亏数字也小到看不出规律）
+  baseQty: 0.01,
   lotMultiplier: 1.5,
   maxLayersPerSide: 6,
   firstStepAtrMult: 1.0,
@@ -48,8 +51,22 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   trendMaPeriod: 30,
   leverage: 10,
   pendingMode: true,
-  basketStartPct: 0.015,
-  basketGivebackPct: 0.005,
+  /**
+   * 首层是否用**市价立即开仓**（而不是挂 STOP 单等价格突破）。
+   *
+   * EA 原样是挂单等突破；但「等突破」意味着行情平静时可能很久不成交——
+   * 测试/验证阶段看不到任何交易，就无法观察策略行为。
+   * 开启后：启动即市价开首层，后续加层仍按网格挂单（忠于 EA 的加层语义）。
+   * 想完全还原 EA 的话关掉它。
+   */
+  firstOrderMarket: true,
+  // 止盈启动 2.5%：主流马丁单轮止盈区间是 2%~5%（易投/CSDN 建议 2%-5%），
+  // 原来 1.5% 偏低——一轮赚得太少，扣掉手续费后几乎没剩。
+  // 放大到区间中偏低，兼顾「拿到像样的利润」与「不会久等到不成交」。
+  basketStartPct: 0.025,
+  // 回撤容忍同步放大：止盈目标变大，追踪的回撤空间也要跟着放宽，
+  // 否则刚启动追踪就被一波正常回撤打掉，等于没放大止盈。
+  basketGivebackPct: 0.008,
   basketStopLossPct: 0,
   netExposureCapPct: 0,
 };
@@ -85,8 +102,19 @@ export class MartingaleGridStrategy implements TradingStrategy {
   readonly defaultParams = DEFAULT_PARAMS;
   readonly paramSchema = PARAM_SCHEMA;
 
+  // 注：版本 / 能力声明 / 风险提示**不再写在这里**——
+  // 统一由 `strategies/martingale-grid/manifest.json` 提供（P1 元信息外置），
+  // 改文案或上下架不必改代码、不必重新编译。两处都写会漂移，故此处不留。
+
   /** 篮子净收益率的峰值（追踪止盈用）；篮子清空后重置 */
   private basketPeakPct = 0;
+  /**
+   * 首层市价开仓的去重时间戳。
+   *
+   * 市价单发出到 Lot 入账之间有对账延迟，这段时间内 `openLots` 恒为空，
+   * 不设闸的话每个 tick 都会认为「该开首层」而重复市价开仓。
+   */
+  private firstMarketAt = 0;
   /** 最近一次 tick 的决策摘要，供前端展示 */
   private lastNote = '';
 
@@ -140,6 +168,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
       trendMaPeriod: Math.floor(num('trendMaPeriod', 5, 500)),
       leverage: Math.floor(num('leverage', 1, 20)),
       pendingMode: bool('pendingMode'),
+      firstOrderMarket: bool('firstOrderMarket'),
       basketStartPct: num('basketStartPct', 0, 1),
       basketGivebackPct: num('basketGivebackPct', 0, 1),
       basketStopLossPct: num('basketStopLossPct', 0, 1),
@@ -154,6 +183,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
 
   onStop(): void {
     this.basketPeakPct = 0;
+    this.firstMarketAt = 0;
     this.lastNote = '';
   }
 
@@ -469,9 +499,52 @@ export class MartingaleGridStrategy implements TradingStrategy {
       maxLayersPerSide: number;
       firstStepAtrMult: number;
       leverage: number;
+      firstOrderMarket: boolean;
     };
     const layers = lots.length + pendings.length;
     if (layers >= p.maxLayersPerSide) return;
+
+    // 手数 = 首层 × 倍率^已层数（EA: EffectiveBaseLot × pow(multiplier, positions)）
+    const qty = Number((p.baseQty * Math.pow(p.lotMultiplier, layers)).toFixed(8));
+    if (!(qty > 0)) return;
+
+    // 首层市价开仓（可选，默认开）：
+    // EA 原样是挂 STOP 单等价格突破，但「等突破」在行情平静时可能几十分钟不成交，
+    // 测试/验证阶段就完全看不到策略行为。开启后立即市价开首层，
+    // **后续加层仍按网格挂单**（加层语义不受影响，依旧忠于 EA）。
+    //
+    // 若首层挂单还在等突破，先撤掉它——否则挂单会一直挡在前面，
+    // 既等不到突破、又走不到市价，变成「什么都不做」的僵局。
+    if (lots.length === 0 && p.firstOrderMarket === true) {
+      // 去重：市价单发出到 Lot 入账有对账延迟，这期间每 tick 都会看到
+      // 「无持仓」，不设闸就会重复市价开仓。
+      if (Date.now() - this.firstMarketAt < 20_000) return;
+      this.firstMarketAt = Date.now();
+
+      for (const o of pendings) {
+        await exec.cancelOrder(o.id);
+      }
+      // 首层手数恒为 baseQty（第 1 层，不乘倍率）。
+      // 不能用上面的 qty：那里的 layers 把「等待中的遗留挂单」也算进去了，
+      // 会把首层算成第 2 层的量（baseQty × 1.5）。
+      const firstQty = Number(Number(p.baseQty).toFixed(8));
+      const r = await exec.openLot({
+        direction: dir,
+        quantity: firstQty,
+        leverage: p.leverage,
+        reason: `grid-${dir.toLowerCase()}-L1-market`,
+      });
+      if (r.lotId || r.error === undefined) {
+        this.lastNote = `市价开 ${dir} 首层 × ${firstQty}（${p.leverage}x）`;
+        this.logger.log(this.lastNote);
+      } else if (r.error) {
+        this.firstMarketAt = 0; // 失败则允许下一 tick 重试
+        this.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
+        this.logger.warn(this.lastNote);
+      }
+      return;
+    }
+
     if (pendings.length > 0) return; // 已有待成交层，等它触发或撤销
 
     const step = this.gridStep(ctx);
@@ -498,12 +571,6 @@ export class MartingaleGridStrategy implements TradingStrategy {
     }
 
     if (!(stopPrice > 0)) return;
-
-    // 手数 = 首层 × 倍率^已层数（EA: EffectiveBaseLot × pow(multiplier, positions)）
-    const qty = Number(
-      (p.baseQty * Math.pow(p.lotMultiplier, layers)).toFixed(8),
-    );
-    if (!(qty > 0)) return;
 
     const r = await exec.placeStopOrder({
       direction: dir,

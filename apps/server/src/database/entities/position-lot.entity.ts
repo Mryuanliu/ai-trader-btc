@@ -26,6 +26,7 @@ import {
 @Index('IDX_lots_market_symbol_status', ['market', 'symbol', 'status'])
 @Index('IDX_lots_open_order', ['openOrderId'])
 @Index('IDX_lots_basket', ['basketId'])
+@Index('IDX_lots_instance', ['strategyInstanceId'])
 export class PositionLotEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,6 +50,17 @@ export class PositionLotEntity {
    */
   @Column({ type: 'uuid', nullable: true })
   basketId: string | null;
+
+  /**
+   * 建立这个仓位的**策略运行实例**（P2 多实例）。
+   *
+   * 没有它时，所有实例共享「该交易对的全部 Lot」，
+   * 两个策略会互相把对方的仓算进自己的篮子、并互相平掉——是致命的。
+   * 格式：`策略名:交易对`（如 `martingale_grid:BTCUSDT`）。
+   * 历史数据为空，归入 legacy 实例。
+   */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  strategyInstanceId: string | null;
 
   /** 开仓订单（1:1，唯一） */
   @Column({ type: 'uuid' })

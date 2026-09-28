@@ -2,7 +2,15 @@ import { useState } from 'react';
 import { Button, Empty, Segmented, Skeleton, Tag, App as AntApp } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import clsx from 'clsx';
-import { useKeywordTrends, useMarketPulse, useNews, useNewsSources, useRefreshNews } from '@/api/hooks';
+import {
+  useCalendar,
+  useKeywordTrends,
+  useMarketPulse,
+  useNews,
+  useNewsSources,
+  useRefreshCalendar,
+  useRefreshNews,
+} from '@/api/hooks';
 import { KeywordBars, Sparkline } from '@/components/Sparkline';
 import { StatCard } from '@/components/StatCard';
 import { formatPct, formatPrice, formatRelative, formatTime } from '@/utils/format';
@@ -22,6 +30,8 @@ export function AdminNews() {
   const { data: pulse } = useMarketPulse('BTCUSDT');
   const { data: candles = [] } = useCandles('BTCUSDT', '1h', 168);
   const refresh = useRefreshNews();
+  const calendar = useCalendar('high');
+  const calendarRefresh = useRefreshCalendar();
   const { message } = AntApp.useApp();
   const { run: requireAuth, modal } = useRequireAuth();
 
@@ -73,8 +83,8 @@ export function AdminNews() {
                   refresh.mutate(undefined, {
                     onSuccess: (res) =>
                       message.success(
-                        res.simulated
-                          ? `外部源不可达，已补充 ${res.added} 条模拟新闻`
+                        res.failed > 0
+                          ? `抓取完成，新增 ${res.added} 条（${res.failed} 个源失败）`
                           : `抓取完成，新增 ${res.added} 条`,
                       ),
                     onError: (err) => message.error(err.message),
@@ -157,8 +167,72 @@ export function AdminNews() {
           )}
         </div>
 
-        {/* 关键词热度 + 走势 */}
+        {/* 关键词热度 + 财经日历 + 走势 */}
         <div className="flex flex-col gap-4">
+          {/* 财经日历：FOMC 议息、非农、CPI 是 BTC 波动的最大外部驱动，
+              提前知道「下一个大事件何时落地」比事后看新闻更重要 */}
+          <div className="glass-card p-4">
+            <div className="flex items-center justify-between">
+              <span className="section-title">财经日历</span>
+              <Button
+                size="small"
+                type="text"
+                icon={<ReloadOutlined />}
+                loading={calendarRefresh.isPending}
+                onClick={() =>
+                  requireAuth(() =>
+                    calendarRefresh.mutate(undefined, {
+                      onSuccess: (r) => message.success(`日历已刷新（${r.fetched} 个事件）`),
+                      onError: (err) => message.error(err.message),
+                    }),
+                  )
+                }
+              />
+            </div>
+            <p className="muted-text mt-1">高影响宏观事件 · ForexFactory</p>
+            <div className="mt-3 flex max-h-[340px] flex-col gap-1.5 overflow-y-auto pr-1">
+              {(calendar.data ?? []).map((e) => {
+                const upcoming = new Date(e.date).getTime() > Date.now();
+                return (
+                  <div
+                    key={`${e.title}-${e.date}`}
+                    className="rounded-lg border border-white/[0.05] bg-black/20 px-2.5 py-2"
+                  >
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="num text-muted">
+                        {formatTime(e.date)}
+                        <span className="ml-1.5 text-white/40">{e.country}</span>
+                      </span>
+                      <span className={e.impact === 'High' ? 'text-down' : 'text-muted'}>
+                        {e.impact === 'High' ? '高影响' : '中影响'}
+                      </span>
+                    </div>
+                    <div
+                      className={clsx(
+                        'mt-0.5 text-[12px] leading-snug',
+                        upcoming ? 'text-white/90' : 'text-white/40',
+                      )}
+                    >
+                      {e.title}
+                    </div>
+                    {e.forecast || e.previous ? (
+                      <div className="num mt-0.5 text-[10px] text-muted">
+                        {e.forecast ? `预期 ${e.forecast}` : ''}
+                        {e.forecast && e.previous ? ' · ' : ''}
+                        {e.previous ? `前值 ${e.previous}` : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+              {(calendar.data ?? []).length === 0 ? (
+                <div className="py-6 text-center text-[11px] text-muted">
+                  暂无高影响事件（点击右上角刷新）
+                </div>
+              ) : null}
+            </div>
+          </div>
+
           <div className="glass-card p-4">
             <span className="section-title">关键词热度</span>
             <p className="muted-text mt-1">点击关键词可反向筛选新闻</p>

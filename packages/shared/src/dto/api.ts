@@ -17,6 +17,7 @@ import type {
   LotExitReason,
   LotStatus,
 } from '../position';
+import type { StrategyManifest } from '../strategy-sdk';
 
 export interface PageResult<T> {
   items: T[];
@@ -43,6 +44,14 @@ export interface BalanceRow {
 
 export interface OverviewDTO {
   ticker: Ticker;
+  /**
+   * 当前交易环境的参考价（REST 校验值）。
+   *
+   * 始终取「当前运行环境」的接口——实盘取 fapi.binance.com、模拟盘取
+   * demo-fapi.binance.com，与平台实际行情/交易同源。用于和 WS 实时价做
+   * 同源交叉校验，确认行情未断线/滞后；不做跨环境对照。
+   */
+  referencePrice: number;
   mode: RunMode;
   environment: Environment;
   agentEnabled: boolean;
@@ -175,6 +184,13 @@ export interface StrategyDescriptor {
   defaultParams: Record<string, unknown>;
   /** 参数 JSON Schema：前端据此动态渲染配置表单 */
   paramSchema: Record<string, unknown>;
+  /**
+   * 上架元信息（版本 / 能力声明 / 风险提示）。
+   *
+   * 前端据此展示「谁写的、需要什么数据、有什么风险」——
+   * 平台不做风控，但风险必须被看见。缺失时前端应提示该策略未完善元信息。
+   */
+  manifest?: StrategyManifest;
 }
 
 /** 策略运行状态 */
@@ -193,6 +209,16 @@ export interface StrategyRunStatus {
   state: Record<string, unknown> | null;
   /** 当前未完结仓位单数量 */
   openLotCount: number;
+  /** P2 多实例：当前运行的实例数（单实例恒为 1 或 0） */
+  instanceCount?: number;
+  /**
+   * 当前实例的 OPEN 篮子（含各层明细）。
+   *
+   * 篮子是「会被一起平掉」的订单分组——类似量化 EA 的魔术号：
+   * 一个实例同一交易对同时最多一个 OPEN 篮子，篮子出场时全部层一起了结。
+   * 策略详情页据此展示「哪些订单属于一轮、会被一起平掉」。
+   */
+  baskets?: BasketSummary[];
 }
 
 /** 阻止策略启动的未完结仓位单（需用户手动平掉） */
@@ -255,6 +281,72 @@ export interface AiMarketAnalysis {
   /** 参与分析的新闻条数 */
   newsCount: number;
   generatedAt: string;
+}
+
+// ---------------------------------------------------------------- 策略绩效
+
+/** 绩效统计窗口 */
+export type PerformanceWindow = '7d' | '30d' | 'all';
+
+/**
+ * 策略绩效（排行榜与策略详情页的数据源）。
+ *
+ * **口径要点**：
+ * - 只统计**已了结**（CLOSED）的篮子——浮盈不算收益，否则未平仓位会污染排名
+ * - 收益 = 各层已实现盈亏（含双边手续费）+ 篮子存续期资金费
+ * - 年化/夏普基于**绝对收益**推算（平台暂不跟踪每个策略的本金规模）
+ */
+export interface StrategyPerformance {
+  strategyName: string;
+  symbol: string;
+  window: PerformanceWindow;
+  /** 了结的篮子数 */
+  closedBaskets: number;
+  /** 累计净收益（USDT） */
+  totalPnl: number;
+  /** 年化收益（USDT/年，绝对收益口径） */
+  annualizedPnl: number;
+  /** 最大回撤（USDT，从净值峰值的最大回落） */
+  maxDrawdown: number;
+  /** 夏普比率（按日收益，年化口径） */
+  sharpe: number;
+  /** 卡玛比率 = 年化收益 / 最大回撤 */
+  calmar: number;
+  /** 胜率 0~1（盈利篮子占比） */
+  winRate: number;
+  /** 盈亏比 = 总盈利 / 总亏损（无亏损时为 null） */
+  profitFactor: number | null;
+  /** 平均每轮层数 */
+  avgLayers: number;
+  /** 净值曲线（按篮子了结时间累加） */
+  equityCurve: Array<{ time: string; equity: number }>;
+  /** 首次/末次了结时间 */
+  firstClosedAt: string | null;
+  lastClosedAt: string | null;
+}
+
+// ---------------------------------------------------------------- 财经日历
+
+/**
+ * 财经日历事件（数据源：ForexFactory，交易者最通用的日历）。
+ *
+ * 覆盖美联储议息（FOMC）、非农（NFP）、CPI 等影响加密市场的宏观事件。
+ * BTC 与美元流动性高度相关——高影响事件（加息决议、非农爆冷）往往伴随
+ * 加密市场剧烈波动，所以策略与人工复盘都需要知道「下一个大事件何时发生」。
+ */
+export interface CalendarEventDTO {
+  /** 事件名称，如 "FOMC Statement"、"Non-Farm Employment Change"、"CPI m/m" */
+  title: string;
+  /** 相关货币（USD/EUR/…）；美联储与非农/CPI 恒为 USD */
+  country: string;
+  /** 事件时间（ISO 8601，含原时区偏移，前端应转为本地时区展示） */
+  date: string;
+  /** 影响等级：High / Medium / Low / Holiday */
+  impact: 'High' | 'Medium' | 'Low' | 'Holiday';
+  /** 预期值（讲话/决议类为空字符串） */
+  forecast: string;
+  /** 前值（无则空字符串） */
+  previous: string;
 }
 
 // ---------------------------------------------------------------- 篮子

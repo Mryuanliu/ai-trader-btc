@@ -8,6 +8,8 @@ export * from './types/news';
 export * from './order-normalizer';
 export * from './position';
 export * from './indicators/core';
+// 策略 SDK 契约（第三方策略作者依赖的接口定义）
+export * from './strategy-sdk';
 // 前后端共用 DTO
 export * from './dto/api';
 

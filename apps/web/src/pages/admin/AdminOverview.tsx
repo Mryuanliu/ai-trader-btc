@@ -3,6 +3,7 @@ import { Segmented, Skeleton, Table, Tag, Tooltip } from 'antd';
 import clsx from 'clsx';
 import { Activity, Flame, Gauge, HelpCircle, Wallet } from 'lucide-react';
 import {
+  ENVIRONMENT_LABELS,
   MARKET_LABELS,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
@@ -70,6 +71,23 @@ export function AdminOverview() {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* 当前环境 REST 校验价：与 WS 实时价同源交叉校验，确认行情未断线/滞后。
+          跟随实际环境切换——实盘取 fapi.binance.com、模拟盘取 demo-fapi.binance.com，
+          始终与平台交易价同源，不做跨环境对照。 */}
+      {data?.referencePrice ? (
+        <div className="glass-card flex flex-wrap items-center gap-2 px-4 py-2 text-[11px]">
+          <span className="text-muted">{ENVIRONMENT_LABELS[data.environment]}参考价</span>
+          <span className="num text-white">{formatPrice(data.referencePrice)}</span>
+          {data.ticker?.price > 0 ? (
+            <span className={clsx('num', trendClass(data.ticker.price - data.referencePrice))}>
+              与实时价偏差 {formatSignedUsd(data.ticker.price - data.referencePrice)}
+            </span>
+          ) : null}
+          <span className="text-white/40">
+            · 取当前交易环境 REST 校验值，与平台行情同源；偏差过大即提示行情流可能滞后
+          </span>
+        </div>
+      ) : null}
       {/* 顶部指标条 */}
       <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard

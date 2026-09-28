@@ -9,6 +9,7 @@ import { http } from './client';
 import { useRealtimeStore } from '@/ws/realtime';
 import type {
   AiMarketAnalysis,
+  CalendarEventDTO,
   Candle,
   Environment,
   FuturesAgentConfigShape,
@@ -20,6 +21,7 @@ import type {
   OverviewDTO,
   PageResult,
   StrategyDescriptor,
+  StrategyPerformance,
   StrategyRunStatus,
   StrategyStartResult,
   Ticker,
@@ -191,10 +193,37 @@ export function useKeywordTrends(limit = 12) {
 
 export function useRefreshNews() {
   const client = useQueryClient();
-  return useMutation<{ added: number; simulated: boolean }, Error, void>({
+  return useMutation<{ added: number; failed: number }, Error, void>({
     mutationFn: () => http.post('/news/refresh'),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ['news'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------- 财经日历
+
+/**
+ * 财经日历（美联储议息 / 非农 / CPI 等宏观事件，ForexFactory 数据源）。
+ *
+ * 默认只取 High + Medium 影响等级——Low 级别多为官员讲话，噪音太多。
+ */
+export function useCalendar(impact: 'high' | 'all' = 'high') {
+  return useQuery<CalendarEventDTO[]>({
+    queryKey: ['calendar', impact],
+    queryFn: () => http.get('/news/calendar', { params: { impact } }),
+    staleTime: 5 * 60_000,
+    refetchInterval: 10 * 60_000,
+  });
+}
+
+/** 强制刷新日历（绕过服务端 1h 缓存） */
+export function useRefreshCalendar() {
+  const client = useQueryClient();
+  return useMutation<{ fetched: number }, Error, void>({
+    mutationFn: () => http.post('/news/calendar/refresh'),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['calendar'] });
     },
   });
 }
@@ -362,6 +391,20 @@ export function useStrategyStatus(refetchInterval = 5000) {
 }
 
 /**
+ * 策略排行榜（P3）。
+ *
+ * 口径：只统计**已了结**的篮子——浮盈不算收益，否则未平仓位会污染排名。
+ * 窗口 7d/30d/all；轮询较慢（15s），绩效数据不需要实时。
+ */
+export function useLeaderboard(win: '7d' | '30d' | 'all', refetchInterval = 15000) {
+  return useQuery<StrategyPerformance[]>({
+    queryKey: ['strategy-leaderboard', win],
+    queryFn: () => http.get('/strategy/leaderboard', { params: { window: win } }),
+    refetchInterval,
+  });
+}
+
+/**
  * 启动策略。
  *
  * 注意返回体是 200 + `{ ok:false, blockingLots }` 而非抛错：
@@ -372,7 +415,13 @@ export function useStartStrategy() {
   return useMutation<
     StrategyStartResult,
     Error,
-    { name: string; params?: Record<string, unknown>; adoptExisting?: boolean }
+    {
+      name: string;
+      /** 可选：指定币种启动独立实例（缺省用平台配置币种） */
+      symbol?: string;
+      params?: Record<string, unknown>;
+      adoptExisting?: boolean;
+    }
   >({
     mutationFn: (body) => http.post('/strategy/start', body),
     onSuccess: () => {
@@ -389,6 +438,26 @@ export function useStopStrategy() {
     mutationFn: () => http.post('/strategy/stop'),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['strategy-status'] });
+    },
+  });
+}
+
+/**
+ * 一键平仓：平掉当前篮子全部持仓，策略继续运行并自动开始下一轮挂单。
+ * 与停止策略不同——停止是保留持仓不再交易，这里是了结本轮后继续跑。
+ */
+export function useCloseBasket() {
+  const qc = useQueryClient();
+  return useMutation<
+    { closed: number; canceled: number; failed: number; message: string },
+    Error,
+    void
+  >({
+    mutationFn: () => http.post('/strategy/close-basket'),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['strategy-status'] });
+      void qc.invalidateQueries({ queryKey: ['lots'] });
+      void qc.invalidateQueries({ queryKey: ['overview'] });
     },
   });
 }

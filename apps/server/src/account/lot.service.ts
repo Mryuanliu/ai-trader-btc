@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { LotDirection, LotExitReason, MarketType, settleLotPnl } from '@ai-trader/shared';
 import { OrderEntity } from '../database/entities/order.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
@@ -39,6 +39,8 @@ export class LotService {
     const lot = this.lotRepo.create({
       market: order.market,
       symbol: order.symbol,
+      // 实例归属从订单继承：这是「每个策略实例只管自己的仓」的数据基础
+      strategyInstanceId: order.strategyInstanceId ?? null,
       direction,
       openOrderId: order.id,
       closeOrderId: null,
@@ -52,7 +54,8 @@ export class LotService {
     const saved = await this.lotRepo.save(lot);
     // 挂到当前篮子上：一次「建仓 → 全部了结」的周期就是一个篮子，
     // 有了它才能算出「这一轮整体赚了多少」——单看每一层毫无意义（加层时中间层都在浮亏）
-    await this.baskets.attachLot(saved, order.source);
+    // 篮子按实例隔离：多实例下不同策略各开各的篮子，互不干扰
+    await this.baskets.attachLot(saved, order.source, order.strategyInstanceId);
     this.logger.log(
       `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price}`,
     );
@@ -114,6 +117,75 @@ export class LotService {
         : { market, status: 'OPEN' },
       order: { openedAt: 'ASC' },
     });
+  }
+
+  /**
+   * 归档「交易所已无该方向持仓、本地却仍是 OPEN」的孤儿 Lot。
+   *
+   * 用户在交易所手动平仓（或用别的客户端/别的平台平仓）时，本地 Lot 不会被结算——
+   * 它们会一直保持 OPEN。曾因此导致启动拦截**永远为真**：
+   * 用户明明已经平完仓，却被告知「还有仓位未平」，策略再也启不来。
+   *
+   * 事实来源是**交易所持仓**，不是本地 Lot 表。
+   *
+   * ⚠️ 必须按**方向**对账，不能用净持仓：本平台是双向 hedge 模式，
+   * 多空持仓可同时存在（锁仓）。多 0.04 + 空 0.02 的净持仓是 +0.02 > 0，
+   * 若按「净持仓为正 = 没有空头」归档，会把交易所真实存在的空头仓位
+   * 全部误归档——本地从此不再跟踪它们（无 TP/SL、无出场管理），
+   * 而交易所仓位还在，账面对不上。曾实际发生（2026-09-28）。
+   *
+   * @param exchange 交易所**分方向**持仓数量（绝对值，≥0）
+   */
+  async reconcileOrphanLots(
+    market: MarketType,
+    symbol: string,
+    exchange: { longQty: number; shortQty: number },
+  ): Promise<number> {
+    const open = await this.lotRepo.find({ where: { market, symbol, status: 'OPEN' } });
+    if (open.length === 0) return 0;
+
+    // 只在「交易所该方向持仓为 0」时归档该方向的 Lot；
+    // 数量不一致不处理（保守，避免误归档）。
+    const orphans = open.filter((l) =>
+      l.direction === 'LONG' ? exchange.longQty <= 0 : exchange.shortQty <= 0,
+    );
+    if (orphans.length === 0) return 0;
+
+    const now = new Date();
+    for (const lot of orphans) {
+      lot.status = 'CLOSED';
+      lot.closedAt = now;
+      lot.exitReason = 'MANUAL';
+      // 交易所已无此仓位，没有真实平仓价可依：按 0 盈亏归档（宁可不算，不要瞎算）
+      lot.closedQuantity = Number(lot.quantity);
+      lot.realizedPnl = 0;
+      lot.returnPct = 0;
+    }
+    await this.lotRepo.save(orphans);
+    for (const lot of orphans) {
+      await this.baskets.onLotSettled(lot.basketId);
+    }
+    this.logger.warn(
+      `归档 ${orphans.length} 个孤儿 Lot（交易所持仓 多 ${exchange.longQty} / 空 ${exchange.shortQty}，本地在该方向已无对应仓位）`,
+    );
+    return orphans.length;
+  }
+
+  /**
+   * 接管该交易对下**无归属**的未完结仓位单（P2 多实例）。
+   *
+   * 启动实例时（adoptExisting），把「实例标识为空」的历史/遗留 Lots
+   * 显式划归本实例——这是「重启后自动接管」与「手动仓归策略管」的实现基础。
+   * 已归属**其他实例**的 Lot 不动（那是别人的篮子）。
+   */
+  async claimUnassigned(market: MarketType, symbol: string, instanceId: string): Promise<number> {
+    const lots = await this.lotRepo.find({
+      where: { market, symbol, status: 'OPEN', strategyInstanceId: IsNull() },
+    });
+    if (lots.length === 0) return 0;
+    for (const lot of lots) lot.strategyInstanceId = instanceId;
+    await this.lotRepo.save(lots);
+    return lots.length;
   }
 
   /** 全量 Lot（含 CLOSED/CANCELLED）：订单页按 Lot 分组、对账用，按开仓时间倒序 */

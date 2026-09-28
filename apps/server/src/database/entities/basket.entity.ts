@@ -35,6 +35,7 @@ import {
 @Entity('baskets')
 @Index('IDX_baskets_market_symbol_status', ['market', 'symbol', 'status'])
 @Index('IDX_baskets_code', ['code'], { unique: true })
+@Index('IDX_baskets_instance', ['strategyInstanceId'])
 export class BasketEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -56,6 +57,27 @@ export class BasketEntity {
   /** 来源：整轮策略建 / 整轮手动 / 混合 */
   @Column({ type: 'varchar', length: 16, default: 'manual' })
   origin: BasketOrigin;
+
+  /**
+   * 建立这个篮子的**策略名**（绩效归因用）。
+   *
+   * 没有它就无法回答「哪个策略赚了多少」——篮子是绩效计算单元，
+   * 但篮子本身不带策略标识，排行榜只能算总账。
+   * 手动开仓建立的篮子记为 `manual`。
+   */
+  @Column({ type: 'varchar', length: 64, default: 'manual' })
+  strategyName: string;
+
+  /**
+   * 建立这个篮子的**策略运行实例**（P2 多实例）。
+   *
+   * 与 strategyName 的分工：
+   * - `strategyName` —— 绩效归因（哪个策略赚了多少）
+   * - `strategyInstanceId` —— 仓位隔离（这个篮子归哪个运行实例管）
+   * 同策略跑不同交易对时两者才不同。历史数据为空。
+   */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  strategyInstanceId: string | null;
 
   @Column({ type: 'varchar', length: 16 })
   status: BasketStatus;

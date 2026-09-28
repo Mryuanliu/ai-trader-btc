@@ -7,6 +7,7 @@ import {
   Col,
   Empty,
   Form,
+  Input,
   InputNumber,
   Modal,
   Row,
@@ -17,13 +18,18 @@ import {
   Tag,
   Tooltip,
 } from 'antd';
+import { useNavigate } from 'react-router-dom';
 import {
+  DollarOutlined,
   ExclamationCircleOutlined,
+  FileTextOutlined,
   PlayCircleOutlined,
   PoweroffOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
+import { DevDocsButton } from '@/components/DevDocsDrawer';
 import {
+  useCloseBasket,
   useFuturesConfig,
   useStartStrategy,
   useStopStrategy,
@@ -43,11 +49,14 @@ import type { BlockingLot, StrategyDescriptor } from '@ai-trader/shared';
  * 拦截：若还有未平仓的仓位单（上一个策略留下的），启动会被拦下并列出明细，
  * 需要用户先在合约面板手动平掉，避免两套策略的仓位混在一起无法归因。
  */
+
 export function AdminStrategy() {
+  const navigate = useNavigate();
   const strategies = useStrategies();
   const status = useStrategyStatus();
   const start = useStartStrategy();
   const stop = useStopStrategy();
+  const closeBasket = useCloseBasket();
   /** 运行模式：切到实盘时启动策略需要二次确认 */
   const futuresCfg = useFuturesConfig().data;
   const { message, modal } = AntApp.useApp();
@@ -61,59 +70,6 @@ export function AdminStrategy() {
   const st = status.data;
   const running = st?.running ?? false;
 
-  // 策略状态里的可观测字段（后端 getState 输出）
-  const s = (st?.state ?? {}) as Record<string, unknown>;
-  const numOf = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-  const layers = (s.layers ?? {}) as Record<string, number>;
-  const pending = (s.pending ?? {}) as Record<string, number>;
-  const nextAdd = (s.nextAdd ?? {}) as Record<string, number | null>;
-  /** 阶梯预览：1~N 层的推演价位（逐格推进时看不到整条阶梯，这里摊开展示） */
-  const ladder = (s.ladder ?? null) as
-    | {
-        long?: Array<{ layer: number; price: number; qty: number }>;
-        short?: Array<{ layer: number; price: number; qty: number }>;
-      }
-    | null;
-  const maxLayers = numOf(s.maxLayers) ?? 6;
-  const netPct = numOf(s.netPct);
-  const startPct = numOf(s.basketStartPct);
-  const price = numOf(s.price);
-  const step = numOf(s.step);
-  const leverage = numOf(s.leverage);
-
-  // 心跳：本轮 tick 距今多久。
-  // 「显示运行中」不等于「真的在动」——给一个可验证的时间证据，
-  // 用户才不会把「正常等待」和「卡死」搞混（也避免怀疑状态是假的）。
-  const tickAgoSec = st?.lastTickAt
-    ? Math.max(0, Math.round((Date.now() - new Date(st.lastTickAt).getTime()) / 1000))
-    : null;
-  const tickStale = tickAgoSec !== null && tickAgoSec > 30;
-
-  /**
-   * 把策略状态翻译成「它在等什么」。
-   *
-   * 马丁网格大部分时间都在等待（等挂单触发 / 等价格到加层线 / 等止盈线），
-   * 不写清楚，用户会以为策略卡死了。
-   */
-  const waiting = (() => {
-    const parts: string[] = [];
-    const pL = pending.long ?? 0;
-    const pS = pending.short ?? 0;
-    if (pL + pS > 0) parts.push(`已挂 ${pL + pS} 张 STOP 单，等价格触发`);
-    if (nextAdd.long != null && (layers.long ?? 0) > 0) {
-      parts.push(`多头加层需跌破 ${formatPrice(nextAdd.long)}`);
-    }
-    if (nextAdd.short != null && (layers.short ?? 0) > 0) {
-      parts.push(`空头加层需涨破 ${formatPrice(nextAdd.short)}`);
-    }
-    if (netPct != null && startPct != null && startPct > 0 && netPct < startPct) {
-      parts.push(
-        `止盈需净收益达 ${(startPct * 100).toFixed(2)}%（当前 ${(netPct * 100).toFixed(2)}%）`,
-      );
-    }
-    return parts.join(' · ');
-  })();
-
   /**
    * 未平仓拦截提示。
    *
@@ -126,6 +82,7 @@ export function AdminStrategy() {
     params: Record<string, unknown> | undefined,
     lots: BlockingLot[],
     text: string,
+    symbol?: string,
   ) => {
     modal.confirm({
       title: '还有仓位单未平仓',
@@ -166,7 +123,8 @@ export function AdminStrategy() {
               {
                 title: '开仓时间',
                 dataIndex: 'openedAt',
-                render: (v: string) => formatTime(v),
+                // 拦截项来自交易所持仓快照，不带开仓时间
+                render: (v: string) => (v ? formatTime(v) : '—'),
               },
             ]}
           />
@@ -176,7 +134,7 @@ export function AdminStrategy() {
           </div>
         </div>
       ),
-      onOk: () => doStart(strategy, params, true),
+      onOk: () => doStart(strategy, params, true, symbol),
     });
   };
 
@@ -212,10 +170,12 @@ export function AdminStrategy() {
     strategy: StrategyDescriptor,
     params?: Record<string, unknown>,
     adoptExisting?: boolean,
+    /** 指定币种启动独立实例；缺省用平台配置币种（兼容旧语义） */
+    symbol?: string,
   ) =>
     confirmLiveIfNeeded(() => requireAuth(async () => {
       try {
-        const result = await start.mutateAsync({ name: strategy.name, params, adoptExisting });
+        const result = await start.mutateAsync({ name: strategy.name, params, adoptExisting, symbol });
         if (!result.ok) {
           if (result.blockingLots?.length) {
             showBlockingLots(strategy, params, result.blockingLots, result.message);
@@ -241,6 +201,43 @@ export function AdminStrategy() {
       }
     });
 
+  /**
+   * 一键平仓：平掉当前篮子全部持仓，策略继续运行并自动开始下一轮。
+   * 必须二次确认——这是真实资金操作，且与「停止策略」语义完全不同。
+   */
+  const doCloseBasket = () =>
+    requireAuth(() => {
+      modal.confirm({
+        title: '一键平仓（了结当前这一轮）',
+        icon: <ExclamationCircleOutlined className="text-down" />,
+        width: 460,
+        content: (
+          <div className="space-y-1.5 text-[12px] leading-relaxed">
+            <div>
+              将平掉当前篮子的 <b>{st?.openLotCount ?? 0}</b> 个仓位单，并撤销全部未成交挂单。
+            </div>
+            <div>
+              平仓后策略<b>继续运行</b>，下一轮挂单会自动开始。
+            </div>
+            <div className="text-muted">
+              与「停止策略」不同：停止会保留持仓且不再交易，平仓是了结本轮后继续跑。
+            </div>
+          </div>
+        ),
+        okText: '确认平仓',
+        okButtonProps: { danger: true },
+        cancelText: '取消',
+        onOk: async () => {
+          try {
+            const r = await closeBasket.mutateAsync();
+            message.success(r.message);
+          } catch (err) {
+            message.error((err as Error).message);
+          }
+        },
+      });
+    });
+
   /** 参数表单：按 paramSchema 动态渲染（number / boolean / enum） */
   const paramFields = useMemo(() => {
     const schema = configuring?.paramSchema as
@@ -259,168 +256,25 @@ export function AdminStrategy() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      {/* 页头：只回答「有哪些策略」，运行状态与绩效在详情页 */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-[17px] font-semibold text-white">策略管理</h2>
           <div className="muted-text mt-0.5">
-            点击启动即挂载策略开始自动交易；同一时间只能运行一个策略
+            选一个策略 → 点「启动」挂载 → 进入「详情」看运行状态、阶梯与绩效
           </div>
         </div>
-        {running ? (
-          <Space>
+        <Space>
+          <DevDocsButton />
+          {running ? (
             <Tag color="processing" className="!mr-0">
               {st?.label} 运行中
             </Tag>
-            <Button
-              danger
-              icon={<PoweroffOutlined />}
-              loading={stop.isPending}
-              onClick={doStop}
-            >
-              停止策略
-            </Button>
-          </Space>
-        ) : (
-          <Space>
+          ) : (
             <Tag className="!mr-0">未运行</Tag>
-            <span className="text-[11px] text-muted">在下方选一个策略点「启动」即可挂载</span>
-          </Space>
-        )}
+          )}
+        </Space>
       </div>
-
-      {/* 运行中状态 */}
-      {running && st ? (
-        <Card size="small" title="运行状态" className="!border-white/[0.06] !bg-white/[0.02]">
-          <Row gutter={[16, 16]}>
-            <Col xs={12} md={6}>
-              <Stat label="未完结仓位单" value={String(st.openLotCount)} />
-            </Col>
-            <Col xs={12} md={6}>
-              <Stat label="启动时间" value={st.startedAt ? formatTime(st.startedAt) : '--'} />
-            </Col>
-            <Col xs={12} md={6}>
-              <Stat
-                label="最近 tick（心跳）"
-                value={tickAgoSec === null ? '--' : `${tickAgoSec} 秒前`}
-              />
-            </Col>
-            <Col xs={12} md={6}>
-              <Stat
-                label="篮子净收益率"
-                value={
-                  netPct != null
-                    ? `${(netPct * 100).toFixed(2)}%`
-                    : typeof s.basketPeakPct === 'number'
-                      ? `${(s.basketPeakPct * 100).toFixed(2)}%`
-                      : '--'
-                }
-              />
-            </Col>
-          </Row>
-
-          {/* 网格进度：回答「为什么现在不动」 */}
-          <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.06] pt-3 text-[12px] sm:grid-cols-4">
-            <div>
-              <span className="text-muted">多头层数 </span>
-              <span className="num text-white">
-                {layers.long ?? 0}/{maxLayers}
-              </span>
-              {pending.long ? <span className="text-muted">（{pending.long} 单待触发）</span> : null}
-            </div>
-            <div>
-              <span className="text-muted">空头层数 </span>
-              <span className="num text-white">
-                {layers.short ?? 0}/{maxLayers}
-              </span>
-              {pending.short ? (
-                <span className="text-muted">（{pending.short} 单待触发）</span>
-              ) : null}
-            </div>
-            <div>
-              <span className="text-muted">当前价 </span>
-              <span className="num text-white">{price != null ? formatPrice(price) : '--'}</span>
-              {step != null ? (
-                <span className="text-muted"> · 网格 {step.toFixed(1)}</span>
-              ) : null}
-            </div>
-            <div>
-              <span className="text-muted">杠杆 </span>
-              <span className="num text-white">{leverage != null ? `${leverage}x` : '--'}</span>
-            </div>
-          </div>
-
-          {/* 阶梯预览：逐格推进只能挂一层，把整条阶梯摊开才看得出间距是否合理 */}
-          {ladder ? (
-            <div className="mt-3 grid grid-cols-1 gap-4 border-t border-white/[0.06] pt-3 sm:grid-cols-2">
-              {(['long', 'short'] as const).map((sideKey) => {
-                const rows = ladder[sideKey] ?? [];
-                if (rows.length === 0) return null;
-                const filledN = (sideKey === 'long' ? layers.long : layers.short) ?? 0;
-                return (
-                  <div key={sideKey}>
-                    <div className="mb-1 text-[12px] text-muted">
-                      {sideKey === 'long' ? '多头阶梯（越跌越买）' : '空头阶梯（越涨越卖）'}
-                    </div>
-                    <div className="space-y-[3px]">
-                      {rows.map((r) => {
-                        const done = r.layer <= filledN;
-                        return (
-                          <div
-                            key={r.layer}
-                            className="flex items-center justify-between text-[11px]"
-                          >
-                            <span className={done ? 'text-up' : 'text-subtle'}>
-                              L{r.layer} {done ? '已成交' : '待触发'}
-                            </span>
-                            <span className={`num ${done ? 'text-up' : 'text-white'}`}>
-                              {formatPrice(r.price)}
-                            </span>
-                            <span className="num text-subtle">{r.qty}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-
-          {/* 心跳：证明策略真的在动（而不是只是"显示在运行"） */}
-          <div className="mt-2 flex items-center gap-1.5 text-[11px]">
-            <span className={tickStale ? 'text-down' : 'text-up'}>●</span>
-            <span className={tickStale ? 'text-down' : 'text-subtle'}>
-              {tickAgoSec === null
-                ? '尚未产生心跳'
-                : tickStale
-                  ? `心跳已停 ${tickAgoSec} 秒 —— 策略可能卡死，请查看下方错误信息`
-                  : `心跳正常（${tickAgoSec} 秒前），策略每 5 秒决策一次`}
-            </span>
-          </div>
-
-          {waiting ? (
-            <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2 text-[11px] text-subtle">
-              等待中：{waiting}
-            </div>
-          ) : null}
-
-          {st.state && typeof st.state.note === 'string' && st.state.note ? (
-            <div className="mt-2 text-[12px] text-subtle">
-              <span className="muted-text">最近动作：</span>
-              {st.state.note}
-            </div>
-          ) : null}
-          {st.lastError ? (
-            <Alert
-              className="mt-3"
-              type="error"
-              showIcon
-              message="最近一次 tick 失败"
-              description={st.lastError}
-            />
-          ) : null}
-        </Card>
-      ) : null}
 
       {/* 策略卡片 */}
       {strategies.isLoading ? (
@@ -454,16 +308,21 @@ export function AdminStrategy() {
                   </Tooltip>,
                   <span
                     key="start"
-                    className={running ? 'cursor-not-allowed opacity-40' : ''}
                     onClick={() => {
                       if (running) {
-                        message.warning('已有策略在运行，请先停止');
+                        // 多实例语义：已有实例运行时不再硬拦——
+                        // 打开配置弹窗，用户改个币种就能启动新实例
+                        setConfiguring(s);
+                        form.setFieldsValue(s.defaultParams);
                         return;
                       }
                       void doStart(s, s.defaultParams);
                     }}
                   >
                     <PlayCircleOutlined /> 启动
+                  </span>,
+                  <span key="detail" onClick={() => navigate(`/admin/strategy/${s.name}`)}>
+                    <FileTextOutlined /> 详情
                   </span>,
                 ]}
               >
@@ -484,10 +343,38 @@ export function AdminStrategy() {
         cancelText="取消"
         confirmLoading={start.isPending}
         onCancel={() => setConfiguring(null)}
-        onOk={() => void form.validateFields().then((v) => configuring && doStart(configuring, v))}
+        onOk={() =>
+          void form.validateFields().then((v) => {
+            if (!configuring) return;
+            // symbol 是运行实例的保留字段（不传给策略参数），其余交给策略参数
+            const { symbol, ...params } = v as Record<string, unknown>;
+            const sym = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+            doStart(configuring, params, undefined, sym || undefined);
+          })
+        }
         width={680}
       >
-        <Form form={form} layout="vertical" initialValues={configuring?.defaultParams}>
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={
+            configuring
+              ? { ...configuring.defaultParams, symbol: futuresCfg?.symbol ?? 'BTCUSDT' }
+              : undefined
+          }
+        >
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item
+                name="symbol"
+                label="运行币种"
+                tooltip="每个「策略 + 币种」是一个独立实例，各自管理各自的仓位；同策略可同时跑多个币种"
+                rules={[{ required: true, message: '请输入交易对，如 BTCUSDT' }]}
+              >
+                <Input placeholder="BTCUSDT" />
+              </Form.Item>
+            </Col>
+          </Row>
           <Row gutter={16}>
             {paramFields.map(({ key, type, title, tip }) => (
               <Col xs={24} md={12} key={key}>
@@ -515,6 +402,7 @@ export function AdminStrategy() {
           </Row>
         </Form>
       </Modal>
+
     </div>
   );
 }

@@ -1,11 +1,15 @@
 import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
-import { NewsItemDTO, PageResult } from '@ai-trader/shared';
+import { CalendarEventDTO, NewsItemDTO, PageResult } from '@ai-trader/shared';
 import { NewsService } from './news.service';
+import { CalendarService } from './calendar.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('news')
 export class NewsController {
-  constructor(private readonly news: NewsService) {}
+  constructor(
+    private readonly news: NewsService,
+    private readonly calendar: CalendarService,
+  ) {}
 
   @Get()
   async list(
@@ -36,10 +40,20 @@ export class NewsController {
   /** 手动触发一次抓取 */
   @UseGuards(JwtAuthGuard)
   @Post('refresh')
-  async refresh(@Body() body: { simulatedOnly?: boolean }) {
-    if (body?.simulatedOnly) {
-      return { added: await this.news.seedSimulated(), simulated: true };
-    }
+  async refresh() {
     return this.news.fetchAll();
+  }
+
+  /** 财经日历：美联储议息 / 非农 / CPI 等宏观事件（ForexFactory 数据源） */
+  @Get('calendar')
+  async calendarList(@Query('impact') impact?: string) {
+    return this.calendar.list(impact);
+  }
+
+  /** 手动触发日历刷新 */
+  @UseGuards(JwtAuthGuard)
+  @Post('calendar/refresh')
+  async refreshCalendar() {
+    return this.calendar.refresh();
   }
 }

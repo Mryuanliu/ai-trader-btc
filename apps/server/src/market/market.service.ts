@@ -317,6 +317,33 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
   // ------------------------------------------------------------------
   // 读取接口
   // ------------------------------------------------------------------
+
+  /** 当前环境参考价缓存（30s TTL）；0 表示暂不可达。
+   *  通过已配置环境的适配器拉取，故 demo 下取 demo-fapi、实盘下取 fapi.binance.com，
+   *  始终与平台实际交易/行情同源——展示价与交易价天然一致。 */
+  private refPrice = 0;
+  private refPriceAt = 0;
+
+  /**
+   * 当前交易环境的参考价（REST 校验值，非 WS 行情）。
+   *
+   * 用途：与 WS 推送的实时价做同源交叉校验，检测行情流是否断线/滞后
+   * （偏差异常大即说明 WS 价已过期）。价格跟随实际环境切换，
+   * 不做任何跨环境（主网/测试网）对照——那样只会制造虚假偏差。
+   */
+  async getReferencePrice(symbol: string): Promise<number> {
+    if (Date.now() - this.refPriceAt < 30_000) return this.refPrice;
+    try {
+      const adapter = await this.registry.getPublic();
+      const ticker = await adapter.getTicker(symbol);
+      this.refPrice = ticker.price || 0;
+      this.refPriceAt = Date.now();
+    } catch (err) {
+      this.logger.warn(`环境参考价获取失败: ${(err as Error).message}`);
+    }
+    return this.refPrice;
+  }
+
   ensureSymbol(symbol: string) {
     if (this.symbols.has(symbol)) return;
     this.symbols.add(symbol);

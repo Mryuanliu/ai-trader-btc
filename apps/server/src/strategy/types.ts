@@ -1,4 +1,9 @@
-import type { Candle, LotDirection, LotExitReason } from '@ai-trader/shared';
+import type {
+  Candle,
+  LotDirection,
+  LotExitReason,
+  StrategyManifest,
+} from '@ai-trader/shared';
 
 /**
  * 策略运行时看到的仓位单（Lot）。
@@ -45,8 +50,26 @@ export interface StrategyOrderView {
  */
 export interface StrategyContext {
   symbol: string;
-  /** 当前标记价 */
+  /**
+   * 本次运行的**实例标识**（P2 多实例），`策略名:交易对`。
+   *
+   * 多实例下每个实例只看到自己的 Lot/挂单/篮子（buildContext 已过滤）；
+   * 策略可用它做日志归因或实例级状态展示。
+   */
+  instanceId: string;
+  /** 最新成交价（last price）：挂单触发、行情展示用这个 */
   price: number;
+  /**
+   * 交易所**标记价**（mark price）。
+   *
+   * 与 last price 的区别至关重要：标记价由现货指数 + 资金费基差平滑而来，
+   * 不会被单笔大额成交「插针」扭曲。
+   * - **强平/风控**口径一律用标记价（币安强平就是按标记价算）
+   * - **止盈/止损判定也该用它**——用 last price 可能被一根插针误触发，
+   *   导致刚赚到价就平、或刚亏损就止损
+   * 标记价取不到时退化为 0，策略应回退用 price。
+   */
+  markPrice: number;
   /** ATR14：网格间距/手数缩放的通用波动率基准 */
   atr: number;
   /**
@@ -125,6 +148,14 @@ export interface StrategyExecutor {
  * 生命周期：`start` → 周期性 `onTick` → `stop`。
  * 策略是有状态对象，运行期间可持有自己的网格状态（层数、基准价等）。
  */
+/**
+ * 清单与能力声明的**正式定义放在 shared**（`@ai-trader/shared` 的 strategy-sdk），
+ * 因为它们是**对外 SDK 契约**——第三方策略作者只依赖 shared 就要能写完策略。
+ *
+ * 这里转出一份，避免各处 import 路径不一致。
+ */
+export type { StrategyCapabilities, StrategyManifest } from '@ai-trader/shared';
+
 export interface TradingStrategy {
   /** 唯一标识 */
   readonly name: string;
@@ -135,6 +166,13 @@ export interface TradingStrategy {
   readonly defaultParams: Record<string, unknown>;
   /** 参数 JSON Schema，供前端动态渲染表单 */
   readonly paramSchema: Record<string, unknown>;
+  /**
+   * 上架元信息（能力声明 / 版本 / 风险提示）。
+   *
+   * 可选是为了兼容早期内部策略；P1 起新策略必须提供，
+   * 否则 Hub 会拒绝加载（没有风险提示的策略不能上架）。
+   */
+  readonly manifest?: StrategyManifest;
 
   /** 校验并合并外部参数；非法值回落默认，策略永不因参数崩溃 */
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown>;

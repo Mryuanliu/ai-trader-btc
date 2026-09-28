@@ -73,6 +73,39 @@ export class FuturesConfigService {
     return this.toShape(await this.getOrCreate());
   }
 
+  /**
+   * 读写「策略运行意图」（自动恢复用）。
+   *
+   * 只由 StrategyRunner 在 start/stop 时调用：
+   * 启动成功写入意图，停止/失败清除——保证重启后恢复的是
+   * 「用户真正想要的运行状态」而不是某个中间态。
+   */
+  async patchRunningIntent(input: {
+    shouldRun: boolean;
+    name: string | null;
+    params: Record<string, unknown> | null;
+  }): Promise<void> {
+    const row = await this.getOrCreate();
+    row.strategyShouldRun = input.shouldRun;
+    row.strategyRunName = input.name;
+    row.strategyRunParams = input.params;
+    await this.repo.save(row);
+  }
+
+  /** 读运行意图（服务启动时用） */
+  async getRunningIntent(): Promise<{
+    shouldRun: boolean;
+    name: string | null;
+    params: Record<string, unknown> | null;
+  }> {
+    const row = await this.getOrCreate();
+    return {
+      shouldRun: row.strategyShouldRun,
+      name: row.strategyRunName,
+      params: row.strategyRunParams,
+    };
+  }
+
   async update(patch: Partial<FuturesAgentConfigShape>): Promise<FuturesAgentConfigShape> {
     const row = await this.getOrCreate();
     const allowed: (keyof FuturesAgentConfigShape)[] = [

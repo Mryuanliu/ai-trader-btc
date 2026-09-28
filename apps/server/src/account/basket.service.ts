@@ -12,6 +12,7 @@ import type {
 import { BasketEntity } from '../database/entities/basket.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 import { IncomeService } from './income.service';
+import { FuturesAgentConfigEntity } from '../database/entities/futures-agent-config.entity';
 
 /**
  * 篮子服务：维护「一次建仓 → 全部了结」周期的统计。
@@ -34,6 +35,11 @@ export class BasketService {
     @InjectRepository(PositionLotEntity)
     private readonly lotRepo: Repository<PositionLotEntity>,
     private readonly income: IncomeService,
+    // 直读配置行而不是注入 FuturesConfigService：
+    // FuturesModule 依赖 AccountModule（用 LotService），
+    // 若 AccountModule 反向导入 FuturesModule 就成循环依赖，Nest 会启动失败。
+    @InjectRepository(FuturesAgentConfigEntity)
+    private readonly configRepo: Repository<FuturesAgentConfigEntity>,
   ) {}
 
   /** 取该交易对当前的 OPEN 篮子；没有则新建（并分配编号） */
@@ -41,9 +47,16 @@ export class BasketService {
     market: MarketType;
     symbol: string;
     direction: LotDirection;
+    /** 策略运行实例（P2 多实例）：篮子按实例隔离，不同实例各开各的篮子 */
+    strategyInstanceId?: string | null;
   }): Promise<BasketEntity> {
     const existing = await this.basketRepo.findOne({
-      where: { market: params.market, symbol: params.symbol, status: 'OPEN' },
+      where: {
+        market: params.market,
+        symbol: params.symbol,
+        status: 'OPEN',
+        strategyInstanceId: params.strategyInstanceId ?? null,
+      },
       order: { openedAt: 'DESC' },
     });
     if (existing) return existing;
@@ -55,6 +68,13 @@ export class BasketService {
         symbol: params.symbol,
         direction: params.direction,
         origin: 'manual',
+        // 归因：优先用实例反查策略名（多实例下比全局配置更精确），
+        // 没有实例则回落到当前运行的策略名，再没有就是手动
+        strategyName:
+          (params.strategyInstanceId ? params.strategyInstanceId.split(':')[0] : null) ??
+          (await this.currentStrategyName()) ??
+          'manual',
+        strategyInstanceId: params.strategyInstanceId ?? null,
         status: 'OPEN',
         layerCount: 0,
         totalQuantity: 0,
@@ -80,11 +100,16 @@ export class BasketService {
    * `source` 用于推断篮子来源（策略 / 手动 / 混合），因为在篮子内混入手动仓时，
    * 「这一轮是谁在操作」是需要如实呈现的信息。
    */
-  async attachLot(lot: PositionLotEntity, source: OrderSource): Promise<void> {
+  async attachLot(
+    lot: PositionLotEntity,
+    source: OrderSource,
+    strategyInstanceId?: string | null,
+  ): Promise<void> {
     const basket = await this.resolveOpenBasket({
       market: lot.market,
       symbol: lot.symbol,
       direction: lot.direction,
+      strategyInstanceId: strategyInstanceId ?? lot.strategyInstanceId ?? null,
     });
 
     lot.basketId = basket.id;
@@ -214,6 +239,40 @@ export class BasketService {
     return this.toSummary(basket, lots, priceOf?.(basket.symbol) ?? 0);
   }
 
+  /**
+   * 某运行实例的 OPEN 篮子（策略详情页用）。
+   *
+   * 不变量：一个实例同一交易对**同时最多一个 OPEN 篮子**（resolveOpenBasket 复用），
+   * 所以返回数组正常情况只有 0 或 1 个元素；出现多个说明历史数据被外部改动过，
+   * 如实展示，不擅自合并。
+   */
+  async listOpenByInstance(
+    strategyInstanceId: string,
+    priceOf?: (symbol: string) => number,
+  ): Promise<BasketSummary[]> {
+    const baskets = await this.basketRepo.find({
+      where: { strategyInstanceId, status: 'OPEN' },
+      order: { openedAt: 'ASC' },
+    });
+    if (baskets.length === 0) return [];
+
+    const lots = await this.lotRepo.find({
+      where: baskets.map((b) => ({ basketId: b.id })),
+      order: { openedAt: 'ASC' },
+    });
+    const byBasket = new Map<string, PositionLotEntity[]>();
+    for (const lot of lots) {
+      if (!lot.basketId) continue;
+      const arr = byBasket.get(lot.basketId) ?? [];
+      arr.push(lot);
+      byBasket.set(lot.basketId, arr);
+    }
+
+    return baskets.map((b) =>
+      this.toSummary(b, byBasket.get(b.id) ?? [], priceOf?.(b.symbol) ?? 0),
+    );
+  }
+
   /** 篮子实体 + 层列表 → 对外 DTO（含未平浮盈估算） */
   private toSummary(
     basket: BasketEntity,
@@ -297,5 +356,19 @@ export class BasketService {
     }
     // 极端情况兜底：加时间戳后缀，保证唯一
     return `${prefix}${Date.now().toString().slice(-6)}`;
+  }
+
+  /**
+   * 当前正在运行的策略名（用于篮子归因）。
+   *
+   * 从配置表的运行意图读，避免 BasketService 反向依赖 StrategyRunner 造成循环依赖。
+   */
+  private async currentStrategyName(): Promise<string | null> {
+    try {
+      const row = await this.configRepo.findOne({ where: { key: 'default' } });
+      return row?.strategyShouldRun ? row.strategyRunName : null;
+    } catch {
+      return null;
+    }
   }
 }

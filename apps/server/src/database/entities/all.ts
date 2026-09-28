@@ -7,6 +7,7 @@ import {
   NewsItemEntity,
   OrderEntity,
   PositionLotEntity,
+  StrategyInstanceEntity,
   TradeFillEntity,
   UserEntity,
 } from './index';
@@ -22,6 +23,7 @@ export const ALL_ENTITIES = [
   OrderEntity,
   TradeFillEntity,
   PositionLotEntity,
+  StrategyInstanceEntity,
   MarketCandleEntity,
   NewsItemEntity,
 ];

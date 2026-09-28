@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { MartingaleGridStrategy } from './martingale-grid.strategy';
+import { TrendFollowingStrategy } from './trend-following.strategy';
 import type { StrategyDescriptor, TradingStrategy } from './types';
 
 /**
@@ -12,8 +13,12 @@ import type { StrategyDescriptor, TradingStrategy } from './types';
 export class StrategyRegistry {
   private readonly strategies = new Map<string, TradingStrategy>();
 
-  constructor(martingaleGrid: MartingaleGridStrategy) {
+  constructor(
+    martingaleGrid: MartingaleGridStrategy,
+    trendFollowing: TrendFollowingStrategy,
+  ) {
     this.register(martingaleGrid);
+    this.register(trendFollowing);
   }
 
   register(strategy: TradingStrategy): void {
@@ -38,6 +43,7 @@ export class StrategyRegistry {
       description: s.description,
       defaultParams: s.defaultParams,
       paramSchema: s.paramSchema,
+      manifest: s.manifest,
     }));
   }
 }

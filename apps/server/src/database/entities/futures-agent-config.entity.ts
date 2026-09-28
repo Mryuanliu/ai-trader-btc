@@ -53,6 +53,25 @@ export class FuturesAgentConfigEntity {
   @Column({ type: 'timestamptz', nullable: true })
   lastRunAt: Date | null;
 
+  // ---------------- 策略运行意图（自动恢复） ----------------
+  /**
+   * 服务重启前策略是否在跑。
+   *
+   * 策略运行状态本身在内存里，重启即丢——但持仓单在数据库/交易所里还在，
+   * 不恢复的话会出现「界面显示未运行、账户却挂着仓位」的错觉。
+   * 服务启动时读到 `true` 就自动重新挂载并接管未平仓。
+   */
+  @Column({ type: 'boolean', default: false })
+  strategyShouldRun: boolean;
+
+  /** 自动恢复时挂载的策略名 */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  strategyRunName: string | null;
+
+  /** 自动恢复时使用的策略参数（normalizeParams 前的原始值） */
+  @Column({ type: 'jsonb', nullable: true })
+  strategyRunParams: Record<string, unknown> | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

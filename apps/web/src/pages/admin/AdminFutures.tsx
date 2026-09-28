@@ -6,7 +6,6 @@ import {
   useFuturesMargin,
   useFuturesPlaceOrder,
   useFuturesPositions,
-  useOpenLots,
   useUpdateFuturesConfig,
 } from '@/api/hooks';
 import { useRequireAuth } from '@/components/AuthGate';
@@ -26,51 +25,11 @@ export function AdminFutures() {
   const update = useUpdateFuturesConfig();
   const place = useFuturesPlaceOrder();
   // 本地合约仓位单（Lot）：订单级独立止盈止损，与交易所净持仓对照
-  const { data: futuresLots = [] } = useOpenLots({ market: 'futures' });
   const { message, modal } = AntApp.useApp();
   const { run: requireAuth } = useRequireAuth();
   /** 正在平仓的 Lot（用于按钮 loading 态） */
-  const [closingLotId, setClosingLotId] = useState<string | null>(null);
 
   const cfg = config.data;
-
-  /** 手动平掉指定 Lot：全量 reduceOnly，带精确 lotId */
-  const closeLot = (lot: (typeof futuresLots)[number]) => {
-    const entry = Number(lot.entryPrice);
-    const qty = Number(lot.quantity);
-    modal.confirm({
-      title: `平掉 ${lot.direction === 'LONG' ? '多' : '空'}仓`,
-      content: (
-        <div className="text-[12px] leading-relaxed">
-          <div>交易对：{lot.symbol}　方向：{lot.direction === 'LONG' ? '做多' : '做空'}</div>
-          <div>
-            数量：<span className="num">{qty.toFixed(6)}</span>　开仓价：
-            <span className="num">{formatPrice(entry)}</span>
-          </div>
-          <div className="mt-1 text-muted">市价单，成交后该 Lot 全量了结并结算盈亏。</div>
-        </div>
-      ),
-      okText: '确认平仓',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: () =>
-        requireAuth(async () => {
-          setClosingLotId(lot.id);
-          try {
-            await place.mutateAsync({
-              action: lot.direction === 'LONG' ? 'SELL' : 'BUY',
-              symbol: lot.symbol,
-              lotId: lot.id,
-            });
-            message.success(`已提交平仓：${lot.symbol} ${qty.toFixed(4)} ${lot.direction}`);
-          } catch (err) {
-            message.error((err as Error).message);
-          } finally {
-            setClosingLotId(null);
-          }
-        }),
-    });
-  };
 
   const saveEnabled = (checked: boolean) => {
     update.mutate({ enabled: checked }, { onError: (e) => message.error(e.message) });
@@ -192,11 +151,6 @@ export function AdminFutures() {
           </div>
           <div className="text-[11px] text-muted">逐仓单仓风险隔离</div>
         </Card>
-        <Card size="small" className="glass-card">
-          <div className="text-[12px] text-muted">未完结仓位单</div>
-          <div className="num text-[20px] font-semibold text-white">{futuresLots.length}</div>
-          <div className="text-[11px] text-muted">每单独立了结</div>
-        </Card>
       </div>
 
       <Card title="合约持仓（以交易所 positionRisk 为权威）" className="glass-card" size="small">
@@ -253,71 +207,6 @@ export function AdminFutures() {
                   <Tooltip title="多头看下跌空间，空头看上涨空间">
                     <span className={`num ${v < 0.15 ? 'text-down' : 'text-subtle'}`}>{(v * 100).toFixed(1)}%</span>
                   </Tooltip>
-                ),
-            },
-          ]}
-        />
-      </Card>
-
-      <Card
-        title="合约仓位单（Lot，本地订单级）"
-        className="glass-card"
-        size="small"
-        extra={
-          <span className="text-[11px] text-muted">
-            与上方交易所净持仓对照 · 出场由策略负责（平台不设逐层止盈止损）
-          </span>
-        }
-      >
-        <FuturesLotTotals lots={futuresLots} positions={positions.data ?? []} />
-        <Table
-          size="small"
-          rowKey="id"
-          dataSource={futuresLots}
-          locale={{ emptyText: '当前没有持仓中的合约仓位单' }}
-          pagination={false}
-          columns={[
-            {
-              title: '方向', dataIndex: 'direction', width: 80,
-              render: (v: 'LONG' | 'SHORT') =>
-                v === 'LONG' ? <Tag color="green">做多</Tag> : <Tag color="red">做空</Tag>,
-            },
-            {
-              title: '数量', dataIndex: 'quantity', width: 110,
-              render: (v: number) => <span className="num">{v.toFixed(6)}</span>,
-            },
-            {
-              title: '开仓价', dataIndex: 'entryPrice', width: 120,
-              render: (v: number) => <span className="num">{formatPrice(v)}</span>,
-            },
-            {
-              title: '浮动盈亏', key: 'pnl', width: 130,
-              render: (_, row) =>
-                row.unrealizedPnl === null ? (
-                  <span className="text-muted">--</span>
-                ) : (
-                  <span className={`num ${row.unrealizedPnl >= 0 ? 'text-up' : 'text-down'}`}>
-                    {row.unrealizedPnl.toFixed(4)}
-                  </span>
-                ),
-            },
-            {
-              title: '开仓时间', dataIndex: 'openedAt', width: 140,
-              render: (v: string) => <span className="num text-[11px] text-muted">{formatTime(v)}</span>,
-            },
-            {
-              title: '操作', key: 'action', width: 90,
-              render: (_, row) =>
-                row.status !== 'OPEN' ? null : (
-                  <Button
-                    size="small"
-                    danger
-                    loading={closingLotId === row.id || place.isPending}
-                    disabled={closingLotId !== null}
-                    onClick={() => closeLot(row)}
-                  >
-                    平仓
-                  </Button>
                 ),
             },
           ]}
@@ -402,47 +291,3 @@ export function AdminFutures() {
   );
 }
 
-/**
- * 合约仓位单净额对账：Σ多头量 − Σ空头量 = 本地净持仓，与交易所 positionRisk 对照。
- * 差异提示：用户手动在交易所开仓/平仓而本地无记录时，Lot 汇总会偏离交易所。
- */
-function FuturesLotTotals({
-  lots,
-  positions,
-}: {
-  lots: { direction: string; quantity: number }[];
-  positions: { positionSide: string | null; quantity: number }[];
-}) {
-  const longQty = lots.filter((l) => l.direction === 'LONG').reduce((a, l) => a + l.quantity, 0);
-  const shortQty = lots.filter((l) => l.direction === 'SHORT').reduce((a, l) => a + l.quantity, 0);
-  const lotNet = longQty - shortQty;
-
-  const exLong = positions
-    .filter((p) => p.positionSide === 'LONG')
-    .reduce((a, p) => a + p.quantity, 0);
-  const exShort = positions
-    .filter((p) => p.positionSide === 'SHORT')
-    .reduce((a, p) => a + p.quantity, 0);
-  const exNet = exLong - exShort;
-
-  const diff = Math.abs(lotNet - exNet);
-  const mismatch = diff > 1e-6;
-
-  return (
-    <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-[12px]">
-      <span className="muted-text">本地 Lot 净额</span>
-      <span className="num text-up">多 {longQty.toFixed(6)}</span>
-      <span className="num text-down">空 {shortQty.toFixed(6)}</span>
-      <span className="num text-white">净 {lotNet.toFixed(6)}</span>
-      <span className="muted-text ml-2">交易所净持仓</span>
-      <span className="num text-white">{exNet.toFixed(6)}</span>
-      {mismatch ? (
-        <Tag color="orange">
-          对账差异 {diff.toFixed(6)}（本地与交易所不一致，多为手动单未入本地 Lot）
-        </Tag>
-      ) : (
-        <Tag color="green">对账一致</Tag>
-      )}
-    </div>
-  );
-}

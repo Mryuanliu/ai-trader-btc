@@ -44,98 +44,6 @@ const KEYWORDS = [
   '灰度',
 ];
 
-const SIMULATED_TITLES: { title: string; source: string; tags: string[] }[] = [
-  {
-    title: '比特币现货 ETF 单周净流入 12.4 亿美元，机构配置需求延续',
-    source: 'CoinDesk',
-    tags: ['比特币', 'ETF', '机构'],
-  },
-  {
-    title: '美联储会议纪要偏鹰，交易员下调年内降息预期至一次',
-    source: 'Cointelegraph',
-    tags: ['美联储', '降息'],
-  },
-  {
-    title: '链上数据：交易所 BTC 余额降至五年低位，筹码持续向冷钱包转移',
-    source: 'CryptoQuant',
-    tags: ['链上', 'BTC'],
-  },
-  {
-    title: '美国 10 月 CPI 同比 2.6%，核心通胀粘性仍高于目标',
-    source: 'Bloomberg Crypto',
-    tags: ['CPI', '通胀'],
-  },
-  {
-    title: 'BTC 永续合约资金费率转正，多头杠杆需求回暖',
-    source: 'The Block',
-    tags: ['期货', 'BTC'],
-  },
-  {
-    title: 'MicroStrategy 再度增持 5,500 枚 BTC，总持仓突破 25 万枚',
-    source: 'CoinDesk',
-    tags: ['MicroStrategy', 'BTC'],
-  },
-  {
-    title: '全网 24 小时合约爆仓 3.2 亿美元，其中多单占比 68%',
-    source: 'Cointelegraph',
-    tags: ['清算', '爆仓'],
-  },
-  {
-    title: 'Bitcoin 全网算力突破 780 EH/s，挖矿难度创历史新高',
-    source: 'Bitcoin Magazine',
-    tags: ['算力', '矿工'],
-  },
-  {
-    title: 'SEC 主席重申数字资产监管框架需立法明确，短期难有定论',
-    source: 'Reuters Crypto',
-    tags: ['SEC', '监管'],
-  },
-  {
-    title: '稳定币总市值单月增加 42 亿美元，USDT 市占率回升至 71%',
-    source: 'The Block',
-    tags: ['稳定币', 'USDT'],
-  },
-  {
-    title: '巨鲸地址买入 3,200 枚 BTC，为近三周最大单笔链上买入',
-    source: 'Whale Alert',
-    tags: ['巨鲸', 'BTC'],
-  },
-  {
-    title: '欧洲央行下调基准利率 25 基点，欧元区流动性环境边际改善',
-    source: 'Bloomberg Crypto',
-    tags: ['降息'],
-  },
-  {
-    title: '灰度 GBTC 单日流出收窄至 1,800 万美元，抛压明显减弱',
-    source: 'CoinDesk',
-    tags: ['灰度', 'ETF'],
-  },
-  {
-    title: '比特币第三次减半后矿工收入结构变化：手续费占比升至 12%',
-    source: 'Bitcoin Magazine',
-    tags: ['减半', '矿工'],
-  },
-  {
-    title: '贝莱德 IBIT 期权持仓量创新高，隐含波动率维持高位',
-    source: 'The Block',
-    tags: ['BlackRock', 'ETF'],
-  },
-  {
-    title: '美元指数回落至 103 下方，风险资产整体受益',
-    source: 'Reuters Crypto',
-    tags: ['美联储'],
-  },
-  {
-    title: '链上活跃地址数环比增长 8.4%，网络使用度稳步抬升',
-    source: 'CryptoQuant',
-    tags: ['链上', 'BTC'],
-  },
-  {
-    title: '亚洲时段 BTC 现货买盘增强，韩元溢价重新转正',
-    source: 'Cointelegraph',
-    tags: ['现货', 'BTC'],
-  },
-];
 
 @Injectable()
 export class NewsService implements OnModuleInit {
@@ -168,9 +76,9 @@ export class NewsService implements OnModuleInit {
   // ------------------------------------------------------------------
   // 抓取与降级
   // ------------------------------------------------------------------
-  async fetchAll(): Promise<{ added: number; simulated: boolean }> {
+  async fetchAll(): Promise<{ added: number; failed: number }> {
     if (!isTruthy(this.config.get('NEWS_ENABLED'), true)) {
-      return { added: 0, simulated: false };
+      return { added: 0, failed: this.sources.length };
     }
 
     const sources = this.sources;
@@ -202,18 +110,22 @@ export class NewsService implements OnModuleInit {
     );
 
     let added = 0;
+    let failed = 0;
     for (const result of results) {
       if (result.ok) {
         anySuccess = true;
         added += result.added;
+      } else {
+        failed += 1;
       }
     }
 
+    // 不再注入模拟新闻：外部源全部不可达时宁可留空，
+    // 也不能让「编造的新闻」进入决策链路（AI 行情分析会把它当真）
     if (!anySuccess) {
-      added += await this.seedSimulated();
-      return { added, simulated: true };
+      this.logger.warn(`全部新闻源抓取失败（${failed} 个），本轮无新增`);
     }
-    return { added, simulated: false };
+    return { added, failed };
   }
 
   /**
@@ -256,37 +168,6 @@ export class NewsService implements OnModuleInit {
     const saved = await this.repo.save(entity);
     this.events.emit('news', this.toDTO(saved));
     return true;
-  }
-
-  /** 外部 RSS 不可达时的拟真新闻源，保证决策链路有新闻输入 */
-  async seedSimulated(): Promise<number> {
-    const count = await this.repo.count({ where: { source: '模拟源' } });
-    if (count >= SIMULATED_TITLES.length) return 0;
-
-    let added = 0;
-    const now = Date.now();
-    for (let i = 0; i < SIMULATED_TITLES.length; i += 1) {
-      const item = SIMULATED_TITLES[i];
-      const url = `simulated://news/${i}`;
-      const exists = await this.repo.findOne({ where: { url } });
-      if (exists) continue;
-      const saved = await this.repo.save(
-        this.repo.create({
-          title: item.title,
-          summary: `${item.title}。本文为本地模拟新闻，用于在没有外网时的决策链路演示。`,
-          url,
-          source: '模拟源',
-          publishedAt: new Date(now - (i + 1) * 37 * 60_000),
-          tags: item.tags,
-        }),
-      );
-      this.events.emit('news', this.toDTO(saved));
-      added += 1;
-    }
-    if (added > 0) {
-      this.logger.warn(`外部新闻源不可达，已注入 ${added} 条模拟新闻`);
-    }
-    return added;
   }
 
   // ------------------------------------------------------------------

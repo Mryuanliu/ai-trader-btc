@@ -24,7 +24,10 @@ export class StrategyExecutorService implements StrategyExecutor {
   ) {}
 
   /** 市价开仓（带 TP/SL 快照；篮子出场模式下通常传 0 表示不设逐层止盈） */
-  async openLot(input: OpenLotRequest): Promise<{ lotId: string | null; error?: string }> {
+  async openLot(
+    input: OpenLotRequest,
+    instanceId?: string,
+  ): Promise<{ lotId: string | null; error?: string }> {
     try {
       const result = await this.trading.placeOrder({
         // 合约语义：BUY 恒开多 / SELL 恒开空（hedge mode 下多空可共存）
@@ -32,6 +35,8 @@ export class StrategyExecutorService implements StrategyExecutor {
         quantity: input.quantity,
         // 策略声明的杠杆优先于平台配置
         leverage: input.leverage,
+        // 实例归属：多实例下 Lot 据此隔离（订单 → Lot 继承）
+        strategyInstanceId: instanceId,
         source: 'strategy',
       });
       if (!result.order) {
@@ -49,7 +54,11 @@ export class StrategyExecutorService implements StrategyExecutor {
   }
 
   /** 全量平掉指定仓位单（Lot 模型：一个 Lot 必须一次平完，不做部分平仓） */
-  async closeLot(lotId: string, reason: LotExitReason): Promise<{ ok: boolean; error?: string }> {
+  async closeLot(
+    lotId: string,
+    reason: LotExitReason,
+    instanceId?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
     try {
       const lot = await this.lots.getOpenLot(lotId);
       if (!lot) return { ok: false, error: `未找到未完结仓位单（${lotId}）` };
@@ -58,6 +67,7 @@ export class StrategyExecutorService implements StrategyExecutor {
         lotId,
         source: 'strategy',
         exitReason: reason,
+        strategyInstanceId: instanceId ?? lot.strategyInstanceId ?? undefined,
       });
       return { ok: true };
     } catch (err) {
@@ -70,6 +80,7 @@ export class StrategyExecutorService implements StrategyExecutor {
   /** 挂 STOP 触发单：网格的待成交层（交易所负责触发，我们不轮询） */
   async placeStopOrder(
     input: PlaceStopOrderRequest,
+    instanceId?: string,
   ): Promise<{ orderId: string | null; error?: string }> {
     try {
       const order = await this.trading.placeStopOrder({
@@ -78,6 +89,7 @@ export class StrategyExecutorService implements StrategyExecutor {
         stopPrice: input.stopPrice,
         quantity: input.quantity,
         leverage: input.leverage,
+        strategyInstanceId: instanceId,
         source: 'strategy',
         note: input.reason,
       });

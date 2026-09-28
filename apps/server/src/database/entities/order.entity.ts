@@ -123,6 +123,17 @@ export class OrderEntity {
   @Column({ type: 'uuid', nullable: true })
   lotId: string | null;
 
+  /**
+   * 下单的策略运行实例（P2 多实例），`策略名:交易对`。
+   *
+   * Lot 从订单继承这个字段，实现「每个实例只看到自己的仓位」——
+   * 不隔离的话，两个策略会互相把对方的仓算进篮子并互相平掉。
+   * 手动下单为 null。
+   */
+  @Index('IDX_orders_instance')
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  strategyInstanceId: string | null;
+
   @Column({ type: 'text', nullable: true })
   error: string | null;
 

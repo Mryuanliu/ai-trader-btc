@@ -64,7 +64,10 @@ function makeContext(
 ): StrategyContext {
   return {
     symbol: 'BTCUSDT',
+    instanceId: 'martingale_grid:BTCUSDT',
     price: 100_000,
+    // 测试里不区分标记价与最新价：浮盈口径一致即可验证止盈逻辑
+    markPrice: 100_000,
     atr: 100,
     candles: makeCandles(),
     openLots: [],
@@ -109,8 +112,13 @@ describe('MartingaleGridStrategy · 参数归一化', () => {
 describe('MartingaleGridStrategy · 首层挂单（EA 语义）', () => {
   it('无持仓时双向挂 STOP：多在上方、空在下方', async () => {
     const strategy = new MartingaleGridStrategy();
-    // 关闭单侧金字塔过滤，才能同时观察两侧行为
-    const params = strategy.normalizeParams({ useTrendFilter: false, firstStepAtrMult: 1 });
+    // 关闭单侧金字塔过滤，才能同时观察两侧行为；
+    // firstOrderMarket=false 走纯挂单路径（默认开启时会市价开首层）
+    const params = strategy.normalizeParams({
+      useTrendFilter: false,
+      firstStepAtrMult: 1,
+      firstOrderMarket: false,
+    });
     strategy.onStart?.(params);
     const { executor, stops } = makeExecutor();
 
@@ -128,7 +136,7 @@ describe('MartingaleGridStrategy · 首层挂单（EA 语义）', () => {
 
   it('已有挂单时不重复挂（每次只保留一层待成交）', async () => {
     const strategy = new MartingaleGridStrategy();
-    const params = strategy.normalizeParams({ useTrendFilter: false });
+    const params = strategy.normalizeParams({ useTrendFilter: false, firstOrderMarket: false });
     strategy.onStart?.(params);
     const { executor, stops } = makeExecutor();
 
