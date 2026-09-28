@@ -283,6 +283,8 @@ export interface FuturesPositionDTO {
   positionSide: 'LONG' | 'SHORT' | null;
   entryPrice: number;
   markPrice: number;
+  /** 最新成交价，与标记价并列展示便于对账 */
+  lastPrice: number;
   liquidationPrice: number;
   leverage: number;
   marginType: 'isolated' | 'cross';

@@ -236,6 +236,29 @@ export interface ExchangeAdapter {
  */
 export type PositionMode = 'one-way' | 'hedge';
 
+/**
+ * 逐笔成交（userTrades）。
+ *
+ * 合约的下单/查询响应**不含** commission（那是现货 fills[] 才有的字段），
+ * 真实手续费与逐笔已实现盈亏只能从 `/fapi/v1/userTrades` 取——这是盈亏对齐交易所的权威来源。
+ */
+export interface UserTrade {
+  id: number;
+  orderId: number;
+  price: number;
+  qty: number;
+  quoteQty: number;
+  /** 本笔真实手续费（以 commissionAsset 计价） */
+  commission: number;
+  commissionAsset: string;
+  /** 本笔实际费率（如 0.0004 = 0.04%）；用于平仓单无法回查时按同账户费率推导真实费 */
+  commissionRate: number;
+  /** 本笔已实现盈亏（平仓成交才有；不含手续费） */
+  realizedPnl: number;
+  side: OrderSide;
+  time: number;
+}
+
 export interface FuturesExchangeAdapter extends ExchangeAdapter {
   setLeverage(symbol: string, leverage: number): Promise<void>;
   setMarginType(symbol: string, marginType: MarginType): Promise<void>;
@@ -243,6 +266,8 @@ export interface FuturesExchangeAdapter extends ExchangeAdapter {
   getPositionMode?(): Promise<PositionMode>;
   /** 切换持仓模式；Lot 多空共存要求 hedge。可选：个别交易所不支持时由调用方降级 */
   setPositionMode?(dual: boolean): Promise<PositionMode>;
+  /** 查某订单的逐笔成交（含真实 commission / realizedPnl）；不支持则缺省 */
+  getUserTrades?(params: { symbol: string; orderId: string; limit?: number }): Promise<UserTrade[]>;
 }
 
 export function isFuturesAdapter(adapter: ExchangeAdapter): adapter is FuturesExchangeAdapter {

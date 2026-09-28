@@ -26,6 +26,7 @@ import {
   PlaceOrderInput,
   PriceQuote,
   sumCommissionUsdt,
+  UserTrade,
 } from './adapter.interface';
 import { buildQuery, hmacSha256Hex } from './signature';
 import { axiosTransport, wsAgent } from '../common/proxy';
@@ -727,6 +728,33 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
       type: data.type ?? 'LIMIT',
       quantity: Number(data.origQty ?? 0),
     });
+  }
+
+  /**
+   * 逐笔成交（/fapi/v1/userTrades）：合约真实手续费与逐笔已实现盈亏的权威来源。
+   *
+   * 合约下单/查询响应不带 commission，只有这里能拿到真实 commission/commissionRate/realizedPnl，
+   * 用于把本地记账对齐交易所（避免按固定费率估算把盈亏算错）。
+   */
+  async getUserTrades(params: { symbol: string; orderId: string; limit?: number }): Promise<UserTrade[]> {
+    const rows = await this.signed<Record<string, any>[]>('GET', '/fapi/v1/userTrades', {
+      symbol: params.symbol,
+      orderId: params.orderId,
+      limit: Math.min(1000, Math.max(1, params.limit ?? 100)),
+    });
+    return rows.map((r) => ({
+      id: Number(r.id ?? 0),
+      orderId: Number(r.orderId ?? 0),
+      price: Number(r.price ?? 0),
+      qty: Number(r.qty ?? 0),
+      quoteQty: Number(r.quoteQty ?? 0),
+      commission: Number(r.commission ?? 0),
+      commissionAsset: String(r.commissionAsset ?? 'USDT').toUpperCase(),
+      commissionRate: Number(r.commissionRate ?? 0),
+      realizedPnl: Number(r.realizedPnl ?? 0),
+      side: (r.side ?? 'BUY') as UserTrade['side'],
+      time: Number(r.time ?? 0),
+    }));
   }
 
   /** 当前挂单：普通挂单 + 条件挂单合并（两者在不同端点） */

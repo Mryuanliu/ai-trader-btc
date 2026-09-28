@@ -16,6 +16,7 @@
     "backtest": "ts-node -r tsconfig-paths/register src/backtest/cli.ts",
     "import-klines": "ts-node -r tsconfig-paths/register src/backtest/import-official.ts",
     "test": "vitest run",
+    "backfill:fees": "ts-node -r tsconfig-paths/register src/database/backfill-real-fees.ts",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts"
   },
   "dependencies": {

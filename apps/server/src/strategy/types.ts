@@ -19,6 +19,12 @@ export interface StrategyLotView {
   entryPrice: number;
   /** 按当前价计的浮动盈亏（已扣开仓手续费） */
   unrealizedPnl: number;
+  /**
+   * 已付开仓手续费（折 USDT）。
+   * 供可观测层反推「币安口径毛浮盈」= unrealizedPnl + entryFeeUsdt（不含任何费的纯价差浮盈），
+   * 让用户能把面板数字与币安持仓页直接对上。
+   */
+  entryFeeUsdt?: number;
   openedAt: string;
   /**
    * 该仓位单是否已有**在途平仓委托**（已下单、尚未成交回调）。

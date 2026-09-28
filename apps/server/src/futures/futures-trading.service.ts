@@ -5,6 +5,7 @@ import {
   computeFuturesOrderQty,
   DecisionAction,
   floorToStep,
+  FUTURES_TAKER_FEE_RATE,
   FuturesOrderIntent,
   LotExitReason,
   normalizeOrder,
@@ -86,6 +87,9 @@ export interface PlaceFuturesOrderResult {
 
 const FUTURES_EXCHANGE = 'binance-futures' as const;
 
+/** 手续费以这些资产计价时可直接当 USDT 用（无需折算）；非稳定币（如 BNB 抵扣）不猜、回落估算 */
+const STABLE_FEE_ASSETS = new Set(['USDT', 'BUSD', 'USDC', 'FDUSD', 'TUSD', 'DAI']);
+
 /**
  * 是否为条件单（Algo Order）。
  *
@@ -103,11 +107,12 @@ const DRY_RUN_SLIPPAGE_BPS = 5;
 /**
  * 估算手续费费率（bps，单边 taker）。
  *
- * 仅在两种场景使用：dry-run 模拟撮合、真实成交但交易所响应未带 fills。
- * 现货链路取 agent_configs.feeRateBps；合约配置没有该参数，固定 taker 基准值。
+ * 仅作**兜底**：合约下单/查询响应不含 commission，真实费以 /fapi/v1/userTrades 为准
+ * （见 fetchRealCommission）。只有拿不到真实成交明细时（dry-run、回查失败）才用它估算。
+ * 与策略/展示共用 FUTURES_TAKER_FEE_RATE 单一真值，避免三套费率对不上（2026-09-28）。
  * 记 0 会让毛盈亏伪装成净盈亏——本项目 C2 实证费率是净收益的生死线。
  */
-const FUTURES_FEE_BPS = 10;
+const FUTURES_FEE_BPS = FUTURES_TAKER_FEE_RATE * 10_000;
 
 /**
  * 市价单成交确认轮询节奏（毫秒）。
@@ -202,6 +207,38 @@ export class FuturesTradingService {
   }
 
   /**
+   * 查交易所真实手续费（USDT）。
+   *
+   * 合约下单/查询响应不含 commission（那是现货 fills[] 才有的字段），真实费只在
+   * /fapi/v1/userTrades 里。取到就用它覆盖固定费率估算，让本地盈亏对齐交易所。
+   * 返回 null 表示拿不到（端点不支持/无成交/非稳定币计价/网络异常），调用方回落估算。
+   */
+  private async fetchRealCommission(
+    adapter: FuturesExchangeAdapter,
+    symbol: string,
+    exchangeOrderId: string | null | undefined,
+  ): Promise<number | null> {
+    if (!exchangeOrderId || typeof adapter.getUserTrades !== 'function') return null;
+    try {
+      const trades = await adapter.getUserTrades({ symbol, orderId: exchangeOrderId });
+      if (trades.length === 0) return null;
+      let usdt = 0;
+      for (const t of trades) {
+        if (!(t.commission > 0)) continue;
+        // 合约手续费以保证金资产（USDT-M 即 USDT）计价；非稳定币不猜，回落估算
+        if (!STABLE_FEE_ASSETS.has(t.commissionAsset)) return null;
+        usdt += t.commission;
+      }
+      return usdt > 0 ? Number(usdt.toFixed(8)) : null;
+    } catch (err) {
+      this.logger.debug(
+        `查真实手续费失败（orderId=${exchangeOrderId}），回落估算：${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * 成交对账：补记「已成交但没写 trade_fills / 没建 Lot」的合约订单。
    *
    * **为什么必须有**：demo 环境的 `POST /fapi/v1/order` 响应 `executedQty` 可能为 0
@@ -277,8 +314,14 @@ export class FuturesTradingService {
           );
           continue;
         }
+        const realFee = await this.fetchRealCommission(
+          adapter as FuturesExchangeAdapter,
+          order.symbol,
+          order.exchangeOrderId,
+        );
         const fee =
           detail.fee ??
+          realFee ??
           detail.filledQuantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
 
         await this.fillRepo.save(
@@ -632,8 +675,10 @@ export class FuturesTradingService {
               `${result.filledQuantity} ${symbol} @ ${result.filledPrice || price} ` +
               `fee=${(result.fee ?? '估算').toString()} fills=${result.fee != null ? '交易所回传' : '无→按费率估算'}`,
           );
+          const realFee = await this.fetchRealCommission(adapter, symbol, result.exchangeOrderId);
           const filledFee =
             result.fee ??
+            realFee ??
             result.filledQuantity * (result.filledPrice || price) * (FUTURES_FEE_BPS / 10_000);
           await this.fillRepo.save(
             this.fillRepo.create({
@@ -662,8 +707,10 @@ export class FuturesTradingService {
           const confirmed = await this.confirmMarketFill(adapter, order);
           if (confirmed && confirmed.filledQuantity > 0) {
             const fillPrice = confirmed.filledPrice > 0 ? confirmed.filledPrice : price;
+            const realFee = await this.fetchRealCommission(adapter, symbol, order.exchangeOrderId);
             const filledFee =
               confirmed.fee ??
+              realFee ??
               confirmed.filledQuantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
             order.status =
               confirmed.status === 'PARTIALLY_FILLED' ||

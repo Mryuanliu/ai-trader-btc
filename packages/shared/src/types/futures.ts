@@ -198,6 +198,8 @@ export interface FuturesPositionView {
   positionSide: PositionSide | null;
   entryPrice: number;
   markPrice: number;
+  /** 最新成交价（盘口/最近成交口径），与 markPrice 并列展示便于对账 */
+  lastPrice: number;
   liquidationPrice: number;
   leverage: number;
   marginType: MarginType;

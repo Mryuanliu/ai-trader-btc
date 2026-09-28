@@ -294,6 +294,71 @@ describe('MartingaleGridStrategy · 篮子追踪止盈（EA 的唯一出场）',
   });
 });
 
+describe('MartingaleGridStrategy · 篮子固定止盈/止损（USDT 绝对额）', () => {
+  it('固定止盈：净收益(USDT)达标即全平，不依赖比例/追踪', async () => {
+    const strategy = new MartingaleGridStrategy();
+    // 关掉比例类出场，只留固定金额止盈
+    const params = strategy.normalizeParams({
+      useTrendFilter: false,
+      basketStartPct: 0,
+      basketStopLossPct: 0,
+      basketTakeProfitUsdt: 3,
+    });
+    strategy.onStart?.(params);
+    const { executor, closes } = makeExecutor();
+
+    // 名义 100，预估平仓费 0.05；浮盈 4 → 净 3.95 ≥ 3 → 固定止盈
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [makeLot({ unrealizedPnl: 4 })] }),
+      executor,
+    );
+
+    expect(closes).toHaveLength(1);
+    expect(closes[0]).toMatchObject({ lotId: 'lot-1', reason: 'TAKE_PROFIT' });
+  });
+
+  it('固定止损：净亏损(USDT)超过阈值即全平', async () => {
+    const strategy = new MartingaleGridStrategy();
+    const params = strategy.normalizeParams({
+      useTrendFilter: false,
+      basketStartPct: 0,
+      basketStopLossPct: 0,
+      basketStopLossUsdt: 2,
+    });
+    strategy.onStart?.(params);
+    const { executor, closes } = makeExecutor();
+
+    // 浮亏 −2.5 → 净 −2.55 ≤ −2 → 固定止损
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [makeLot({ unrealizedPnl: -2.5 })] }),
+      executor,
+    );
+
+    expect(closes).toHaveLength(1);
+    expect(closes[0].reason).toBe('STOP_LOSS');
+  });
+
+  it('固定金额=0 时不触发（保持关闭语义）', async () => {
+    const strategy = new MartingaleGridStrategy();
+    const params = strategy.normalizeParams({
+      useTrendFilter: false,
+      basketStartPct: 0,
+      basketStopLossPct: 0,
+      basketTakeProfitUsdt: 0,
+      basketStopLossUsdt: 0,
+    });
+    strategy.onStart?.(params);
+    const { executor, closes } = makeExecutor();
+
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [makeLot({ unrealizedPnl: 4 })] }),
+      executor,
+    );
+
+    expect(closes).toHaveLength(0);
+  });
+});
+
 describe('MartingaleGridStrategy · 单侧金字塔（EA 趋势过滤）', () => {
   it('已持多单侧时不再挂空头侧挂单', async () => {
     const strategy = new MartingaleGridStrategy();

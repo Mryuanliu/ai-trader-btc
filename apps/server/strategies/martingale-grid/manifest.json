@@ -40,6 +40,9 @@
     "basketStartPct": 0.025,
     "basketGivebackPct": 0.008,
     "basketStopLossPct": 0,
-    "netExposureCapPct": 0
+    "basketTakeProfitUsdt": 0,
+    "basketStopLossUsdt": 0,
+    "netExposureCapPct": 0,
+    "triggerPriceType": "mark"
   }
 }

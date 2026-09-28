@@ -45,6 +45,8 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
 
   /** 最新高频报价：用于替代 1m K 线收盘价，让价格与指标跟随真实盘口 */
   private readonly livePrices = new Map<string, { price: number; ts: number }>();
+  /** 最新成交价（last trade）：取 1m K 线流当前烛 close，供顶栏主价格/持仓「最新价」列 */
+  private readonly lastTradePrices = new Map<string, { price: number; ts: number }>();
   private lastPricePushAt = 0;
   /** 两路流各自的心跳时间戳，用于独立判定断线与重连 */
   private lastKlineAt = 0;
@@ -233,9 +235,18 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
     this.events.emit('price', {
       symbol,
       price: ticker.price,
+      lastPrice: ticker.lastPrice,
       changePercent24h: ticker.changePercent24h,
       ts: now,
     });
+  }
+
+  /** 取有效的最新成交价，过期返回 null 以回落到盘口中间价 */
+  private getLiveLastPrice(symbol: string): number | null {
+    const live = this.lastTradePrices.get(symbol);
+    if (!live) return null;
+    if (Date.now() - live.ts > LIVE_PRICE_TTL_MS) return null;
+    return live.price;
   }
 
   /** 取有效的高频报价，过期返回 null 以回落到 K 线收盘价 */
@@ -248,6 +259,10 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
 
   private applyCandle(symbol: string, interval: Timeframe, candle: Candle) {
     const { closed, isNew } = this.store.upsert(symbol, interval, candle);
+    // 1m 当前烛的 close 即最近一笔成交价，记录下来作为 last trade 价
+    if (interval === '1m' && candle.close > 0) {
+      this.lastTradePrices.set(symbol, { price: candle.close, ts: Date.now() });
+    }
     if (isNew) {
       // 用最新价刷新更长周期的当前 K 线
       this.syncDerivedIntervals(symbol, candle.close);
@@ -308,6 +323,7 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
       this.events.emit('price', {
         symbol,
         price: ticker.price,
+        lastPrice: ticker.lastPrice,
         changePercent24h: ticker.changePercent24h,
         ts: Date.now(),
       });
@@ -389,6 +405,7 @@ export class MarketService implements OnModuleInit, OnModuleDestroy {
     return {
       symbol,
       price,
+      lastPrice: this.getLiveLastPrice(symbol) ?? price,
       change24h: price - open24h,
       changePercent24h: open24h > 0 ? ((price - open24h) / open24h) * 100 : 0,
       high24h,

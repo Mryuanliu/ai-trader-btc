@@ -8,6 +8,7 @@ import { FuturesController } from './futures.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { NewsModule } from '../news/news.module';
 import { AccountModule } from '../account/account.module';
+import { MarketModule } from '../market/market.module';
 
 /**
  * 合约模块：**只管执行，不管决策**。
@@ -22,6 +23,7 @@ import { AccountModule } from '../account/account.module';
     ExchangesModule,
     NewsModule,
     AccountModule,
+    MarketModule,
   ],
   providers: [FuturesConfigService, FuturesPositionService, FuturesTradingService],
   controllers: [FuturesController],

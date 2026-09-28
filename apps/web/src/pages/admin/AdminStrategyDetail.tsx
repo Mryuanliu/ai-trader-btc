@@ -7,6 +7,7 @@ import {
   Card,
   Col,
   Empty,
+  Progress,
   Row,
   Space,
   Table,
@@ -76,6 +77,17 @@ export function AdminStrategyDetail() {
   const price = numOf(s.price);
   const step = numOf(s.step);
   const leverage = numOf(s.leverage);
+  // 篮子固定止盈/止损（USDT 绝对额）：netUsdt 为当前净收益（已扣双边手续费），
+  // grossUsdt 为币安口径毛浮盈（不含任何费的纯价差，与币安持仓页「盈亏」对齐）
+  const netUsdt = numOf(s.netUsdt);
+  const grossUsdt = numOf(s.grossUsdt);
+  // 止盈/净收益按判定价计（标记价或最新价，由策略参数 triggerPriceType 决定），
+  // 与顶栏「当前价」可能不同基准；展示出来便于对账
+  const pnlPrice = numOf(s.pnlPrice);
+  const pnlPriceType = s.pnlPriceType === 'last' ? 'last' : 'mark';
+  const tpUsdt = numOf(s.basketTakeProfitUsdt);
+  const slUsdt = numOf(s.basketStopLossUsdt);
+  const showFixedExit = (tpUsdt ?? 0) > 0 || (slUsdt ?? 0) > 0;
 
   const tickAgoSec = st?.lastTickAt
     ? Math.max(0, Math.round((Date.now() - new Date(st.lastTickAt).getTime()) / 1000))
@@ -252,6 +264,95 @@ export function AdminStrategyDetail() {
               <span className="num text-white">{leverage != null ? `${leverage}x` : '--'}</span>
             </div>
           </div>
+
+          {/* 固定止盈/止损进度：把「距目标还差多少 U」可视化，方便观察整条链路 */}
+          {showFixedExit ? (
+            <div className="mt-3 border-t border-white/[0.06] pt-3">
+              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-muted">
+                <span>固定止盈/止损进度</span>
+                {netUsdt != null ? (
+                  <span className="text-subtle">
+                    · 净收益
+                    <span className="px-1 text-[10px] text-muted">(已扣双边手续费)</span>
+                    <span className={`num ${netUsdt >= 0 ? 'text-up' : 'text-down'}`}>
+                      {formatSignedUsd(netUsdt)} USDT
+                    </span>
+                  </span>
+                ) : null}
+                {grossUsdt != null ? (
+                  <span className="text-subtle">
+                    · 币安毛浮盈
+                    <span className="px-1 text-[10px] text-muted">(不含费)</span>
+                    <span className={`num ${grossUsdt >= 0 ? 'text-up' : 'text-down'}`}>
+                      {formatSignedUsd(grossUsdt)} USDT
+                    </span>
+                  </span>
+                ) : null}
+                {pnlPrice != null && pnlPrice > 0 ? (
+                  <span className="text-[10px] text-muted">
+                    · 按{pnlPriceType === 'mark' ? '标记价' : '最新价'} {pnlPrice.toFixed(2)} 计
+                    {pnlPriceType === 'mark' ? '（≠ 顶栏最新价）' : ''}
+                  </span>
+                ) : null}
+              </div>
+              <div className="space-y-2.5">
+                {tpUsdt != null &&
+                  tpUsdt > 0 &&
+                  (() => {
+                    const cur = netUsdt ?? 0;
+                    const pct = Math.max(0, Math.min(100, (cur / tpUsdt) * 100));
+                    const reached = cur >= tpUsdt;
+                    return (
+                      <div key="tp">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-muted">止盈目标 {tpUsdt.toFixed(2)} U（净）</span>
+                          <span className={reached ? 'text-up' : 'text-subtle'}>
+                            {reached
+                              ? '已达标，等待下一 tick 平仓'
+                              : `还差 ${(tpUsdt - cur).toFixed(2)} U`}
+                          </span>
+                        </div>
+                        <Progress
+                          percent={Number(pct.toFixed(1))}
+                          showInfo={false}
+                          strokeColor="#0ECB81"
+                          trailColor="rgba(255,255,255,0.08)"
+                          size="small"
+                        />
+                      </div>
+                    );
+                  })()}
+                {slUsdt != null &&
+                  slUsdt > 0 &&
+                  (() => {
+                    const loss = -(netUsdt ?? 0); // 正数=当前亏损额
+                    const pct = loss > 0 ? Math.max(0, Math.min(100, (loss / slUsdt) * 100)) : 0;
+                    const reached = loss >= slUsdt;
+                    return (
+                      <div key="sl">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-muted">止损线 -{slUsdt.toFixed(2)} U（净）</span>
+                          <span className={reached ? 'text-down' : 'text-subtle'}>
+                            {reached
+                              ? '已触及，等待下一 tick 平仓'
+                              : loss > 0
+                                ? `还差 ${slUsdt - loss > 0 ? (slUsdt - loss).toFixed(2) : '0.00'} U 到止损`
+                                : `当前盈利，距止损 ${slUsdt.toFixed(2)} U`}
+                          </span>
+                        </div>
+                        <Progress
+                          percent={Number(pct.toFixed(1))}
+                          showInfo={false}
+                          strokeColor="#F6465D"
+                          trailColor="rgba(255,255,255,0.08)"
+                          size="small"
+                        />
+                      </div>
+                    );
+                  })()}
+              </div>
+            </div>
+          ) : null}
 
           {/* 阶梯预览：逐格推进只能挂一层，摊开才看得出间距是否合理 */}
           {ladder ? (

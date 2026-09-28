@@ -12,6 +12,7 @@ import type {
 import { BasketEntity } from '../database/entities/basket.entity';
 import { PositionLotEntity } from '../database/entities/position-lot.entity';
 import { IncomeService } from './income.service';
+import { FUTURES_TAKER_FEE_RATE } from '@ai-trader/shared';
 import { FuturesAgentConfigEntity } from '../database/entities/futures-agent-config.entity';
 
 /**
@@ -298,16 +299,20 @@ export class BasketService {
       closedAt: l.closedAt ? l.closedAt.toISOString() : null,
     }));
 
-    // 未平部分的浮动盈亏（毛，不含未发生的手续费）
+    // 未平部分的浮动盈亏（**净值口径**）：毛浮盈 − 已付开仓费 − 预估平仓费，
+    // 与策略出场判定/结算同口径。之前显示的是不含任何费的毛值，导致
+    // 「页面显示盈利、平仓却亏损」——真实往返费能吃掉小止盈（2026-09-28）。
     let unrealized = 0;
     let openQty = 0;
     if (price > 0) {
       for (const l of lots) {
         if (l.status !== 'OPEN') continue;
         const qty = num(l.quantity);
+        const entry = num(l.entryPrice);
         openQty += qty;
-        const diff = l.direction === 'LONG' ? price - num(l.entryPrice) : num(l.entryPrice) - price;
-        unrealized += diff * qty;
+        const gross = l.direction === 'LONG' ? (price - entry) * qty : (entry - price) * qty;
+        // 扣已付开仓费 + 预估平仓费（按开仓名义×taker 费率，与策略 netUsdt 同式）
+        unrealized += gross - num(l.entryFeeUsdt) - entry * qty * FUTURES_TAKER_FEE_RATE;
       }
     } else {
       openQty = lots

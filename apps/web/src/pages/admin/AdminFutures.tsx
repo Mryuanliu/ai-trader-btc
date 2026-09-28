@@ -241,7 +241,19 @@ export function AdminFutures() {
             },
             {
               title: '标记价', dataIndex: 'markPrice', width: 120,
-              render: (v: number) => <span className="num">{formatPrice(v)}</span>,
+              render: (v: number) => (
+                <Tooltip title="止盈/止损与未实现盈亏的判定基准（抗插针）">
+                  <span className="num">{formatPrice(v)}</span>
+                </Tooltip>
+              ),
+            },
+            {
+              title: '最新价', dataIndex: 'lastPrice', width: 120,
+              render: (v: number) => (
+                <Tooltip title="最近成交价（盘口口径），与标记价差一个基差，属正常">
+                  <span className="num">{formatPrice(v)}</span>
+                </Tooltip>
+              ),
             },
             {
               title: '名义价值', dataIndex: 'notional', width: 120,

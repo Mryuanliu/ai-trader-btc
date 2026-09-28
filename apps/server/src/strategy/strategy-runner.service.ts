@@ -591,6 +591,14 @@ export class StrategyRunner implements OnModuleInit {
       positions.find((p) => p.symbol === symbol && p.markPrice > 0)?.markPrice ?? 0;
     const netQty = positions.reduce((acc, p) => acc + p.quantity, 0);
 
+    // 浮盈判定基准：默认标记价；策略参数 triggerPriceType=last 时改用最新成交价
+    // （更跟手但可能被插针误触发）。基准同时决定 openLots.unrealizedPnl 与面板净/毛值。
+    const triggerBasis =
+      (inst.params as { triggerPriceType?: string } | undefined)?.triggerPriceType === 'last'
+        ? 'last'
+        : 'mark';
+    const basisPrice = triggerBasis === 'last' ? price : markPrice > 0 ? markPrice : price;
+
     return {
       instanceId: inst.instanceId,
       symbol,
@@ -599,15 +607,16 @@ export class StrategyRunner implements OnModuleInit {
       atr: this.computeAtr(candles),
       candles,
       openLots: myLots.map((lot): StrategyLotView => {
-        // 浮盈按**标记价**计：止盈判定不能被单笔插针扭曲。
-        // 标记价取不到时才退回最新成交价。
-        const dto = this.lots.toDTO(lot, markPrice > 0 ? markPrice : price);
+        // 浮盈按**判定基准价**计：默认标记价（止盈判定不能被单笔插针扭曲），
+        // triggerPriceType=last 时用最新成交价。基准取不到标记价时才退回最新成交价。
+        const dto = this.lots.toDTO(lot, basisPrice);
         return {
           id: dto.id,
           direction: dto.direction,
           quantity: dto.quantity,
           entryPrice: dto.entryPrice,
           unrealizedPnl: dto.unrealizedPnl ?? 0,
+          entryFeeUsdt: dto.entryFeeUsdt ?? 0,
           openedAt: dto.openedAt,
           hasPendingClose: pendingCloseSet.has(dto.id),
         };

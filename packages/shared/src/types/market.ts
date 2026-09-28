@@ -26,7 +26,13 @@ export interface Candle {
 
 export interface Ticker {
   symbol: string;
+  /** 盘口中间价（买一/卖一均值）：网格挂单与决策跟随用的高频价 */
   price: number;
+  /**
+   * 最新成交价（last trade）：顶栏主价格/持仓表「最新价」列用，对齐主流交易所页头。
+   * 来自 1m K 线流的当前烛 close（≈最近一笔成交），无实时流时回落为 price。
+   */
+  lastPrice?: number;
   /** 24h 绝对涨跌额 */
   change24h: number;
   /** 24h 涨跌幅，单位 % */
@@ -87,6 +93,8 @@ export interface MarketSnapshot {
 export interface PriceTick {
   symbol: string;
   price: number;
+  /** 最新成交价（可选，无实时流时缺省） */
+  lastPrice?: number;
   changePercent24h: number;
   ts: number;
 }

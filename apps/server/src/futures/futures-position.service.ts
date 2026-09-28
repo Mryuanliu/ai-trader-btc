@@ -6,6 +6,7 @@ import {
 } from '@ai-trader/shared';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.adapter';
+import { MarketService } from '../market/market.service';
 
 /**
  * 合约持仓服务：以交易所 positionRisk 为权威，不在本地推导。
@@ -18,7 +19,10 @@ import { BinanceFuturesAdapter } from '../exchanges/binance-futures.adapter';
 export class FuturesPositionService {
   private readonly logger = new Logger(FuturesPositionService.name);
 
-  constructor(private readonly registry: ExchangeRegistry) {}
+  constructor(
+    private readonly registry: ExchangeRegistry,
+    private readonly market: MarketService,
+  ) {}
 
   private async adapter(): Promise<BinanceFuturesAdapter> {
     const adapter = await this.registry.get('binance-futures');
@@ -59,6 +63,7 @@ export class FuturesPositionService {
     const row = rows.find((r) => r.symbol === symbol);
     if (!row) return null;
 
+    const ticker = this.market.getTicker(symbol);
     return {
       symbol: row.symbol,
       market: 'futures',
@@ -66,6 +71,7 @@ export class FuturesPositionService {
       positionSide: positionSideOf(row.quantity),
       entryPrice: row.entryPrice,
       markPrice: row.markPrice,
+      lastPrice: ticker.lastPrice ?? ticker.price,
       liquidationPrice: row.liquidationPrice,
       leverage: row.leverage,
       marginType: row.marginType,

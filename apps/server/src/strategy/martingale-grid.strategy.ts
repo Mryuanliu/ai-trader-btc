@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { atr, ema } from '@ai-trader/shared';
+import { atr, ema, FUTURES_TAKER_FEE_RATE } from '@ai-trader/shared';
 import type { Candle, LotDirection } from '@ai-trader/shared';
 import type {
   StrategyContext,
@@ -29,7 +29,10 @@ const PARAM_SCHEMA = {
     basketStartPct: { type: 'number', title: '篮子追踪止盈启动(比例)', minimum: 0 },
     basketGivebackPct: { type: 'number', title: '篮子追踪回撤(比例)', minimum: 0 },
     basketStopLossPct: { type: 'number', title: '篮子止损(比例,0=关)', minimum: 0 },
+    basketTakeProfitUsdt: { type: 'number', title: '篮子固定止盈(USDT,0=关)', minimum: 0 },
+    basketStopLossUsdt: { type: 'number', title: '篮子固定止损(USDT,0=关)', minimum: 0 },
     netExposureCapPct: { type: 'number', title: '净敞口上限(名义/保证金,0=不限)', minimum: 0 },
+    triggerPriceType: { type: 'string', title: '止盈/止损判定基准', enum: ['mark', 'last'] },
   },
 } as const;
 
@@ -68,11 +71,17 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   // 否则刚启动追踪就被一波正常回撤打掉，等于没放大止盈。
   basketGivebackPct: 0.008,
   basketStopLossPct: 0,
+  // 篮子固定止盈/止损（USDT 绝对额，0=关）：净收益（已扣预估平仓费）直接达标即出场，
+  // 不依赖比例/追踪——便于用「赚够 X U / 亏到 X U 就走」的直观口径观察整条交易链路。
+  basketTakeProfitUsdt: 0,
+  basketStopLossUsdt: 0,
   netExposureCapPct: 0,
+  // 判定基准默认标记价（抗插针、与交易所风控同口径）；last=最新成交价（更跟手但可能被插针误触发）
+  triggerPriceType: 'mark',
 };
 
-/** 平仓手续费率估算（taker），用于把浮盈折算成「净」值参与篮子判定 */
-const EXIT_FEE_RATE = 0.0005;
+/** 平仓手续费率估算（taker），用于把浮盈折算成「净」值参与篮子判定；与结算/展示共用单一真值 */
+const EXIT_FEE_RATE = FUTURES_TAKER_FEE_RATE;
 
 /**
  * 马丁网格策略（移植自黄金 EA `king-v4-balance.mq5`）。
@@ -133,12 +142,21 @@ export class MartingaleGridStrategy implements TradingStrategy {
     pendingLong: number;
     pendingShort: number;
     netPct: number;
+    netUsdt: number;
+    /** 币安口径毛浮盈（不含任何手续费的纯价差浮盈，按判定基准价），供面板与交易所对账 */
+    grossUsdt: number;
+    /** 止盈/净收益实际所用的判定价（标记价或最新价，由 triggerPriceType 决定） */
+    pnlPrice: number;
+    /** 判定价基准：mark=标记价(抗插针) / last=最新成交价 */
+    pnlPriceType: 'mark' | 'last';
     nextAddLong: number | null;
     nextAddShort: number | null;
     maxLayers: number;
     leverage: number;
     basketStartPct: number;
     basketGivebackPct: number;
+    basketTakeProfitUsdt: number;
+    basketStopLossUsdt: number;
     ladder: {
       long: Array<{ layer: number; price: number; qty: number }>;
       short: Array<{ layer: number; price: number; qty: number }>;
@@ -172,7 +190,12 @@ export class MartingaleGridStrategy implements TradingStrategy {
       basketStartPct: num('basketStartPct', 0, 1),
       basketGivebackPct: num('basketGivebackPct', 0, 1),
       basketStopLossPct: num('basketStopLossPct', 0, 1),
+      basketTakeProfitUsdt: num('basketTakeProfitUsdt', 0, 1e9),
+      basketStopLossUsdt: num('basketStopLossUsdt', 0, 1e9),
       netExposureCapPct: num('netExposureCapPct', 0, 100),
+      triggerPriceType: ['mark', 'last'].includes(String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType))
+        ? String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType)
+        : 'mark',
     };
   }
 
@@ -198,6 +221,10 @@ export class MartingaleGridStrategy implements TradingStrategy {
             price: o.price,
             step: o.step,
             netPct: o.netPct,
+            netUsdt: o.netUsdt,
+            grossUsdt: o.grossUsdt,
+            pnlPrice: o.pnlPrice,
+            pnlPriceType: o.pnlPriceType,
             leverage: o.leverage,
             layers: { long: o.longLayers, short: o.shortLayers },
             pending: { long: o.pendingLong, short: o.pendingShort },
@@ -205,6 +232,8 @@ export class MartingaleGridStrategy implements TradingStrategy {
             maxLayers: o.maxLayers,
             basketStartPct: o.basketStartPct,
             basketGivebackPct: o.basketGivebackPct,
+            basketTakeProfitUsdt: o.basketTakeProfitUsdt,
+            basketStopLossUsdt: o.basketStopLossUsdt,
             ladder: o.ladder,
           }
         : {}),
@@ -294,19 +323,25 @@ export class MartingaleGridStrategy implements TradingStrategy {
       leverage: number;
       basketStartPct: number;
       basketGivebackPct: number;
+      basketTakeProfitUsdt: number;
+      basketStopLossUsdt: number;
+      triggerPriceType?: string;
     };
     const longs = ctx.openLots.filter((l) => l.direction === 'LONG');
     const shorts = ctx.openLots.filter((l) => l.direction === 'SHORT');
     const pendingLong = ctx.openOrders.filter((o) => o.side === 'BUY').length;
     const pendingShort = ctx.openOrders.filter((o) => o.side === 'SELL').length;
 
-    // 与 checkBasketExit 同口径：净收益率已扣预估平仓手续费
+    // 与 checkBasketExit 同口径：净收益已扣预估平仓手续费（USDT 绝对额与比例两口径同源）
     const netNotional = ctx.openLots.reduce((a, l) => a + l.entryPrice * l.quantity, 0);
-    const netPct =
+    // 币安口径毛浮盈：unrealizedPnl 已扣了开仓费，加回去即得纯价差浮盈（不含任何费），
+    // 与币安持仓页「盈亏(USDT)」同口径（按标记价）。
+    const grossUsdt = ctx.openLots.reduce((a, l) => a + l.unrealizedPnl + (l.entryFeeUsdt ?? 0), 0);
+    const netUsdt =
       netNotional > 0
-        ? (ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0) - netNotional * EXIT_FEE_RATE) /
-          netNotional
+        ? ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0) - netNotional * EXIT_FEE_RATE
         : 0;
+    const netPct = netNotional > 0 ? netUsdt / netNotional : 0;
 
     const step = this.gridStep(ctx);
     const nextAddFor = (lots: StrategyLotView[], dir: LotDirection): number | null => {
@@ -319,20 +354,30 @@ export class MartingaleGridStrategy implements TradingStrategy {
       return dir === 'LONG' ? worst - step : worst + step;
     };
 
+    // 判定基准：默认标记价（抗插针），triggerPriceType=last 时用最新成交价
+    const pnlPriceType: 'mark' | 'last' = p.triggerPriceType === 'last' ? 'last' : 'mark';
+    const pnlPrice = pnlPriceType === 'last' ? ctx.price : ctx.markPrice > 0 ? ctx.markPrice : ctx.price;
+
     this.lastObs = {
       price: ctx.price,
+      pnlPrice,
+      pnlPriceType,
       step,
       longLayers: longs.length,
       shortLayers: shorts.length,
       pendingLong,
       pendingShort,
       netPct,
+      netUsdt,
+      grossUsdt,
       nextAddLong: nextAddFor(longs, 'LONG'),
       nextAddShort: nextAddFor(shorts, 'SHORT'),
       maxLayers: p.maxLayersPerSide,
       leverage: p.leverage,
       basketStartPct: p.basketStartPct,
       basketGivebackPct: p.basketGivebackPct,
+      basketTakeProfitUsdt: p.basketTakeProfitUsdt,
+      basketStopLossUsdt: p.basketStopLossUsdt,
       ladder: {
         long: this.buildLadder(longs, 'LONG', ctx, step),
         short: this.buildLadder(shorts, 'SHORT', ctx, step),
@@ -349,29 +394,43 @@ export class MartingaleGridStrategy implements TradingStrategy {
    * 触及止损，或「曾达到启动阈值且回撤超过 giveback」即全平所有仓位单。
    */
   private async checkBasketExit(ctx: StrategyContext, exec: StrategyExecutor): Promise<boolean> {
-    const p = ctx.params as { basketStartPct: number; basketGivebackPct: number; basketStopLossPct: number };
+    const p = ctx.params as {
+      basketStartPct: number;
+      basketGivebackPct: number;
+      basketStopLossPct: number;
+      basketTakeProfitUsdt: number;
+      basketStopLossUsdt: number;
+    };
     const netNotional = ctx.openLots.reduce((a, l) => a + l.entryPrice * l.quantity, 0);
     if (!(netNotional > 0)) return false;
 
     const gross = ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0);
     const exitFee = netNotional * EXIT_FEE_RATE;
-    const netPct = (gross - exitFee) / netNotional;
+    // 净收益：USDT 绝对额与比例两个口径同源（都扣了预估平仓费），供固定/比例两套阈值共用判定
+    const netUsdt = gross - exitFee;
+    const netPct = netUsdt / netNotional;
 
     if (netPct > this.basketPeakPct) this.basketPeakPct = netPct;
 
     let reason: 'TAKE_PROFIT' | 'STOP_LOSS' | null = null;
-    if (p.basketStopLossPct > 0 && netPct <= -p.basketStopLossPct) {
-      reason = 'STOP_LOSS';
-    } else if (
+    // 止损：比例止损 或 固定金额止损，任一触发即平
+    const slByPct = p.basketStopLossPct > 0 && netPct <= -p.basketStopLossPct;
+    const slByUsdt = p.basketStopLossUsdt > 0 && netUsdt <= -p.basketStopLossUsdt;
+    // 止盈：固定金额达标（不追踪）或 比例追踪止盈，任一触发即平
+    const tpByUsdt = p.basketTakeProfitUsdt > 0 && netUsdt >= p.basketTakeProfitUsdt;
+    const tpByTrail =
       p.basketStartPct > 0 &&
       this.basketPeakPct >= p.basketStartPct &&
-      this.basketPeakPct - netPct >= p.basketGivebackPct
-    ) {
+      this.basketPeakPct - netPct >= p.basketGivebackPct;
+
+    if (slByPct || slByUsdt) {
+      reason = 'STOP_LOSS';
+    } else if (tpByUsdt || tpByTrail) {
       reason = 'TAKE_PROFIT';
     }
 
     if (!reason) {
-      this.lastNote = `篮子净收益 ${(netPct * 100).toFixed(2)}%（峰值 ${(this.basketPeakPct * 100).toFixed(2)}%）`;
+      this.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(this.basketPeakPct * 100).toFixed(2)}%）`;
       return false;
     }
 
@@ -398,7 +457,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
       if (!r.ok) this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
     }
     this.basketPeakPct = 0;
-    this.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
+    this.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
     this.logger.log(this.lastNote);
     return true;
   }

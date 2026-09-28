@@ -36,6 +36,17 @@ export type BasketDirection = LotDirection | 'MIXED';
 export type BasketStatus = 'OPEN' | 'CLOSED';
 /** 篮子来源：整轮都由策略建 / 整轮手动 / 两种混在一起 */
 export type BasketOrigin = 'strategy' | 'manual' | 'mixed';
+/**
+ * 合约 taker 手续费率（单边，USDT-M 本位）。
+ *
+ * 全链路唯一费率真值来源：策略出场判定、结算兜底估算、前端净值展示都用它，
+ * 避免「策略按 5bps 判、结算按 10bps 记、显示按 0 费」三套口径互相打架（2026-09-28）。
+ * 取**本账户实测** taker = 0.04%（demo 逐笔 commission/quoteQty 实测 0.0004，如 3.3194/8298.5）；
+ * 仅作**取不到交易所真实 commission 时**的兜底估算，真实费一律以 /fapi/v1/userTrades 为准。
+ * 注：币安官方标准 taker 为 0.05%，但本 demo 账户实测 0.04%，以实测为准避免高估费用。
+ */
+export const FUTURES_TAKER_FEE_RATE = 0.0004;
+
 /** Lot 结算：净盈亏（已扣双边手续费）与名义收益率 */
 export function settleLotPnl(params: {
   direction: LotDirection;

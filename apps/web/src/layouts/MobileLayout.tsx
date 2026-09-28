@@ -25,10 +25,13 @@ export function MobileLayout() {
 
   useEffect(() => {
     if (!data?.ticker) return;
-    document.title = `AI Trader · ${data.ticker.price.toFixed(2)}`;
-  }, [data?.ticker?.price]);
+    const headline = data.ticker.lastPrice ?? data.ticker.price;
+    document.title = `AI Trader · ${headline.toFixed(2)}`;
+  }, [data?.ticker?.lastPrice, data?.ticker?.price]);
 
-  const price = livePrice?.price ?? data?.ticker?.price ?? 0;
+  // 主价格用最新成交价（对齐主流交易所页头），无实时流时回落盘口中间价/REST
+  const price =
+    livePrice?.lastPrice ?? livePrice?.price ?? data?.ticker?.lastPrice ?? data?.ticker?.price ?? 0;
   const change = livePrice?.changePercent24h ?? data?.ticker?.changePercent24h ?? 0;
 
   return (

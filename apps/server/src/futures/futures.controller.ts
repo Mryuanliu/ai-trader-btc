@@ -4,6 +4,7 @@ import { FuturesConfigService } from './futures-config.service';
 import { FuturesPositionService } from './futures-position.service';
 import { FuturesTradingService, PlaceFuturesOrderResult } from './futures-trading.service';
 import { LotService } from '../account/lot.service';
+import { MarketService } from '../market/market.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 
@@ -20,6 +21,7 @@ export class FuturesController {
     private readonly positions: FuturesPositionService,
     private readonly trading: FuturesTradingService,
     private readonly lots: LotService,
+    private readonly market: MarketService,
   ) {}
 
   @UseGuards(JwtAuthGuard)
@@ -43,21 +45,26 @@ export class FuturesController {
     const rows = await this.positions.listPositions(symbol);
     return rows
       .filter((r) => Math.abs(r.quantity) > 0)
-      .map((r) => ({
-        symbol: r.symbol,
-        market: 'futures' as const,
-        quantity: r.quantity,
-        positionSide: r.quantity > 0 ? ('LONG' as const) : ('SHORT' as const),
-        entryPrice: r.entryPrice,
-        markPrice: r.markPrice,
-        liquidationPrice: r.liquidationPrice,
-        leverage: r.leverage,
-        marginType: r.marginType,
-        isolatedMargin: r.isolatedMargin,
-        unrealizedPnl: r.unrealizedPnl,
-        notional: r.notional,
-        liquidationDistancePct: r.liquidationDistancePct,
-      }));
+      .map((r) => {
+        // 最新成交价与标记价并列下发，前端双列展示便于与交易所对账
+        const ticker = this.market.getTicker(r.symbol);
+        return {
+          symbol: r.symbol,
+          market: 'futures' as const,
+          quantity: r.quantity,
+          positionSide: r.quantity > 0 ? ('LONG' as const) : ('SHORT' as const),
+          entryPrice: r.entryPrice,
+          markPrice: r.markPrice,
+          lastPrice: ticker.lastPrice ?? ticker.price,
+          liquidationPrice: r.liquidationPrice,
+          leverage: r.leverage,
+          marginType: r.marginType,
+          isolatedMargin: r.isolatedMargin,
+          unrealizedPnl: r.unrealizedPnl,
+          notional: r.notional,
+          liquidationDistancePct: r.liquidationDistancePct,
+        };
+      });
   }
 
   /** 合约账户可用保证金 */
