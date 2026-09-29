@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { PerformanceWindow, StrategyPerformance } from '@ai-trader/shared';
+import { computePerformance, type PerfRound } from '@ai-trader/shared';
 import { BasketEntity } from '../database/entities/basket.entity';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -44,7 +45,7 @@ export class PerformanceService {
       ? baskets.filter((b) => b.closedAt && b.closedAt.getTime() >= since)
       : baskets;
 
-    return this.fromBaskets(strategyName, symbol, window, rows);
+    return computePerformance(strategyName, symbol, window, toRounds(rows));
   }
 
   /** 全部策略的绩效（排行榜用） */
@@ -70,101 +71,21 @@ export class PerformanceService {
     }
 
     return [...byStrategy.entries()].map(([name, list]) =>
-      this.fromBaskets(name, symbol, window, list),
+      computePerformance(name, symbol, window, toRounds(list)),
     );
   }
 
   private windowDays(window: PerformanceWindow): number {
     return window === '7d' ? 7 : window === '30d' ? 30 : 0;
   }
+}
 
-  /** 从篮子列表算出全部指标（纯计算，便于单测） */
-  private fromBaskets(
-    strategyName: string,
-    symbol: string,
-    window: PerformanceWindow,
-    baskets: BasketEntity[],
-  ): StrategyPerformance {
-    // 一轮的净收益 = 各层已实现盈亏 + 该轮存续期的资金费
-    const pnlOf = (b: BasketEntity) => Number(b.realizedPnl) + Number(b.fundingFee);
-
-    let equity = 0;
-    let peak = 0;
-    let maxDrawdown = 0;
-    const equityCurve: Array<{ time: string; equity: number }> = [];
-
-    for (const b of baskets) {
-      equity += pnlOf(b);
-      peak = Math.max(peak, equity);
-      maxDrawdown = Math.max(maxDrawdown, peak - equity);
-      if (b.closedAt) {
-        equityCurve.push({ time: b.closedAt.toISOString(), equity: Number(equity.toFixed(8)) });
-      }
-    }
-
-    // 胜率 / 盈亏比
-    let grossWin = 0;
-    let grossLoss = 0;
-    let wins = 0;
-    for (const b of baskets) {
-      const p = pnlOf(b);
-      if (p > 0) {
-        grossWin += p;
-        wins += 1;
-      } else {
-        grossLoss += Math.abs(p);
-      }
-    }
-    const winRate = baskets.length > 0 ? wins / baskets.length : 0;
-    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? null : 0;
-
-    // 时间跨度 → 年化
-    const first = baskets[0]?.closedAt ?? null;
-    const last = baskets[baskets.length - 1]?.closedAt ?? null;
-    const spanDays = first && last ? Math.max(1, (last.getTime() - first.getTime()) / DAY_MS) : 0;
-    const annualizedPnl = spanDays > 0 ? (equity / spanDays) * 365 : 0;
-
-    // 夏普：按「日」聚合收益后算 (均值/标准差)×√365
-    const daily = new Map<string, number>();
-    for (const b of baskets) {
-      if (!b.closedAt) continue;
-      const day = b.closedAt.toISOString().slice(0, 10);
-      daily.set(day, (daily.get(day) ?? 0) + pnlOf(b));
-    }
-    const rets = [...daily.values()];
-    const sharpe = this.sharpeRatio(rets);
-    const calmar = maxDrawdown > 0 ? annualizedPnl / maxDrawdown : 0;
-
-    return {
-      strategyName,
-      symbol,
-      window,
-      closedBaskets: baskets.length,
-      totalPnl: Number(equity.toFixed(8)),
-      annualizedPnl: Number(annualizedPnl.toFixed(8)),
-      maxDrawdown: Number(maxDrawdown.toFixed(8)),
-      sharpe: Number(sharpe.toFixed(4)),
-      calmar: Number(calmar.toFixed(4)),
-      winRate: Number(winRate.toFixed(4)),
-      profitFactor: profitFactor === null ? null : Number(profitFactor.toFixed(4)),
-      avgLayers:
-        baskets.length > 0
-          ? Number((baskets.reduce((a, b) => a + b.layerCount, 0) / baskets.length).toFixed(2))
-          : 0,
-      equityCurve,
-      firstClosedAt: first ? first.toISOString() : null,
-      lastClosedAt: last ? last.toISOString() : null,
-    };
-  }
-
-  /** 夏普比率：日收益均值/标准差 × √365；样本不足或零波动时为 0 */
-  private sharpeRatio(dailyReturns: number[]): number {
-    if (dailyReturns.length < 2) return 0;
-    const mean = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
-    const variance =
-      dailyReturns.reduce((a, b) => a + (b - mean) ** 2, 0) / (dailyReturns.length - 1);
-    const std = Math.sqrt(variance);
-    if (!(std > 0)) return 0;
-    return (mean / std) * Math.sqrt(365);
-  }
+/** BasketEntity → PerfRound：closedAt 转 ms（未了结为 null） */
+function toRounds(baskets: BasketEntity[]): PerfRound[] {
+  return baskets.map((b) => ({
+    realizedPnl: Number(b.realizedPnl),
+    fundingFee: Number(b.fundingFee),
+    closedAt: b.closedAt ? b.closedAt.getTime() : null,
+    layerCount: b.layerCount,
+  }));
 }

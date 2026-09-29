@@ -22,6 +22,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   DollarOutlined,
   ExclamationCircleOutlined,
+  ExperimentOutlined,
   FileTextOutlined,
   PlayCircleOutlined,
   PoweroffOutlined,
@@ -323,6 +324,12 @@ export function AdminStrategy() {
                   </span>,
                   <span key="detail" onClick={() => navigate(`/admin/strategy/${s.name}`)}>
                     <FileTextOutlined /> 详情
+                  </span>,
+                  <span
+                    key="backtest"
+                    onClick={() => navigate(`/admin/backtest?strategy=${encodeURIComponent(s.name)}`)}
+                  >
+                    <ExperimentOutlined /> 回测
                   </span>,
                 ]}
               >

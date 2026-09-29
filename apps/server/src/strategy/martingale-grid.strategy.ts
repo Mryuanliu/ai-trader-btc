@@ -577,8 +577,8 @@ export class MartingaleGridStrategy implements TradingStrategy {
     if (lots.length === 0 && p.firstOrderMarket === true) {
       // 去重：市价单发出到 Lot 入账有对账延迟，这期间每 tick 都会看到
       // 「无持仓」，不设闸就会重复市价开仓。
-      if (Date.now() - this.firstMarketAt < 20_000) return;
-      this.firstMarketAt = Date.now();
+      if (ctx.now - this.firstMarketAt < 20_000) return;
+      this.firstMarketAt = ctx.now;
 
       for (const o of pendings) {
         await exec.cancelOrder(o.id);

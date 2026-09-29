@@ -19,6 +19,7 @@ import { GatewayModule } from './gateway/gateway.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { OverviewModule } from './overview/overview.module';
 import { StrategyModule } from './strategy/strategy.module';
+import { BacktestModule } from './backtest/backtest.module';
 import { FeishuModule } from './feishu/feishu.module';
 import { AllExceptionsFilter } from './common/all-exception.filter';
 
@@ -27,7 +28,7 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
  *
  * 平台只提供三件事：绑定交易所、下单交易、监控订单。
  * 交易逻辑全部由挂载的策略自行负责，平台不做任何风控；
- * 回测与决策引擎已移除。
+ * 回测台（backtest）为独立的研究工具模块，不接交易链路。
  */
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { AllExceptionsFilter } from './common/all-exception.filter';
     AgentModule,
     OverviewModule,
     StrategyModule,
+    BacktestModule,
     GatewayModule,
     SchedulerModule,
     FeishuModule,

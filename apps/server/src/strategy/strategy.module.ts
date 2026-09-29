@@ -1,11 +1,13 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MarketModule } from '../market/market.module';
 import { FuturesModule } from '../futures/futures.module';
 import { AccountModule } from '../account/account.module';
+import { BacktestModule } from '../backtest/backtest.module';
 import { BasketEntity, StrategyInstanceEntity } from '../database/entities';
 import { MartingaleGridStrategy } from './martingale-grid.strategy';
 import { TrendFollowingStrategy } from './trend-following.strategy';
+import { DonchianBreakoutStrategy } from './donchian-breakout.strategy';
 import { StrategyRegistry } from './strategy-registry.service';
 import { StrategyHub } from './strategy-hub.service';
 import { StrategyInstanceService } from './strategy-instance.service';
@@ -25,12 +27,14 @@ import { StrategyController } from './strategy.controller';
     MarketModule,
     FuturesModule,
     AccountModule,
+    forwardRef(() => BacktestModule),
     // 绩效服务按篮子聚合，需要篮子仓储；实例服务需要实例仓储
     TypeOrmModule.forFeature([BasketEntity, StrategyInstanceEntity]),
   ],
   providers: [
     MartingaleGridStrategy,
     TrendFollowingStrategy,
+    DonchianBreakoutStrategy,
     StrategyRegistry,
     StrategyHub,
     StrategyInstanceService,

@@ -1,0 +1,115 @@
+{
+  "name": "donchian_breakout",
+  "label": "唐奇安突破",
+  "description": "N 根 K 线通道突破入场（Turtle 风格）+ 反向 M 根通道破位出场；仓位走波动率定标，兜底走 ATR 吊灯 + 时间止损。",
+  "enabled": false,
+  "version": "1.0.0",
+  "author": "platform-internal",
+  "capabilities": {
+    "timeframes": [
+      "1h",
+      "4h"
+    ],
+    "needsTicker": true,
+    "markets": [
+      "futures"
+    ],
+    "autoExit": true,
+    "suggestedMaxLayers": 1
+  },
+  "riskNotes": [
+    "假突破风险：追高追低在震荡行情中会连续小额止损，需靠 regime/低波过滤缓解",
+    "通道参数强依赖周期：1h/4h 是 Turtle 经典区间，5m 噪声过大不建议",
+    "反向通道破位出场意味着单笔不会拿到 100% 趋势段，只吃中段",
+    "平台不做任何风控：吊灯/时间止损由策略参数控制，平台不会代为干预"
+  ],
+  "defaultParams": {
+    "useVolSizing": true,
+    "riskPerTradePct": 0.5,
+    "sizingAtrMult": 1,
+    "maxLeverage": 10,
+    "baseQty": 0.01,
+    "breakoutLookbackBars": 20,
+    "exitLookbackBars": 10,
+    "chandelierK": 4,
+    "maxHoldBars": 240,
+    "leverage": 10,
+    "atrMinPct": 0,
+    "cooldownSec": 60
+  },
+  "paramSchema": {
+    "type": "object",
+    "properties": {
+      "useVolSizing": {
+        "type": "boolean",
+        "title": "启用波动率定标"
+      },
+      "riskPerTradePct": {
+        "type": "number",
+        "title": "单笔风险预算(%)",
+        "minimum": 0.05,
+        "maximum": 5
+      },
+      "sizingAtrMult": {
+        "type": "number",
+        "title": "定标 ATR 倍数",
+        "minimum": 0.5,
+        "maximum": 5
+      },
+      "maxLeverage": {
+        "type": "integer",
+        "title": "最大杠杆",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "baseQty": {
+        "type": "number",
+        "title": "固定数量(关闭定标时)",
+        "minimum": 0.0001
+      },
+      "breakoutLookbackBars": {
+        "type": "integer",
+        "title": "入场通道根数",
+        "minimum": 5,
+        "maximum": 200
+      },
+      "exitLookbackBars": {
+        "type": "integer",
+        "title": "出场通道根数",
+        "minimum": 2,
+        "maximum": 100
+      },
+      "chandelierK": {
+        "type": "number",
+        "title": "吊灯 ATR 倍数",
+        "minimum": 1,
+        "maximum": 10
+      },
+      "maxHoldBars": {
+        "type": "integer",
+        "title": "时间止损(根数)",
+        "minimum": 1,
+        "maximum": 10000
+      },
+      "leverage": {
+        "type": "integer",
+        "title": "杠杆(旧)",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "atrMinPct": {
+        "type": "number",
+        "title": "低波过滤阈值(atr/mark)",
+        "minimum": 0,
+        "maximum": 0.2
+      },
+      "cooldownSec": {
+        "type": "integer",
+        "title": "平仓后冷却(秒)",
+        "minimum": 0,
+        "maximum": 3600
+      }
+    }
+  },
+  "backtestRef": null
+}

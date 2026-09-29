@@ -10,6 +10,7 @@ import {
   StrategyInstanceEntity,
   TradeFillEntity,
   UserEntity,
+  BacktestRunEntity,
 } from './index';
 import { FeishuMessageReceiptEntity } from '../../feishu/entities/feishu-message-receipt.entity';
 import { FeishuChatSessionEntity } from '../../feishu/entities/feishu-chat-session.entity';
@@ -30,4 +31,5 @@ export const ALL_ENTITIES = [
   NewsItemEntity,
   FeishuMessageReceiptEntity,
   FeishuChatSessionEntity,
+  BacktestRunEntity,
 ];

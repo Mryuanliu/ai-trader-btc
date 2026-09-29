@@ -13,7 +13,7 @@ import {
   Table,
   Tag,
 } from 'antd';
-import { DollarOutlined, PoweroffOutlined } from '@ant-design/icons';
+import { DollarOutlined, ExperimentOutlined, PoweroffOutlined } from '@ant-design/icons';
 import type { BasketSummary } from '@ai-trader/shared';
 import {
   useCloseBasket,
@@ -177,13 +177,32 @@ export function AdminStrategyDetail() {
             ← 返回
           </Button>
           <div>
-            <h2 className="text-[17px] font-semibold text-white">{strategy.label}</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-[17px] font-semibold text-white">{strategy.label}</h2>
+              {/* P1 上架闸门徽标（当前未接入 setEnabled，仅占位展示）：
+                  pass=绿 / overfit=红 / 未测=灰 */}
+              {(() => {
+                const ref = strategy.manifest?.backtestRef ?? null;
+                if (!ref) return <Tag className="!mr-0">DSR 闸门·未测</Tag>;
+                return ref.verdict === 'pass' ? (
+                  <Tag color="green" className="!mr-0">DSR 闸门·PASS ({ref.dsr.toFixed(2)})</Tag>
+                ) : (
+                  <Tag color="red" className="!mr-0">DSR 闸门·OVERFIT ({ref.dsr.toFixed(2)})</Tag>
+                );
+              })()}
+            </div>
             <div className="muted-text mt-0.5">
               {strategy.description}
             </div>
           </div>
         </div>
         <Space>
+          <Button
+            icon={<ExperimentOutlined />}
+            onClick={() => navigate(`/admin/backtest?strategy=${encodeURIComponent(name)}`)}
+          >
+            回测此策略
+          </Button>
           <DevDocsButton />
           {isThisRunning ? (
             <>

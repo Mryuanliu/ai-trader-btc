@@ -47,6 +47,25 @@ export interface StrategyCapabilities {
 export type StrategySide = LotDirection;
 
 /**
+ * 回测台闸门快照（P0 尾巴 → P1 闸门）。
+ *
+ * 记录当前上架时参考的 research 回测结果：
+ * - `verdict='pass'` 自然过闸门，overrideReason 为空
+ * - `verdict='overfit'` 时需 `overrideReason` 留痕才能上架
+ * - `null` 未接时兼容旧清单
+ */
+export interface StrategyBacktestRef {
+  runId: string;
+  /** 回测 Deflated Sharpe Ratio（概率 0~1） */
+  dsr: number;
+  verdict: 'pass' | 'overfit';
+  /** ISO时间戳 */
+  ts: string;
+  /** 人工覆盖原因（仅 verdict='overfit' 时有效） */
+  overrideReason?: string;
+}
+
+/**
  * 策略清单：上架所需的元信息。
  *
  * `riskNotes` 是**必填**——平台不做风控，但必须把风险讲清楚（告知而非拦截）。
@@ -59,4 +78,9 @@ export interface StrategyManifest {
   capabilities: StrategyCapabilities;
   /** 风险提示（上架页必读） */
   riskNotes: string[];
+  /**
+   * 回测台闸门快照（P1 可选）。上架构造时写入；
+   * 无该字段时平台会拒绝无 override 的上架（闸门默认生效）。
+   */
+  backtestRef?: StrategyBacktestRef | null;
 }

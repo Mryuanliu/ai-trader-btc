@@ -38,10 +38,15 @@ export class StrategyController {
     return this.hub.load();
   }
 
-  /** 上下架：改写 manifest.json 的 enabled 并重载 */
+  /** 上下架：改写 manifest.json 的 enabled 并重载；上架触发闸门 */
   @Post(':name/enabled')
-  async setEnabled(@Param('name') name: string, @Body() body: { enabled?: boolean }) {
-    const result = await this.hub.setEnabled(name, body?.enabled !== false);
+  async setEnabled(
+    @Param('name') name: string,
+    @Body() body: { enabled?: boolean; forceOverride?: { reason: string } },
+  ) {
+    const result = await this.hub.setEnabled(name, body?.enabled !== false, {
+      forceOverride: body?.forceOverride,
+    });
     if (!result.ok) {
       throw new BusinessException('BAD_REQUEST', result.message);
     }

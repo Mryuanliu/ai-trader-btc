@@ -1,8 +1,9 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { StrategyDescriptor, StrategyManifest } from '@ai-trader/shared';
 import { StrategyRegistry } from './strategy-registry.service';
+import { BacktestService, type GateVerdict } from '../backtest/backtest.service';
 
 /**
  * 策略包清单文件（manifest.json）的结构。
@@ -57,7 +58,11 @@ export class StrategyHub implements OnModuleInit {
   private readonly logger = new Logger(StrategyHub.name);
   private manifests = new Map<string, PackageManifest>();
 
-  constructor(private readonly registry: StrategyRegistry) {}
+  constructor(
+    private readonly registry: StrategyRegistry,
+    @Inject(forwardRef(() => BacktestService))
+    private readonly backtestService: BacktestService,
+  ) {}
 
   /** 启动时自动加载清单，避免首屏空市场 */
   onModuleInit() {
@@ -147,12 +152,43 @@ export class StrategyHub implements OnModuleInit {
     return this.get(name) !== undefined;
   }
 
-  /** 上下架：写回 manifest.json 的 enabled 字段并重载 */
-  async setEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; message: string }> {
+  /** 上下架：写回 manifest.json 的 enabled 字段并重载；上架时前置闸门检查 */
+  async setEnabled(
+    name: string,
+    enabled: boolean,
+    opts?: { forceOverride?: { reason: string } },
+  ): Promise<{ ok: boolean; message: string; gate?: GateVerdict }> {
     const existing = this.manifests.get(name);
     if (!existing) {
       return { ok: false, message: `未找到策略包清单：${name}` };
     }
+
+    // 上架时检查闸门
+    if (enabled) {
+      const gate = await this.backtestService.hasPassingResearch(name);
+      if (!gate.passed) {
+        if (!opts?.forceOverride?.reason) {
+          return {
+            ok: false,
+            message: `闸门未达：${gate.reasons.join('; ') || '无历史回测记录'}`,
+            gate,
+          };
+        }
+        // 强推上架：留痕 overrideReason
+        this.logger.warn(`策略「${name}」闸门未达但强推上架，原因：${opts.forceOverride.reason}`);
+      }
+      // 写入 backtestRef
+      existing.backtestRef = {
+        runId: gate.runId ?? '',
+        dsr: gate.dsr ?? 0,
+        verdict: gate.passed ? 'pass' : 'overfit',
+        ts: new Date().toISOString(),
+        overrideReason: gate.passed ? undefined : opts?.forceOverride?.reason,
+      };
+    } else {
+      existing.backtestRef = null;
+    }
+
     const file = path.join(manifestDir(), existing.dir, 'manifest.json');
     try {
       // dir 是运行期记下的，不能写回清单文件（否则文件里多出无用字段）

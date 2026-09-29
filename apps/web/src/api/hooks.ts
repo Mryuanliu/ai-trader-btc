@@ -27,6 +27,11 @@ import type {
   Ticker,
   Timeframe,
   ExchangeCode,
+  BacktestReport,
+  BacktestRunKind,
+  BacktestRunSummary,
+  ResearchResult,
+  SweepResult,
 } from '@ai-trader/shared';
 import { TIMEFRAME_MS } from '@ai-trader/shared';
 
@@ -483,5 +488,81 @@ export function useRefreshAiMarket() {
     onSuccess: (data, symbol) => {
       qc.setQueryData(['ai-market', symbol], data);
     },
+  });
+}
+
+// ------------------------------------------------------------ 回测台
+
+/** 回测运行入参（对应后端 RunInput） */
+export interface BacktestRunInput {
+  strategyName: string;
+  symbol: string;
+  interval: Timeframe;
+  from?: number;
+  to?: number;
+  initialCapital?: number;
+  warmupBars?: number;
+  feeRateBps?: number;
+  slippageBps?: number;
+  fundingPctPer8h?: number;
+  params?: Record<string, unknown>;
+  label?: string;
+  dsrThreshold?: number;
+}
+
+/** 单次回测：POST /backtest/run，成功后刷新历史列表 */
+export function useRunBacktest() {
+  const qc = useQueryClient();
+  return useMutation<BacktestReport, Error, BacktestRunInput>({
+    mutationFn: (body) => http.post('/backtest/run', body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['backtest-runs'] }),
+  });
+}
+
+/** 稳健性研究：walk-forward（+ 可选 CPCV）+ DSR 闸门 */
+export function useBacktestResearch() {
+  const qc = useQueryClient();
+  return useMutation<
+    ResearchResult,
+    Error,
+    BacktestRunInput & { trainBars?: number; testBars?: number; stepBars?: number; cpcv?: { nFoldK?: number; testFoldSize?: number } }
+  >({
+    mutationFn: (body) => http.post('/backtest/research', body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['backtest-runs'] }),
+  });
+}
+
+/** 参数扫描 */
+export function useBacktestSweep() {
+  const qc = useQueryClient();
+  return useMutation<SweepResult, Error, BacktestRunInput & { paramGrid: Record<string, number[]> }>({
+    mutationFn: (body) => http.post('/backtest/sweep', body),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['backtest-runs'] }),
+  });
+}
+
+/** 历史运行列表（分页） */
+export function useBacktestRuns(params: { page?: number; pageSize?: number; strategyName?: string; kind?: BacktestRunKind }) {
+  return useQuery<PageResult<BacktestRunSummary>>({
+    queryKey: ['backtest-runs', params],
+    queryFn: () => http.get('/backtest/runs', { params }),
+  });
+}
+
+/** 回看单次运行的完整结果 */
+export function useBacktestRun(id: string | null) {
+  return useQuery<BacktestRunSummary & { report: unknown }>({
+    queryKey: ['backtest-run', id],
+    queryFn: () => http.get(`/backtest/runs/${id}`),
+    enabled: Boolean(id),
+  });
+}
+
+/** 删除一次运行 */
+export function useDeleteBacktestRun() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: (id) => http.delete(`/backtest/runs/${id}`),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['backtest-runs'] }),
   });
 }

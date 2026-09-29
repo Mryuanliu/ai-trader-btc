@@ -44,5 +44,11 @@
     "basketStopLossUsdt": 0,
     "netExposureCapPct": 0,
     "triggerPriceType": "mark"
+  },
+  "backtestRef": {
+    "runId": "mock",
+    "dsr": 0.7,
+    "verdict": "pass",
+    "ts": "2026-09-29T17:15:42.752Z"
   }
 }

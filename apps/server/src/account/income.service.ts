@@ -174,16 +174,24 @@ export class IncomeService {
    * 注：`realizedCount` 用于上层判定该日是否真的回报了 REALIZED_PNL（demo 常为 0）。
    */
   async dailySummaryByDay(since: Date): Promise<DayIncome[]> {
-    const rows = await this.repo
-      .createQueryBuilder('i')
-      .select(`to_char(date_trunc('day', i.time AT TIME ZONE 'Asia/Shanghai'), 'YYYY-MM-DD')`, 'date')
-      .addSelect('i.incomeType', 'type')
-      .addSelect('SUM(i.amount)', 'total')
-      .addSelect('COUNT(*)', 'cnt')
-      .where('i.time >= :since', { since })
-      .groupBy('1')
-      .addGroupBy('i.incomeType')
-      .getRawMany<{ date: string; type: string; total: string; cnt: string }>();
+    // 用原生 SQL 而非 QueryBuilder：`.groupBy('1')` 会被 TypeORM 转义成 `GROUP BY "1"`
+    // （按列名字面量而非位置引用）从而报错，被上层 .catch 吞掉后 income 分支整体失效。
+    const rows = await this.repo.query<{
+      date: string;
+      type: string;
+      total: string;
+      cnt: string;
+    }[]>(
+      `SELECT to_char(date_trunc('day', i.time AT TIME ZONE 'Asia/Shanghai'), 'YYYY-MM-DD') AS date,
+              i."incomeType" AS type,
+              SUM(i.amount) AS total,
+              COUNT(*) AS cnt
+         FROM exchange_incomes i
+        WHERE i.time >= $1
+        GROUP BY 1, 2
+        ORDER BY 1, 2`,
+      [since],
+    );
 
     const map = new Map<string, DayIncome>();
     for (const r of rows) {
