@@ -84,6 +84,14 @@ export class LlmClient {
   }
 
   /**
+   * 共享底层 OpenAI 兼容 client（供 LlmChatService 通用对话复用）。
+   * 未配置/禁用时返回 null，调用方自行降级。
+   */
+  get sharedClient(): OpenAI | null {
+    return this.getClient();
+  }
+
+  /**
    * hybrid 链路：让模型输出市场上下文元参数（非买卖指令）。
    * AI 不输出 BUY/SELL，只输出 regime/aggression/情绪等元参数，由策略执行买卖。
    * 解析失败按 ok=false 处理，调用方回落到中性默认参数，策略继续运行。

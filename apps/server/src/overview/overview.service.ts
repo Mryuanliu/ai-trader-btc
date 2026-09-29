@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   DEFAULT_SYMBOL,
   BalanceRow,
+  DailyRealizedPnl,
   DataSourceStatus,
   ExchangeCode,
   FuturesPositionSnapshot,
@@ -18,17 +19,30 @@ import { FuturesTradingService } from '../futures/futures-trading.service';
 import { LlmClient } from '../agent/llm.client';
 import { PositionService } from '../account/position.service';
 import { BasketService } from '../account/basket.service';
-import { IncomeService } from '../account/income.service';
+import { IncomeService, DayIncome } from '../account/income.service';
 import { LotService } from '../account/lot.service';
 import { TradingService } from '../trading/trading.service';
 import { FuturesPositionService } from '../futures/futures-position.service';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 
-/** 今日 00:00 的时间戳 */
+/** 今日（Asia/Shanghai，与盈亏日历同一自然日定义）的日期串 YYYY-MM-DD */
+function shanghaiTodayStr(ts: number = Date.now()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(ts));
+}
+
+/** 今日（Asia/Shanghai）00:00 的 epoch ms，与 realizedPnlByDay 的按东八区自然日分组对齐 */
 function startOfToday(): number {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+  return Date.parse(`${shanghaiTodayStr()}T00:00:00+08:00`);
+}
+
+/** n 天前那个自然日的 00:00（Asia/Shanghai）epoch ms */
+function startOfDaysAgo(n: number): number {
+  return startOfToday() - (Math.max(1, n) - 1) * 86_400_000;
 }
 
 @Injectable()
@@ -71,16 +85,22 @@ export class OverviewService {
     ]);
     const trips: RoundTrip[] = futuresTrips.trips;
 
-    // 今日盈亏：已实现优先取**交易所资金流水**（REALIZED_PNL + COMMISSION + FUNDING_FEE）——
-    // 这才是账户真实到账的盈亏，按成交算会漏掉资金费（持仓费用）
-    const incomeToday = await this.income
-      .summary({ from: new Date(startOfToday()) })
-      .catch(() => null);
+    // 盈亏日历（近 91 天）统一为「真·净盈亏」：优先取交易所流水当日净额
+    // （REALIZED_PNL + COMMISSION + FUNDING_FEE + OTHER，按上海自然日）——这才是账户真实
+    // 到账且按成交发生日正确归因的费用。仅当该日 income 未回报 REALIZED_PNL（老数据/
+    // 首次同步前）才回退到 Lot 双边费净已实现 + 当日资金费。
+    // 头部「今日已实现」直接取日历今日值 → 二者按构造恒等，杜绝口径分叉。
+    const [pnlCalendar, incomeToday] = await Promise.all([
+      this.buildPnlCalendar(new Date(startOfDaysAgo(91))),
+      this.income.summary({ from: new Date(startOfToday()) }).catch(() => null),
+    ]);
+    const realizedPnlToday =
+      pnlCalendar.find((r) => r.date === shanghaiTodayStr())?.realizedPnl ?? 0;
     const pnlBreakdown = buildPnlBreakdown({
-      trips,
+      realizedPnlToday,
       fillCount: futuresTrips.fillCount,
       futuresPositions,
-      incomeToday,
+      incomeCount: incomeToday?.count ?? 0,
     });
     const pnlByOrder = buildPnlByOrder(trips);
 
@@ -115,10 +135,6 @@ export class OverviewService {
 
     const newsResult = await this.news.list({ pageSize: 8 });
     const keywordTrends = await this.news.keywordTrends(10);
-
-    // 盈亏日历：近 13 周（~91 天）每日已实现盈亏，供首页日历图热热力使用。
-    // 取已平仓 Lot 按日聚合（不依赖 income，demo 环境 income 不回报 REALIZED_PNL）。
-    const pnlCalendar = await this.lots.realizedPnlByDay(91).catch(() => []);
 
     const usdtValue = balances.reduce((acc, r) => acc + r.usdtValue, 0);
     // 起始权益 = 当前权益 − 今日盈亏，用于把盈亏换算成收益率；
@@ -233,6 +249,17 @@ export class OverviewService {
     }
   }
 
+  /**
+   * 盈亏日历（统一口径）：合并逻辑见 mergePnlCalendar，数据取自 Lot 按日聚合与 income 按日分类汇总。
+   */
+  private async buildPnlCalendar(since: Date): Promise<DailyRealizedPnl[]> {
+    const [lotsRows, incomeRows] = await Promise.all([
+      this.lots.realizedPnlByDay(91).catch(() => [] as DailyRealizedPnl[]),
+      this.income.dailySummaryByDay(since).catch(() => [] as DayIncome[]),
+    ]);
+    return mergePnlCalendar(lotsRows, incomeRows);
+  }
+
   private async dataSources(
     balanceSource: 'exchange' | 'virtual',
   ): Promise<DataSourceStatus[]> {
@@ -295,62 +322,64 @@ export class OverviewService {
 }
 
 /**
- * 今日盈亏 = 已实现（今日平仓）+ 浮动（合约持仓，交易所 unrealizedProfit）。
+ * 今日盈亏 = 已实现 + 浮动（合约持仓，交易所 unrealizedProfit）。
  *
  * 口径要点：
- * - **已实现优先取交易所资金流水**（`REALIZED_PNL + COMMISSION + FUNDING_FEE`）：
- *   这才是账户真实到账的盈亏——只按成交算会漏掉资金费（每 8 小时独立结算、
- *   不产生成交），导致本地盈亏与账户实际变动对不上。
- *   流水数据缺失时（首次同步前）回退到回合口径（已扣双边手续费）。
- * - 合约浮动取交易所 positionRisk 的 unrealizedProfit
- * - hasBaseline：既无成交也无持仓时，盈亏没有数据支撑，前端应展示 `--` 而非 0
+ * - `realizedPnlToday` 由上层从「盈亏日历今日值」传入——日历已按统一规则
+ *   （优先交易所流水净额、该日无 REALIZED_PNL 才回退 Lot）算出，与头部 KPI 同源。
+ * - 合约浮动取交易所 positionRisk 的 unrealizedProfit。
+ * - hasBaseline：既无成交也无持仓文无流水时，盈亏无数据支撑，前端应展示 `--` 而非 0。
  */
 export function buildPnlBreakdown(input: {
-  trips: RoundTrip[];
+  /** 今日已实现净盈亏（与盈亏日历今日值同源） */
+  realizedPnlToday: number;
   fillCount: number;
   futuresPositions: FuturesPositionSnapshot[];
-  /** 今日资金流水汇总（交易所权威口径）；未同步到数据时传 null */
-  incomeToday?: {
-    realizedPnl: number;
-    /** REALIZED_PNL 流水条数：demo/testnet 恒为 0（交易所不回报已实现） */
-    realizedCount: number;
-    commission: number;
-    fundingFee: number;
-    other: number;
-    net: number;
-    count: number;
-  } | null;
+  /** 今日流水条数，仅用于 hasBaseline 判定 */
+  incomeCount: number;
 }): {
   realizedPnlToday: number;
   unrealizedPnlToday: number;
   pnlToday: number;
   hasBaseline: boolean;
 } {
-  const todayStart = startOfToday();
-
-  // 只有当交易所流水**真的回报了 REALIZED_PNL** 时，才整体以 income.net 为已实现权威。
-  // demo/testnet 的 income 只有 COMMISSION/FUNDING_FEE、没有 REALIZED_PNL，
-  // 此时 income.net 会退化成「只剩手续费」——必须回退到按成交回合推导的价格盈亏
-  // （trips.netPnl 已扣双边手续费），再补上流水里的资金费。
-  const income = input.incomeToday;
-  const usingIncome = (income?.realizedCount ?? 0) > 0;
-  const tripsRealizedToday = input.trips
-    .filter((t) => t.closedAt >= todayStart)
-    .reduce((acc, t) => acc + t.netPnl, 0);
-  const realizedPnlToday = usingIncome
-    ? income!.net
-    : tripsRealizedToday + (income?.fundingFee ?? 0);
-
+  const realizedPnlToday = input.realizedPnlToday;
   const unrealizedPnlToday = input.futuresPositions.reduce((acc, p) => acc + p.unrealizedPnl, 0);
-
   const holdingQty = input.futuresPositions.reduce((acc, p) => acc + Math.abs(p.quantity), 0);
 
   return {
     realizedPnlToday: Number(realizedPnlToday.toFixed(8)),
     unrealizedPnlToday: Number(unrealizedPnlToday.toFixed(8)),
     pnlToday: Number((realizedPnlToday + unrealizedPnlToday).toFixed(8)),
-    hasBaseline: input.fillCount > 0 || holdingQty > 0 || (income?.count ?? 0) > 0,
+    hasBaseline: input.fillCount > 0 || holdingQty > 0 || input.incomeCount > 0,
   };
+}
+
+/**
+ * 盈亏日历逐日合并：优先用交易所流水净额（权威，且费用按成交发生日正确归因），
+ * 该日未回报 REALIZED_PNL（demo/testnet 常态）时才回退到 Lot 双边费净已实现 + 当日资金费。
+ *
+ * 回退侧为何要补资金费：Lot 只由成交推导，而 funding 每 8 小时独立结算不产生成交。
+ * 为何不反过来优先 Lot：跨日持仓的 Lot 会把开仓侧佣金也记到平仓日，与当日佣金重复计费。
+ */
+export function mergePnlCalendar(
+  lotsRows: DailyRealizedPnl[],
+  incomeRows: DayIncome[],
+): DailyRealizedPnl[] {
+  const lotsMap = new Map<string, DailyRealizedPnl>();
+  for (const r of lotsRows) lotsMap.set(r.date, r);
+  const incMap = new Map<string, DayIncome>();
+  for (const r of incomeRows) incMap.set(r.date, r);
+
+  const dates = [...new Set([...lotsMap.keys(), ...incMap.keys()])].sort();
+  return dates.map((date) => {
+    const inc = incMap.get(date);
+    const lot = lotsMap.get(date);
+    const realizedPnl =
+      inc && inc.realizedCount > 0 ? inc.net : (lot?.realizedPnl ?? 0) + (inc?.fundingFee ?? 0);
+    const trades = lot?.trades ?? inc?.fills ?? 0;
+    return { date, realizedPnl: Number(realizedPnl.toFixed(8)), trades };
+  });
 }
 
 /** 平仓订单 ID → 该回合的净盈亏，供近期订单逐行标注（开仓单不在表内） */

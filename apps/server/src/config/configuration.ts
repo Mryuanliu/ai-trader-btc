@@ -25,6 +25,14 @@ export interface AppEnv {
   LLM_TEMPERATURE: number;
   LLM_MAX_TOKENS: number;
   LLM_TIMEOUT_MS: number;
+  /** 通用对话（LlmChatService）：模型/超时/工具循环上限，与 analyzeContext 分离 */
+  LLM_CHAT_MODEL: string;
+  LLM_CHAT_TIMEOUT_MS: number;
+  LLM_MAX_TOOL_ROUNDS: number;
+  /** MCP server 列表（JSON 数组），留空不启用 */
+  MCP_SERVERS: string;
+  /** Agent Skills 目录，留空自动探测 src/dist 旁挂 skills/ */
+  SKILLS_DIR: string;
   BINANCE_ENABLED: boolean;
   BINANCE_API_KEY: string;
   BINANCE_API_SECRET: string;
@@ -56,6 +64,13 @@ export interface AppEnv {
   FEISHU_APP_SECRET: string;
   /** 推送目标群 chat_id（把机器人拉进群后获取） */
   FEISHU_CHAT_ID: string;
+  // 飞书对话机器人（长连接收消息 + LLM 工具循环），与推送开关独立
+  FEISHU_BOT_ENABLED: boolean;
+  /** 白名单群（逗号分隔 chat_id），留空默认 = FEISHU_CHAT_ID；名单外完全静默 */
+  FEISHU_BOT_ALLOWED_CHATS: string;
+  /** 可选：事件加密/验签（长连接模式下一般不需要） */
+  FEISHU_ENCRYPT_KEY: string;
+  FEISHU_VERIFICATION_TOKEN: string;
 }
 
 export const envSchema = Joi.object({
@@ -84,6 +99,12 @@ export const envSchema = Joi.object({
   LLM_TEMPERATURE: Joi.number().default(0.2),
   LLM_MAX_TOKENS: Joi.number().default(800),
   LLM_TIMEOUT_MS: Joi.number().default(30000),
+
+  LLM_CHAT_MODEL: Joi.string().default('deepseek-chat'),
+  LLM_CHAT_TIMEOUT_MS: Joi.number().default(45000),
+  LLM_MAX_TOOL_ROUNDS: Joi.number().default(6),
+  MCP_SERVERS: Joi.string().allow('').default(''),
+  SKILLS_DIR: Joi.string().allow('').default(''),
 
   BINANCE_ENABLED: Joi.boolean().default(false),
   BINANCE_API_KEY: Joi.string().allow('').default(''),
@@ -121,6 +142,12 @@ export const envSchema = Joi.object({
   FEISHU_APP_ID: Joi.string().allow('').default(''),
   FEISHU_APP_SECRET: Joi.string().allow('').default(''),
   FEISHU_CHAT_ID: Joi.string().allow('').default(''),
+
+  // 对话机器人默认关：需要飞书后台先开启「长连接」并订阅 im.message.receive_v1 再打开
+  FEISHU_BOT_ENABLED: Joi.boolean().default(false),
+  FEISHU_BOT_ALLOWED_CHATS: Joi.string().allow('').default(''),
+  FEISHU_ENCRYPT_KEY: Joi.string().allow('').default(''),
+  FEISHU_VERIFICATION_TOKEN: Joi.string().allow('').default(''),
 }).unknown(true);
 
 export default () => {

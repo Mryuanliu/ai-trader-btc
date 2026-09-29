@@ -56,6 +56,28 @@ export class FeishuService {
   }
 
   /**
+   * 回复指定消息（卡片形式）：对话机器人对来消息的应答通道。
+   * 与 sendCard 同一张卡片组装/截断逻辑，只是 REST 换成 /messages/{id}/reply。
+   */
+  async replyMessage(messageId: string, markdown: string): Promise<void> {
+    if (!this.isConfigured()) return;
+    const token = await this.getTenantToken();
+    const content = JSON.stringify({
+      config: { wide_screen_mode: true },
+      elements: [{ tag: 'markdown', content: this.limitCardContent(markdown) }],
+    });
+    const res = await this.http.post(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+      { msg_type: 'interactive', content },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' } },
+    );
+    const code = res.data?.code;
+    if (code && code !== 0) {
+      throw new Error(`Feishu reply API ${code}: ${res.data?.msg || 'request failed'}`);
+    }
+  }
+
+  /**
    * tenant_access_token 有效期 ~2h,缓存到剩 60s 前复用。
    * 并发去重:同一时刻多次调用共享一次 fetch。
    */

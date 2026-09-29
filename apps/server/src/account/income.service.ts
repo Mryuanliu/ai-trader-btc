@@ -32,6 +32,22 @@ export interface IncomeSummary {
   count: number;
 }
 
+/** 某一日的交易所资金流水分类汇总（按上海自然日） */
+export interface DayIncome {
+  /** YYYY-MM-DD（Asia/Shanghai） */
+  date: string;
+  realizedPnl: number;
+  /** REALIZED_PNL 流水条数：demo/testnet 常为 0（交易所不回报已实现） */
+  realizedCount: number;
+  commission: number;
+  fundingFee: number;
+  other: number;
+  /** 当日净额 = 以上之和（账户真实到账盈亏） */
+  net: number;
+  /** 参与汇总的流水条数 */
+  fills: number;
+}
+
 /**
  * 交易所资金流水服务。
  *
@@ -149,5 +165,44 @@ export class IncomeService {
   async fundingFeeBetween(symbol: string, from: Date, to: Date): Promise<number> {
     const s = await this.summary({ symbol, from, to });
     return Number(s.fundingFee.toFixed(8));
+  }
+
+  /**
+   * 按自然日（Asia/Shanghai）聚合交易所流水净额，供盈亏日历取权威口径。
+   *
+   * 与 `summary` 同一分类逻辑，只是多一层 `date_trunc('day', time AT TIME ZONE 'Asia/Shanghai')`。
+   * 注：`realizedCount` 用于上层判定该日是否真的回报了 REALIZED_PNL（demo 常为 0）。
+   */
+  async dailySummaryByDay(since: Date): Promise<DayIncome[]> {
+    const rows = await this.repo
+      .createQueryBuilder('i')
+      .select(`to_char(date_trunc('day', i.time AT TIME ZONE 'Asia/Shanghai'), 'YYYY-MM-DD')`, 'date')
+      .addSelect('i.incomeType', 'type')
+      .addSelect('SUM(i.amount)', 'total')
+      .addSelect('COUNT(*)', 'cnt')
+      .where('i.time >= :since', { since })
+      .groupBy('1')
+      .addGroupBy('i.incomeType')
+      .getRawMany<{ date: string; type: string; total: string; cnt: string }>();
+
+    const map = new Map<string, DayIncome>();
+    for (const r of rows) {
+      let d = map.get(r.date);
+      if (!d) {
+        d = { date: r.date, realizedPnl: 0, realizedCount: 0, commission: 0, fundingFee: 0, other: 0, net: 0, fills: 0 };
+        map.set(r.date, d);
+      }
+      const total = Number(r.total) || 0;
+      const cnt = Number(r.cnt) || 0;
+      if (r.type === 'REALIZED_PNL') {
+        d.realizedPnl += total;
+        d.realizedCount += cnt;
+      } else if (r.type === 'COMMISSION') d.commission += total;
+      else if (r.type === 'FUNDING_FEE') d.fundingFee += total;
+      else d.other += total;
+      d.net = d.realizedPnl + d.commission + d.fundingFee + d.other;
+      d.fills += cnt;
+    }
+    return [...map.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
   }
 }
