@@ -157,6 +157,36 @@ export function computeFuturesOrderQty(input: FuturesSizingInput): FuturesSizing
 // 下单失败统一由交易所错误与前置校验（最小名义/数量精度）表达。
 
 /**
+ * 平台侧熔断保护配置（D4）。
+ *
+ * 这是平台**唯一**的风控类能力，但范围严格受限：命中判据时只调用
+ * `stopInstance` 停掉实例（撤挂单 + 清运行意图），**绝不自动平仓**、不碰
+ * 下单/仓位/出场逻辑——策略自治不变。默认 `enabled:false`，需运营显式开启。
+ *
+ * 判据以「篮子（一轮建仓→全部了结）」为最小评价单元，与绩效口径一致。
+ */
+export interface ProtectionsConfig {
+  /** 熔断总开关：默认关（平台默认不干预） */
+  enabled: boolean;
+  /** 连续亏损篮数达此值即停实例（尾部连续，≥1） */
+  maxConsecutiveLosses: number;
+  /** 已实现权益相对历史峰值回撤百分比达此值即停实例（>0） */
+  maxDrawdownPct: number;
+  /** 回撤基准资金（USDT）：抬高峰值下限，规避累计权益为负时的除零/口径失真 */
+  capitalBaseUsdt: number;
+  /** 统计窗口篮数（0=全部 since 实例首启） */
+  lookbackBaskets: number;
+}
+
+export const DEFAULT_PROTECTIONS: ProtectionsConfig = {
+  enabled: false,
+  maxConsecutiveLosses: 8,
+  maxDrawdownPct: 15,
+  capitalBaseUsdt: 10_000,
+  lookbackBaskets: 0,
+};
+
+/**
  * 合约链路配置。
  *
  * 策略托管平台定位下，这里只保留**平台自身需要**的东西：
@@ -174,6 +204,8 @@ export interface FuturesAgentConfigShape {
   leverage: number;
   /** 保证金模式，默认逐仓（单仓风险隔离） */
   marginType: MarginType;
+  /** 平台侧熔断保护（D4）：默认关，命中仅停实例不平仓 */
+  protections: ProtectionsConfig;
   /** 最近一次运行时间（ISO 字符串）；尚未运行过为 null */
   lastRunAt: string | null;
 }
@@ -187,6 +219,7 @@ export const DEFAULT_FUTURES_AGENT_CONFIG: FuturesAgentConfigShape = {
   // 平台不设上限——用多少由策略自己决定（定位是策略托管平台）。
   leverage: 5,
   marginType: 'isolated',
+  protections: { ...DEFAULT_PROTECTIONS },
   lastRunAt: null,
 };
 

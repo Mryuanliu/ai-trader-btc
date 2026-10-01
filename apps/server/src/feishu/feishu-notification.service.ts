@@ -6,6 +6,7 @@ import {
   EventBusService,
   LotClosedEvent,
   LotOpenedEvent,
+  ProtectionTrippedEvent,
 } from '../common/events';
 import { FeishuService } from './feishu.service';
 
@@ -50,6 +51,11 @@ export class FeishuNotificationService implements OnModuleInit {
       if (e.mode === 'dry_run') return;
       this.push(this.formatBasket(e), '整轮了结');
     });
+    // 熔断停实例是低频且关键的平台安全事件，各模式（含 dry_run）都推——
+    // 运营必须第一时间知道「哪个实例被兜底停掉了、持仓需手动处理」。
+    this.events.on$('protectionTripped').subscribe((e) => {
+      this.push(this.formatProtection(e), '熔断停实例');
+    });
 
     this.logger.log(`飞书交易通知已启用 -> chat ${chatId}`);
   }
@@ -83,6 +89,14 @@ export class FeishuNotificationService implements OnModuleInit {
       `【整轮了结】${e.code} ${e.symbol} ${dirLabel(e.direction)}`,
       `层数 ${e.layerCount} · 整体净盈亏 ${signed(e.realizedPnl)} USDT (${pct})`,
       `手续费 ${e.feeTotal.toFixed(2)} · 资金费 ${e.fundingFee.toFixed(2)} · ${e.mode}`,
+    ].join('\n');
+  }
+
+  formatProtection(e: ProtectionTrippedEvent): string {
+    return [
+      `⚠️【熔断已停实例】${e.strategyName} @ ${e.symbol}`,
+      `原因：${e.reason}（连亏 ${e.consecutiveLosses} 笔 / 回撤 ${e.drawdownPct.toFixed(2)}%）`,
+      `实例已停止产生新动作 · 撤未成交挂单 · 持仓保留需手动处理 · ${fmtTime(e.ts)}`,
     ].join('\n');
   }
 }

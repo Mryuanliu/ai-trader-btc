@@ -3,6 +3,7 @@ import type { TradingStrategy } from '../strategy/types';
 import { TrendFollowingStrategy } from '../strategy/trend-following.strategy';
 import { MartingaleGridStrategy } from '../strategy/martingale-grid.strategy';
 import { DonchianBreakoutStrategy } from '../strategy/donchian-breakout.strategy';
+import { MeanReversionStrategy } from '../strategy/mean-reversion.strategy';
 
 /**
  * 回测可装配的策略工厂（**单一来源**）。
@@ -19,6 +20,7 @@ export const STRATEGY_REGISTRY: Record<string, () => TradingStrategy> = {
   trend_following: () => new TrendFollowingStrategy(),
   martingale_grid: () => new MartingaleGridStrategy(),
   donchian_breakout: () => new DonchianBreakoutStrategy(),
+  mean_reversion: () => new MeanReversionStrategy(),
 };
 
 export function createStrategy(name: string): TradingStrategy {

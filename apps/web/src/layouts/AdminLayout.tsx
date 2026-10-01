@@ -4,6 +4,7 @@ import { Layout, Menu, Button, Tooltip, Badge } from 'antd';
 import {
   DashboardOutlined,
   ThunderboltOutlined,
+  SafetyCertificateOutlined,
   ExperimentOutlined,
   RadarChartOutlined,
   ReadOutlined,
@@ -25,6 +26,7 @@ const { Sider, Header, Content } = Layout;
 const MENU = [
   { key: '/admin', icon: <DashboardOutlined />, label: '总览看板' },
   { key: '/admin/strategy', icon: <ThunderboltOutlined />, label: '策略管理' },
+  { key: '/admin/strategy/governance', icon: <SafetyCertificateOutlined />, label: '上架治理' },
   { key: '/admin/backtest', icon: <ExperimentOutlined />, label: '回测台' },
   { key: '/admin/ai-market', icon: <RadarChartOutlined />, label: 'AI 行情' },
   { key: '/admin/futures', icon: <FundOutlined />, label: '合约面板' },

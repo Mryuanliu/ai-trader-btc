@@ -20,6 +20,7 @@ import type {
   OrderDTO,
   OverviewDTO,
   PageResult,
+  SetEnabledResult,
   StrategyDescriptor,
   StrategyPerformance,
   StrategyRunStatus,
@@ -381,10 +382,37 @@ export function useLogin() {
 // ---------------------------------------------------------------- 策略托管
 
 /** 策略合集（策略卡片页） */
-export function useStrategies() {
+export function useStrategies(all = false) {
   return useQuery<StrategyDescriptor[]>({
-    queryKey: ['strategies'],
-    queryFn: () => http.get('/strategy'),
+    queryKey: ['strategies', all],
+    queryFn: () => http.get('/strategy', { params: all ? { all: 1 } : undefined }),
+  });
+}
+
+/**
+ * 上/下架策略（闸门上架闭环）。
+ *
+ * - 不带 reason：正常上/下架，闸门未达时后端返回 `gated:true` + gate（不抛错）
+ * - 带 forceOverrideReason：强推上架并留痕
+ */
+export function useSetStrategyEnabled() {
+  const qc = useQueryClient();
+  return useMutation<
+    SetEnabledResult,
+    Error,
+    { name: string; enabled: boolean; forceOverrideReason?: string }
+  >({
+    mutationFn: ({ name, enabled, forceOverrideReason }) =>
+      http.post(`/strategy/${encodeURIComponent(name)}/enabled`, {
+        enabled,
+        ...(forceOverrideReason ? { forceOverride: { reason: forceOverrideReason } } : {}),
+      }),
+    onSuccess: (r) => {
+      // 仅在真正改盘成功时刷新列表（gated 拦截不改盘）
+      if (r.ok) {
+        void qc.invalidateQueries({ queryKey: ['strategies'] });
+      }
+    },
   });
 }
 

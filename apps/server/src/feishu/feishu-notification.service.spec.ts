@@ -58,6 +58,7 @@ const basket: BasketClosedEvent = {
   returnPct: 0.004,
   feeTotal: 6.64,
   fundingFee: 0,
+  strategyInstanceId: 'martingale_grid:BTCUSDT',
   mode: 'testnet',
   ts: Date.now(),
 };

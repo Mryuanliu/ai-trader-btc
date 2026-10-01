@@ -1,4 +1,4 @@
-import { DEFAULT_FUTURES_AGENT_CONFIG, MarginType, RunMode } from '@ai-trader/shared';
+import { DEFAULT_FUTURES_AGENT_CONFIG, MarginType, ProtectionsConfig, RunMode } from '@ai-trader/shared';
 import {
   Column,
   CreateDateColumn,
@@ -48,6 +48,15 @@ export class FuturesAgentConfigEntity {
   /** 保证金模式：isolated 逐仓（默认）/ cross 全仓 */
   @Column({ type: 'varchar', length: 16, default: DEFAULT_FUTURES_AGENT_CONFIG.marginType })
   marginType: MarginType;
+
+  /**
+   * 平台侧熔断保护（D4）。
+   *
+   * 可空：历史行为 null，`toShape` 读到 null 时回落 `DEFAULT_PROTECTIONS`（默认关）。
+   * 只存平台兜底阈值，不存策略参数（策略自治与平台兜底分离）。
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  protections: ProtectionsConfig | null;
 
   // ---------------- 运行态 ----------------
   @Column({ type: 'timestamptz', nullable: true })

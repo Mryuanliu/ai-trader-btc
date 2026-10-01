@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { DEFAULT_SYMBOL } from '@ai-trader/shared';
+import type { SetEnabledResult } from '@ai-trader/shared';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 import { StrategyRunner } from './strategy-runner.service';
@@ -24,12 +25,12 @@ export class StrategyController {
   /**
    * 策略合集（卡片页）。
    *
-   * 经 Hub 过滤：只返回**已上架**且**实现存在**的策略——
-   * 下架或缺失实现的不会出现在市场里。
+   * 经 Hub 过滤：默认只返回**已上架**且**实现存在**的策略——下架或缺失实现的不会出现在市场里。
+   * 传 `?all=1` → 返回全部含未上架（治理页用），每条回填 enabled/backtestRef。
    */
   @Get()
-  list() {
-    return this.hub.list();
+  list(@Query('all') all?: string) {
+    return this.hub.list(all === '1');
   }
 
   /** 热重载策略包：重新扫描 strategies/ 目录（上新/下架后不必重启服务） */
@@ -38,19 +39,31 @@ export class StrategyController {
     return this.hub.load();
   }
 
-  /** 上下架：改写 manifest.json 的 enabled 并重载；上架触发闸门 */
+  /**
+   * 上下架：改写 manifest.json 的 enabled 并重载；上架触发闸门。
+   *
+   * 返回语义：
+   * - 成功（ok:true）→ 200
+   * - 闸门未达被拦（gate 存在）→ **200 + gated:true**（非错误，未改盘），带实时三判据供前端弹 override 框
+   * - 真错误（清单缺失 / 写盘失败，无 gate）→ 400
+   */
   @Post(':name/enabled')
   async setEnabled(
     @Param('name') name: string,
     @Body() body: { enabled?: boolean; forceOverride?: { reason: string } },
-  ) {
+  ): Promise<SetEnabledResult> {
     const result = await this.hub.setEnabled(name, body?.enabled !== false, {
       forceOverride: body?.forceOverride,
     });
     if (!result.ok) {
+      // 闸门未达：结构化返回（不抛异常），前端据 gate.passed 决定弹 override
+      if (result.gate) {
+        return { ok: false, gated: true, gate: result.gate, message: result.message };
+      }
+      // 清单缺失 / 写盘失败等真错误：归为 400
       throw new BusinessException('BAD_REQUEST', result.message);
     }
-    return result;
+    return { ok: true, message: result.message };
   }
 
   /** 当前运行状态 */

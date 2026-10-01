@@ -16,6 +16,7 @@ import { BasketService } from '../account/basket.service';
 import { StrategyRegistry } from './strategy-registry.service';
 import { StrategyExecutorService } from './strategy-executor.service';
 import { StrategyInstanceService } from './strategy-instance.service';
+import { ProtectionService, ProtectionVerdict } from './protection.service';
 import type {
   StrategyContext,
   StrategyDescriptor,
@@ -83,9 +84,11 @@ export class StrategyRunner implements OnModuleInit {
     private readonly lots: LotService,
     private readonly baskets: BasketService,
     private readonly instanceService: StrategyInstanceService,
+    private readonly protection: ProtectionService,
     private readonly events: EventBusService,
   ) {
     this.subscribePriceTicks();
+    this.subscribeProtections();
   }
 
   /**
@@ -103,6 +106,54 @@ export class StrategyRunner implements OnModuleInit {
     this.events.on$('price').subscribe(() => {
       if (this.instances.size === 0) return;
       void this.tick().catch((err) => this.logger.warn(`行情驱动 tick 异常: ${err.message}`));
+    });
+  }
+
+  /**
+   * 熔断守卫（D4）：订阅篮子了结事件，按实例归因评估是否触发平台侧兜底。
+   *
+   * 挂载在 `basketClosed` 而非 tick 热循环——篮子首次 OPEN→CLOSED 才是「一笔」的落定，
+   * 每篮查一次库远比每帧查库经济。只对**当前正在运行**的实例评估（多实例隔离），
+   * 命中即调 `tripProtection` 停实例。**不平任何持仓**，沿用 stop 的「持仓保留、需手动处理」语义。
+   */
+  private subscribeProtections(): void {
+    this.events.on$('basketClosed').subscribe((e) => {
+      if (!e.strategyInstanceId) return;
+      if (!this.instances.has(e.strategyInstanceId)) return;
+      void this.evaluateProtection(e.strategyInstanceId).catch((err) =>
+        this.logger.warn(`熔断评估异常（${e.strategyInstanceId}）: ${(err as Error).message}`),
+      );
+    });
+  }
+
+  /** 评估单实例熔断：命中则停实例并发 protectionTripped 事件 */
+  private async evaluateProtection(instanceId: string): Promise<void> {
+    const verdict = await this.protection.evaluate(instanceId);
+    if (verdict.halt) await this.tripProtection(instanceId, verdict);
+  }
+
+  /**
+   * 触发熔断：停掉实例（撤挂单 + 清 shouldRun，重启不自动拉起）+ 留痕 + 广播。
+   *
+   * 语义与手动停止**完全一致**——断路器保持打开，须用户显式重启，绝不自动复位、绝不平仓。
+   * `strategyName`/`symbol` 在 `stopInstance` 前先从实例表取出（stop 会 delete 该条目）。
+   */
+  private async tripProtection(instanceId: string, verdict: ProtectionVerdict): Promise<void> {
+    const inst = this.instances.get(instanceId);
+    const strategyName = inst?.strategyName ?? instanceId.split(':')[0];
+    const symbol = inst?.symbol ?? instanceId.split(':')[1] ?? '';
+    this.logger.warn(
+      `⚠️ 熔断触发，停实例 ${instanceId}：${verdict.reason}（连亏 ${verdict.consecutiveLosses} 笔 / 回撤 ${verdict.drawdownPct.toFixed(2)}%）——持仓保留，需手动处理`,
+    );
+    await this.stopInstance(instanceId);
+    this.events.emit('protectionTripped', {
+      instanceId,
+      strategyName,
+      symbol,
+      reason: verdict.reason,
+      consecutiveLosses: verdict.consecutiveLosses,
+      drawdownPct: verdict.drawdownPct,
+      ts: Date.now(),
     });
   }
 

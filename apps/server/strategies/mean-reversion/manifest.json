@@ -1,0 +1,162 @@
+{
+  "name": "mean_reversion",
+  "label": "均值回归",
+  "description": "布林带破轨 + RSI-2 超买超卖双确认入场，仅在震荡 regime（低趋势强度）启用；出场走回归中轨止盈 + ATR 硬止损 + 时间止损；仓位波动率定标，默认单仓不摊平。",
+  "enabled": true,
+  "version": "1.0.0",
+  "author": "platform-internal",
+  "capabilities": {
+    "timeframes": [
+      "1h",
+      "4h"
+    ],
+    "needsTicker": true,
+    "markets": [
+      "futures"
+    ],
+    "autoExit": true,
+    "suggestedMaxLayers": 1
+  },
+  "riskNotes": [
+    "均值回归与趋势族相反：单边趋势里逆势开仓会被套，靠 regime 门控（趋势市空仓）+ 硬止损缓解",
+    "布林带/RSI 参数强依赖周期：1h/4h 较稳，5m 噪声大易被假信号打脸",
+    "硬止损触发意味着单笔认赔离场（不摊平），连续破位会造成多笔小额亏损叠加",
+    "平台不做任何风控：止损/时间止损由策略参数控制，平台不会代为干预"
+  ],
+  "defaultParams": {
+    "useVolSizing": true,
+    "riskPerTradePct": 0.5,
+    "sizingAtrMult": 1,
+    "maxLeverage": 10,
+    "baseQty": 0.01,
+    "bollingerPeriod": 20,
+    "bollingerK": 2,
+    "rsiPeriod": 2,
+    "rsiBuyMax": 10,
+    "rsiSellMin": 90,
+    "regimeEmaFast": 10,
+    "regimeEmaSlow": 50,
+    "regimeMax": 0.5,
+    "stopAtrMult": 2,
+    "maxHoldBars": 24,
+    "leverage": 10,
+    "atrMinPct": 0,
+    "cooldownSec": 60
+  },
+  "paramSchema": {
+    "type": "object",
+    "properties": {
+      "useVolSizing": {
+        "type": "boolean",
+        "title": "启用波动率定标"
+      },
+      "riskPerTradePct": {
+        "type": "number",
+        "title": "单笔风险预算(%)",
+        "minimum": 0.05,
+        "maximum": 5
+      },
+      "sizingAtrMult": {
+        "type": "number",
+        "title": "定标 ATR 倍数",
+        "minimum": 0.5,
+        "maximum": 5
+      },
+      "maxLeverage": {
+        "type": "integer",
+        "title": "最大杠杆",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "baseQty": {
+        "type": "number",
+        "title": "固定数量(关闭定标时)",
+        "minimum": 0.0001
+      },
+      "bollingerPeriod": {
+        "type": "integer",
+        "title": "布林带周期",
+        "minimum": 5,
+        "maximum": 100
+      },
+      "bollingerK": {
+        "type": "number",
+        "title": "布林带标准差倍数",
+        "minimum": 0.5,
+        "maximum": 4
+      },
+      "rsiPeriod": {
+        "type": "integer",
+        "title": "RSI 周期",
+        "minimum": 1,
+        "maximum": 30
+      },
+      "rsiBuyMax": {
+        "type": "number",
+        "title": "RSI 超卖阈值(LONG)",
+        "minimum": 0,
+        "maximum": 50
+      },
+      "rsiSellMin": {
+        "type": "number",
+        "title": "RSI 超买阈值(SHORT)",
+        "minimum": 50,
+        "maximum": 100
+      },
+      "regimeEmaFast": {
+        "type": "integer",
+        "title": "regime 快 EMA",
+        "minimum": 2,
+        "maximum": 100
+      },
+      "regimeEmaSlow": {
+        "type": "integer",
+        "title": "regime 慢 EMA",
+        "minimum": 5,
+        "maximum": 300
+      },
+      "regimeMax": {
+        "type": "number",
+        "title": "趋势强度上限(|快-慢|/ATR)",
+        "minimum": 0,
+        "maximum": 5
+      },
+      "stopAtrMult": {
+        "type": "number",
+        "title": "硬止损 ATR 倍数",
+        "minimum": 0.5,
+        "maximum": 10
+      },
+      "maxHoldBars": {
+        "type": "integer",
+        "title": "时间止损(根数)",
+        "minimum": 1,
+        "maximum": 10000
+      },
+      "leverage": {
+        "type": "integer",
+        "title": "杠杆(旧)",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "atrMinPct": {
+        "type": "number",
+        "title": "低波过滤阈值(atr/mark)",
+        "minimum": 0,
+        "maximum": 0.2
+      },
+      "cooldownSec": {
+        "type": "integer",
+        "title": "平仓后冷却(秒)",
+        "minimum": 0,
+        "maximum": 3600
+      }
+    }
+  },
+  "backtestRef": {
+    "runId": "7a6edeee-f8c9-45d3-af9b-d4622701f3c8",
+    "dsr": 0.537272,
+    "verdict": "pass",
+    "ts": "2026-10-01T00:43:34.122Z"
+  }
+}

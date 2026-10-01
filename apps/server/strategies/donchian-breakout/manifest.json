@@ -2,7 +2,7 @@
   "name": "donchian_breakout",
   "label": "唐奇安突破",
   "description": "N 根 K 线通道突破入场（Turtle 风格）+ 反向 M 根通道破位出场；仓位走波动率定标，兜底走 ATR 吊灯 + 时间止损。",
-  "enabled": false,
+  "enabled": true,
   "version": "1.0.0",
   "author": "platform-internal",
   "capabilities": {
@@ -25,13 +25,13 @@
   ],
   "defaultParams": {
     "useVolSizing": true,
-    "riskPerTradePct": 0.5,
+    "riskPerTradePct": 0.25,
     "sizingAtrMult": 1,
     "maxLeverage": 10,
     "baseQty": 0.01,
     "breakoutLookbackBars": 20,
-    "exitLookbackBars": 10,
-    "chandelierK": 4,
+    "exitLookbackBars": 15,
+    "chandelierK": 2,
     "maxHoldBars": 240,
     "leverage": 10,
     "atrMinPct": 0,
@@ -111,5 +111,10 @@
       }
     }
   },
-  "backtestRef": null
+  "backtestRef": {
+    "runId": "e2f8a852-a1c0-4074-8cd0-e433340bed7d",
+    "dsr": 0.728532,
+    "verdict": "pass",
+    "ts": "2026-10-01T01:45:42.060Z"
+  }
 }

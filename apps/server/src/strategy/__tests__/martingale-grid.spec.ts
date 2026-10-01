@@ -96,10 +96,11 @@ describe('MartingaleGridStrategy · 参数归一化', () => {
     expect(p.enabledSides).toBe('both'); // 非法枚举回落
   });
 
-  it('空参数使用默认值（每侧 6 层、倍率 1.5）', () => {
+  it('空参数使用默认值（回测台调优后：每侧 4 层、等权倍率 1.0、止盈 1.5%）', () => {
     const p = strategy.normalizeParams(null);
-    expect(p.maxLayersPerSide).toBe(6);
-    expect(p.lotMultiplier).toBe(1.5);
+    expect(p.maxLayersPerSide).toBe(4);
+    expect(p.lotMultiplier).toBe(1);
+    expect(p.basketStartPct).toBe(0.015);
   });
 
   it('策略永不因参数崩溃：字符串/NaN 一律回落', () => {

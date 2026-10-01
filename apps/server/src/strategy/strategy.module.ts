@@ -8,12 +8,14 @@ import { BasketEntity, StrategyInstanceEntity } from '../database/entities';
 import { MartingaleGridStrategy } from './martingale-grid.strategy';
 import { TrendFollowingStrategy } from './trend-following.strategy';
 import { DonchianBreakoutStrategy } from './donchian-breakout.strategy';
+import { MeanReversionStrategy } from './mean-reversion.strategy';
 import { StrategyRegistry } from './strategy-registry.service';
 import { StrategyHub } from './strategy-hub.service';
 import { StrategyInstanceService } from './strategy-instance.service';
 import { StrategyExecutorService } from './strategy-executor.service';
 import { StrategyRunner } from './strategy-runner.service';
 import { PerformanceService } from './performance.service';
+import { ProtectionService } from './protection.service';
 import { StrategyController } from './strategy.controller';
 
 /**
@@ -35,12 +37,14 @@ import { StrategyController } from './strategy.controller';
     MartingaleGridStrategy,
     TrendFollowingStrategy,
     DonchianBreakoutStrategy,
+    MeanReversionStrategy,
     StrategyRegistry,
     StrategyHub,
     StrategyInstanceService,
     StrategyExecutorService,
     StrategyRunner,
     PerformanceService,
+    ProtectionService,
   ],
   controllers: [StrategyController],
   exports: [StrategyRunner, StrategyRegistry, PerformanceService, StrategyHub],

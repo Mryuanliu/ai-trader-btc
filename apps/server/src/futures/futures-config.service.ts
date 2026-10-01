@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DEFAULT_FUTURES_AGENT_CONFIG, FuturesAgentConfigShape, RunMode } from '@ai-trader/shared';
+import { DEFAULT_FUTURES_AGENT_CONFIG, DEFAULT_PROTECTIONS, FuturesAgentConfigShape, ProtectionsConfig, RunMode } from '@ai-trader/shared';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { FuturesAgentConfigEntity } from '../database/entities';
@@ -18,9 +18,27 @@ function isUniqueViolation(err: unknown): boolean {
  * 合约链路配置。
  *
  * 只承载**平台侧参数**（开关 / 交易对 / 运行模式 / 杠杆 / 保证金模式 /
- * 保证金占用比例）。策略参数、出场规则、风控阈值一概不在这里——
- * 那是策略自己的事，平台不干预（策略托管平台定位）。
+ * 保证金占用比例）。策略参数、出场规则一概不在这里——那是策略自己的事，
+ * 平台不干预（策略托管平台定位）。唯一例外是 `protections`（D4 平台侧熔断兜底）：
+ * 它不介入下单/仓位/出场，只在命中判据时停实例，属平台生命周期守卫而非策略风控。
  */
+/** 归一化熔断配置：非法/缺失字段逐项回落默认；夹取到合理区间，保证策略永不因脏配置崩溃 */
+function normalizeProtections(raw?: Partial<ProtectionsConfig> | null): ProtectionsConfig {
+  const src = raw ?? {};
+  const numOr = (v: unknown, d: number): number => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const intOr = (v: unknown, d: number): number => Math.floor(numOr(v, d));
+  return {
+    enabled: typeof src.enabled === 'boolean' ? src.enabled : DEFAULT_PROTECTIONS.enabled,
+    // 连亏笔数：至少 1（0 会「一亏就停」，不符合兜底定位）
+    maxConsecutiveLosses: Math.max(1, intOr(src.maxConsecutiveLosses, DEFAULT_PROTECTIONS.maxConsecutiveLosses)),
+    // 回撤百分比：(0, 100]
+    maxDrawdownPct: Math.min(100, Math.max(0.1, numOr(src.maxDrawdownPct, DEFAULT_PROTECTIONS.maxDrawdownPct))),
+    capitalBaseUsdt: Math.max(1, numOr(src.capitalBaseUsdt, DEFAULT_PROTECTIONS.capitalBaseUsdt)),
+    // 窗口：≥0（0=全部）
+    lookbackBaskets: Math.max(0, intOr(src.lookbackBaskets, DEFAULT_PROTECTIONS.lookbackBaskets)),
+  };
+}
+
 @Injectable()
 export class FuturesConfigService {
   private readonly logger = new Logger(FuturesConfigService.name);
@@ -65,6 +83,7 @@ export class FuturesConfigService {
       // 平台不做杠杆风控：只保证是 >=1 的整数（0/NaN 会导致下单必然失败）
       leverage: Math.max(1, Math.round(Number(entity.leverage) || 1)),
       marginType: entity.marginType === 'cross' ? 'cross' : 'isolated',
+      protections: normalizeProtections(entity.protections),
       lastRunAt: entity.lastRunAt ? entity.lastRunAt.toISOString() : null,
     };
   }
@@ -115,6 +134,7 @@ export class FuturesConfigService {
       'positionPct',
       'leverage',
       'marginType',
+      'protections',
     ];
 
     for (const key of allowed) {
@@ -137,6 +157,11 @@ export class FuturesConfigService {
 
       if (key === 'marginType') {
         row.marginType = value === 'cross' ? 'cross' : 'isolated';
+        continue;
+      }
+
+      if (key === 'protections') {
+        row.protections = normalizeProtections(value as Partial<ProtectionsConfig>);
         continue;
       }
 

@@ -7,6 +7,7 @@ import { AdminLayout } from '@/layouts/AdminLayout';
 import { MobileLayout } from '@/layouts/MobileLayout';
 import { AdminOverview } from '@/pages/admin/AdminOverview';
 import { AdminStrategy } from '@/pages/admin/AdminStrategy';
+import { AdminStrategyGovernance } from '@/pages/admin/AdminStrategyGovernance';
 import { AdminStrategyDetail } from '@/pages/admin/AdminStrategyDetail';
 import { AdminBacktest } from '@/pages/admin/AdminBacktest';
 import { AdminAiMarket } from '@/pages/admin/AdminAiMarket';
@@ -75,6 +76,8 @@ export function AppRoutes() {
       >
         <Route index element={<AdminOverview />} />
         <Route path="strategy" element={<AdminStrategy />} />
+        {/* 静态段 strategy/governance 优先于动态 strategy/:name 匹配（React Router v6 排序） */}
+        <Route path="strategy/governance" element={<AdminStrategyGovernance />} />
         {/* 二级页：运行状态 / 阶梯 / 绩效（列表页只展示策略，详情按递进关系收纳） */}
         <Route path="strategy/:name" element={<AdminStrategyDetail />} />
         <Route path="backtest" element={<AdminBacktest />} />

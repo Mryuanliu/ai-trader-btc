@@ -1,9 +1,49 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import * as path from 'node:path';
 import type { Repository } from 'typeorm';
-import { StrategyHub } from '../strategy-hub.service';
+import { StrategyHub, STRATEGY_MANIFEST_DIR } from '../strategy-hub.service';
 import type { StrategyRegistry } from '../strategy-registry.service';
 import type { BacktestService, GateVerdict } from '../../backtest/backtest.service';
 import type { StrategyDescriptor } from '@ai-trader/shared';
+
+/**
+ * 快照 / 还原真实磁盘清单。
+ *
+ * StrategyHub.setEnabled 会**写真实的 `strategies/<dir>/manifest.json`**，
+ * 而本 spec 的「还原」步骤（`setEnabled(name, true)`）用 mockBacktest 跑闸门，
+ * 反而把 `{runId:'mock',dsr:0.7}` 落盘——每次 `vitest run` 都污染 committed 清单。
+ * beforeAll 记录每个清单原始字节，afterAll 精确写回，保证测试不再脏改磁盘。
+ */
+const STRATEGIES_DIR = STRATEGY_MANIFEST_DIR();
+const snapshot = new Map<string, string>();
+
+function listManifestFiles(): string[] {
+  try {
+    return readdirSync(STRATEGIES_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => path.join(STRATEGIES_DIR, d.name, 'manifest.json'))
+      .filter((p) => {
+        try {
+          readFileSync(p);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+beforeAll(() => {
+  snapshot.clear();
+  for (const p of listManifestFiles()) snapshot.set(p, readFileSync(p, 'utf8'));
+});
+
+afterAll(() => {
+  for (const [p, content] of snapshot) writeFileSync(p, content, 'utf8');
+});
 
 function impl(name: string): StrategyDescriptor {
   return {
@@ -134,6 +174,57 @@ describe('StrategyHub 闸门拒绝上架', () => {
     expect(m?.backtestRef?.verdict).toBe('overfit');
     expect(m?.backtestRef?.overrideReason).toContain('强制上架');
     // 还原（下架并清理）
+    await hub.setEnabled('donchian_breakout', false);
+  });
+});
+
+describe('StrategyHub list 全量视图（治理页用）', () => {
+  it('list() 只含已上架并回填 enabled=true；list(true) 含未上架且回填 enabled=false + backtestRef', async () => {
+    const hub = new StrategyHub(
+      registryWith(['martingale_grid', 'trend_following', 'donchian_breakout']),
+      mockBacktest(),
+    );
+    await hub.load();
+
+    // 先下架 donchian，制造一个「未上架」样本
+    const off = await hub.setEnabled('donchian_breakout', false);
+    expect(off.ok).toBe(true);
+
+    const market = hub.list();
+    const marketNames = market.map((s) => s.name);
+    expect(marketNames).not.toContain('donchian_breakout');
+    // 市场视图每条都回填 enabled=true
+    expect(market.every((s) => s.enabled === true)).toBe(true);
+
+    const all = hub.list(true);
+    const donchian = all.find((s) => s.name === 'donchian_breakout');
+    expect(donchian).toBeDefined();
+    expect(donchian!.enabled).toBe(false);
+    // 下架后 backtestRef 被清空为 null；字段本身必须存在（供前端区分「未记录」）
+    expect(donchian!.backtestRef).toBeNull();
+    // 治理视图包含未上架项，数量不少于市场视图
+    expect(all.length).toBeGreaterThan(market.length);
+
+    // 还原
+    await hub.setEnabled('donchian_breakout', true);
+  });
+
+  it('上架构造后 list(true) 暴露 backtestRef 快照（pass 记录）', async () => {
+    const hub = new StrategyHub(
+      registryWith(['donchian_breakout']),
+      mockBacktest({ passed: true, dsr: 0.68, runId: 'run-42' }),
+    );
+    await hub.load();
+    const on = await hub.setEnabled('donchian_breakout', true);
+    expect(on.ok).toBe(true);
+
+    const item = hub.list(true).find((s) => s.name === 'donchian_breakout');
+    expect(item?.enabled).toBe(true);
+    expect(item?.backtestRef?.verdict).toBe('pass');
+    expect(item?.backtestRef?.dsr).toBeCloseTo(0.68);
+    expect(item?.backtestRef?.runId).toBe('run-42');
+
+    // 还原
     await hub.setEnabled('donchian_breakout', false);
   });
 });

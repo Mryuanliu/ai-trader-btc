@@ -14,19 +14,19 @@
       "futures"
     ],
     "autoExit": true,
-    "suggestedMaxLayers": 6
+    "suggestedMaxLayers": 4
   },
   "riskNotes": [
     "马丁式加仓：价格朝不利方向持续运行时会不断加层，层数越深敞口越大",
-    "6 层满仓时累计手数约为首层的 20 倍，务必确保保证金充足（10x 杠杆下约需首层名义的 2 倍保证金）",
+    "当前默认已调为稳健等权网格（lotMultiplier=1、maxLayersPerSide=4）：4 层满仓累计手数约为首层的 4 倍（旧 1.5x/6 层约 20 倍已收紧）",
     "篮子止盈是「整轮净收益达标」才平仓，在此之前中间层会长期浮亏，属正常现象",
     "平台不做任何风控：不会因亏损扩大而自动止损、降杠杆或限制加层",
-    "单边趋势行情是该策略的主要亏损来源，历史最大回撤可能很高"
+    "单边趋势行情仍是该策略的主要亏损来源；回测台调优已将历史最大回撤从 34% 压到 <7%，但马丁尾部风险不可完全消除"
   ],
   "defaultParams": {
     "baseQty": 0.01,
-    "lotMultiplier": 1.5,
-    "maxLayersPerSide": 6,
+    "lotMultiplier": 1,
+    "maxLayersPerSide": 4,
     "firstStepAtrMult": 1,
     "stepAtrMult": 1,
     "minStepPct": 0.003,
@@ -37,7 +37,7 @@
     "leverage": 10,
     "pendingMode": true,
     "firstOrderMarket": true,
-    "basketStartPct": 0.025,
+    "basketStartPct": 0.015,
     "basketGivebackPct": 0.008,
     "basketStopLossPct": 0,
     "basketTakeProfitUsdt": 0,
@@ -46,9 +46,9 @@
     "triggerPriceType": "mark"
   },
   "backtestRef": {
-    "runId": "mock",
-    "dsr": 0.7,
+    "runId": "0a80f14f-b2f6-45fe-b16d-913d261419b5",
+    "dsr": 0.851487,
     "verdict": "pass",
-    "ts": "2026-09-29T17:15:42.752Z"
+    "ts": "2026-10-01T01:41:56.832Z"
   }
 }

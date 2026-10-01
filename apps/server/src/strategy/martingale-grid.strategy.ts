@@ -40,8 +40,10 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   // 首层 0.01 BTC：测试阶段放大 10 倍，让每轮的盈亏与手续费占比都更接近
   // 真实交易量级（0.001 时手续费占比被放大，盈亏数字也小到看不出规律）
   baseQty: 0.01,
-  lotMultiplier: 1.5,
-  maxLayersPerSide: 6,
+  // 回测台 walk-forward 调优（1h×360d，2026-10-01）：mult 1.5 虽抬升样本内收益，
+  // 但 OOS 衰减、回撤超阀（多重比较陷阱）；mult=1 等权网格 OOS 稳健最优。
+  lotMultiplier: 1.0,
+  maxLayersPerSide: 4,
   firstStepAtrMult: 1.0,
   stepAtrMult: 1.0,
   // 间距下限 = 成本地板：币安合约 taker 往返约 0.1%，间距须远高于它
@@ -63,10 +65,10 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
    * 想完全还原 EA 的话关掉它。
    */
   firstOrderMarket: true,
-  // 止盈启动 2.5%：主流马丁单轮止盈区间是 2%~5%（易投/CSDN 建议 2%-5%），
-  // 原来 1.5% 偏低——一轮赚得太少，扣掉手续费后几乎没剩。
-  // 放大到区间中偏低，兼顾「拿到像样的利润」与「不会久等到不成交」。
-  basketStartPct: 0.025,
+  // 止盈启动 1.5%：回测台证实这口网格的主要风险不是「止盈不够大」而是「止盈太慢→
+  // 深套前无法恢复」。收紧到 1.5%（原 2.5%）让篮子更快落袋、回撤前复位，
+  // 全样本最大回撤从 34% 降到 <7%（代价：单轮收益变小、更依赖频次）。
+  basketStartPct: 0.015,
   // 回撤容忍同步放大：止盈目标变大，追踪的回撤空间也要跟着放宽，
   // 否则刚启动追踪就被一波正常回撤打掉，等于没放大止盈。
   basketGivebackPct: 0.008,

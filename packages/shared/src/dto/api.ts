@@ -17,7 +17,7 @@ import type {
   LotExitReason,
   LotStatus,
 } from '../position';
-import type { StrategyManifest } from '../strategy-sdk';
+import type { StrategyBacktestRef, StrategyManifest } from '../strategy-sdk';
 
 export interface PageResult<T> {
   items: T[];
@@ -203,6 +203,46 @@ export interface StrategyDescriptor {
    * 平台不做风控，但风险必须被看见。缺失时前端应提示该策略未完善元信息。
    */
   manifest?: StrategyManifest;
+  /**
+   * 是否已上架。市场视图（默认）只返回已上架项，此字段恒为 true；
+   * 治理视图（`?all=1`）含未上架策略，据此区分状态。
+   */
+  enabled?: boolean;
+  /**
+   * 上次成功上架写入的闸门快照（DSR/verdict/时间/override 留痕）。
+   * 从未上架或已下架时为 null；缺清单字段时为 undefined。
+   */
+  backtestRef?: StrategyBacktestRef | null;
+}
+
+/**
+ * 闸门判定结论（与后端 `backtest.service.GateVerdict` 对齐）。
+ * 上架动作触发的心检结果：三条硬判据全过才放行。
+ */
+export interface GateVerdict {
+  passed: boolean;
+  /** 未达项说明（放行时为空） */
+  reasons: string[];
+  /** sweep DSR（0~1） */
+  dsr?: number;
+  /** research 样本外拼接 Sharpe */
+  oosSharpe?: number;
+  /** research 样本外最大回撤（%） */
+  oosMaxDD?: number;
+  /** 依据的回测运行 id */
+  runId?: string;
+}
+
+/**
+ * 上下架接口返回契约。
+ * - `ok:true`：已按预期上/下架
+ * - `gated:true`：因闸门未达被拦（非真正错误，**未改盘**），`gate` 带实时三判据供前端弹 override 框
+ */
+export interface SetEnabledResult {
+  ok: boolean;
+  message: string;
+  gated?: boolean;
+  gate?: GateVerdict;
 }
 
 /** 策略运行状态 */

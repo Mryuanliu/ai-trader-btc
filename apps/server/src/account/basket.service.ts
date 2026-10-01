@@ -215,6 +215,7 @@ export class BasketService {
         returnPct: saved.returnPct === null ? null : Number(saved.returnPct),
         feeTotal: Number(saved.feeTotal),
         fundingFee: Number(saved.fundingFee),
+        strategyInstanceId: saved.strategyInstanceId,
         mode: mode ?? 'live',
         ts: Date.now(),
       });

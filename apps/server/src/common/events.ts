@@ -31,6 +31,8 @@ export interface AppEventMap {
   lotClosed: LotClosedEvent;
   /** 篮子整轮了结：一次建仓→全部平仓的周期汇总 */
   basketClosed: BasketClosedEvent;
+  /** 平台侧熔断触发（D4）：实例连亏/回撤达阈被停，持仓保留需人工处理 */
+  protectionTripped: ProtectionTrippedEvent;
 }
 
 export interface LotOpenedEvent {
@@ -71,7 +73,20 @@ export interface BasketClosedEvent {
   returnPct: number | null;
   feeTotal: number;
   fundingFee: number;
+  /** 归属的策略运行实例（D4 熔断据此按实例归因；手动/无归属为 null） */
+  strategyInstanceId: string | null;
   mode: RunMode;
+  ts: number;
+}
+
+export interface ProtectionTrippedEvent {
+  instanceId: string;
+  strategyName: string;
+  symbol: string;
+  /** 触发原因（连亏 N 笔 / 回撤 X%） */
+  reason: string;
+  consecutiveLosses: number;
+  drawdownPct: number;
   ts: number;
 }
 

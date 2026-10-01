@@ -44,6 +44,9 @@ function manifestDir(): string {
   return path.resolve(__dirname, '..', '..', 'strategies');
 }
 
+/** 供测试复用：策略清单目录的绝对路径（与运行时 load/setEnabled 写入的同一目录） */
+export { manifestDir as STRATEGY_MANIFEST_DIR };
+
 /**
  * 策略中心（P1）。
  *
@@ -110,18 +113,22 @@ export class StrategyHub implements OnModuleInit {
   }
 
   /**
-   * 上架列表：只返回「已启用」且「实现存在」的策略。
+   * 上架列表。
    *
-   * 清单优先覆盖代码里的展示文案与默认参数——
-   * 这样运营侧改一句话不必走一次编译发布。
+   * 默认（`includeDisabled=false`）只返回「已启用」且「实现存在」的策略——市场卡片页用。
+   * 传 `true` 返回全部「有清单且有实现」的策略（含未上架）——治理页用，
+   * 每条回填 `enabled` 与 `backtestRef`，供前端展示状态与闸门留痕。
+   *
+   * 清单优先覆盖代码里的展示文案与默认参数——这样运营侧改一句话不必走一次编译发布。
+   * 无清单的策略两者都不进：缺少版本与风险提示不允许出现在市场，也无法被 setEnabled。
    */
-  list(): StrategyDescriptor[] {
+  list(includeDisabled = false): StrategyDescriptor[] {
     return this.registry
       .list()
       .filter((s) => {
         const m = this.manifests.get(s.name);
-        // 没有清单的策略不上架：缺少版本与风险提示不允许出现在市场
-        return m ? m.enabled !== false : false;
+        if (!m) return false;
+        return includeDisabled ? true : m.enabled !== false;
       })
       .map((s) => {
         const m = this.manifests.get(s.name);
@@ -132,6 +139,8 @@ export class StrategyHub implements OnModuleInit {
           description: m.description ?? s.description,
           defaultParams: m.defaultParams ?? s.defaultParams,
           paramSchema: m.paramSchema ?? s.paramSchema,
+          enabled: m.enabled !== false,
+          backtestRef: m.backtestRef ?? null,
           manifest: {
             version: m.version,
             author: m.author,

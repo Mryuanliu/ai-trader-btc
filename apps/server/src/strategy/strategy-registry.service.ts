@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { MartingaleGridStrategy } from './martingale-grid.strategy';
 import { TrendFollowingStrategy } from './trend-following.strategy';
 import { DonchianBreakoutStrategy } from './donchian-breakout.strategy';
+import { MeanReversionStrategy } from './mean-reversion.strategy';
 import type { StrategyDescriptor, TradingStrategy } from './types';
 
 /**
@@ -18,10 +19,12 @@ export class StrategyRegistry {
     martingaleGrid: MartingaleGridStrategy,
     trendFollowing: TrendFollowingStrategy,
     donchianBreakout: DonchianBreakoutStrategy,
+    meanReversion: MeanReversionStrategy,
   ) {
     this.register(martingaleGrid);
     this.register(trendFollowing);
     this.register(donchianBreakout);
+    this.register(meanReversion);
   }
 
   register(strategy: TradingStrategy): void {

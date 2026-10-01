@@ -9,15 +9,17 @@ import type {
 const DEFAULT_PARAMS: Record<string, unknown> = {
   // L1 波动率定标仓位（复用 shared 引擎）
   useVolSizing: true,
-  riskPerTradePct: 0.5,
+  // 回测台 walk-forward 调优（4h×~2y，2026-10-01）：默认参 OOS 回撤 14%超阀，
+  // 降到 riskPerTradePct=0.25 + 紧吊灯止损后 OOS 回撤降到 <7%、Sharpe 转正。
+  riskPerTradePct: 0.25,
   sizingAtrMult: 1,
   maxLeverage: 10,
   baseQty: 0.01,
   // Donchian 通道参数
   breakoutLookbackBars: 20, // 入场通道（Turtle 短周期 20，长周期 55）
-  exitLookbackBars: 10, // 出场通道（反向破位，短于入场通道）
+  exitLookbackBars: 15, // 出场通道（反向破位；调优后略长于原 10，配合紧吊灯斩尾）
   // L3 吊灯 + 时间止损（与 trend_following 同族）
-  chandelierK: 4,
+  chandelierK: 2, // 吊灯止损收紧到 2×ATR（原 4）：快止损斩断假突破的尾部回撤
   maxHoldBars: 240,
   // 兜底杠杆（useVolSizing=false 时用）
   leverage: 10,
