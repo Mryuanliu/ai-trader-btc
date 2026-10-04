@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { DEFAULT_SYMBOL } from '@ai-trader/shared';
-import type { SetEnabledResult } from '@ai-trader/shared';
+import type { SetEnabledResult, Timeframe } from '@ai-trader/shared';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BusinessException } from '../common/business.exception';
 import { StrategyRunner } from './strategy-runner.service';
@@ -87,6 +87,8 @@ export class StrategyController {
       symbol?: string;
       params?: Record<string, unknown>;
       adoptExisting?: boolean;
+      /** 可选：覆盖运行周期；缺省取策略清单 runtimeInterval（再缺省 1m） */
+      interval?: Timeframe;
     },
   ) {
     if (!body?.name) {
@@ -99,13 +101,18 @@ export class StrategyController {
         `策略「${body.name}」未上架或缺少实现，无法启动`,
       );
     }
+    // 有效周期：显式覆盖 > 策略原生周期(manifest) > 1m——确保在调出来的周期上实跑
+    const interval: Timeframe =
+      body.interval ?? this.hub.get(body.name)?.runtimeInterval ?? '1m';
     // 传了 symbol → 启动独立实例（`策略名:交易对`）；没传 → 兼容旧语义（默认币种）
     const result = body.symbol
       ? await this.runner.startInstance(body.name, body.symbol, body.params, {
           adoptExisting: body.adoptExisting === true,
+          interval,
         })
       : await this.runner.start(body.name, body.params, {
           adoptExisting: body.adoptExisting === true,
+          interval,
         });
     if (!result.ok && !result.blockingLots) {
       throw new BusinessException('BAD_REQUEST', result.message);

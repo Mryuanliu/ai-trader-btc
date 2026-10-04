@@ -1,4 +1,4 @@
-import type { BacktestRunKind, Timeframe } from '@ai-trader/shared';
+import type { BacktestRunKind, RegimeSummary, Timeframe } from '@ai-trader/shared';
 import {
   Column,
   CreateDateColumn,
@@ -67,4 +67,28 @@ export class BacktestRunEntity {
   /** Deflated Sharpe（0~1 概率），null 表示该次未算闸门 */
   @Column({ type: 'double precision', nullable: true })
   dsr: number | null;
+
+  /** PBO（回测过拟合概率 0~1，仅 research 产出） */
+  @Column({ type: 'double precision', nullable: true })
+  pbo: number | null;
+
+  /** Monte Carlo block bootstrap 回撤 p95（%，仅 research 产出） */
+  @Column({ type: 'double precision', nullable: true })
+  mcMaxDDp95: number | null;
+
+  /** 参数高原：冠军邻域最大掉幅（%，仅 sweep 产出） */
+  @Column({ type: 'double precision', nullable: true })
+  plateauScore: number | null;
+
+  /** CPCV OOS 夏普分位 [p5,p25,p50,p75,p95]（仅 research 产出） */
+  @Column({ type: 'jsonb', nullable: true })
+  cpcvQuantiles: number[] | null;
+
+  /** regime 分层汇总（仅 research 产出，日线历史不足时 null） */
+  @Column({ type: 'jsonb', nullable: true })
+  regimeSummary: RegimeSummary | null;
+
+  /** 撮合引擎版本（v1=vectorized；P1 起有 event-driven-v2） */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  engineVersion: string | null;
 }

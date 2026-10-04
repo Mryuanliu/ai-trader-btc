@@ -16,6 +16,7 @@ import { StrategyExecutorService } from './strategy-executor.service';
 import { StrategyRunner } from './strategy-runner.service';
 import { PerformanceService } from './performance.service';
 import { ProtectionService } from './protection.service';
+import { TradingJournalService } from './trading-journal.service';
 import { StrategyController } from './strategy.controller';
 
 /**
@@ -45,6 +46,7 @@ import { StrategyController } from './strategy.controller';
     StrategyRunner,
     PerformanceService,
     ProtectionService,
+    TradingJournalService,
   ],
   controllers: [StrategyController],
   exports: [StrategyRunner, StrategyRegistry, PerformanceService, StrategyHub],

@@ -14,6 +14,7 @@
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
     "backtest": "ts-node -r tsconfig-paths/register src/backtest/cli.ts",
+    "pull-history": "ts-node -r tsconfig-paths/register src/backtest/pull/cli.ts",
     "import-klines": "ts-node -r tsconfig-paths/register src/backtest/import-official.ts",
     "test": "vitest run",
     "backfill:fees": "ts-node -r tsconfig-paths/register src/database/backfill-real-fees.ts",

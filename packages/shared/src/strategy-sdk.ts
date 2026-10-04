@@ -83,4 +83,12 @@ export interface StrategyManifest {
    * 无该字段时平台会拒绝无 override 的上架（闸门默认生效）。
    */
   backtestRef?: StrategyBacktestRef | null;
+  /**
+   * 策略原生运行周期（可选，缺省 `1m`）。
+   *
+   * runner 据此喂对应周期 K 线——策略的通道/持仓「根数」语义绑定在该周期上。
+   * 冠军参是在哪个周期调出来的，就该在哪个周期实跑（否则同一参数量纲错位）。
+   * 实例启动时可显式覆盖，覆盖值持久化到 strategy_instances。
+   */
+  runtimeInterval?: Timeframe;
 }

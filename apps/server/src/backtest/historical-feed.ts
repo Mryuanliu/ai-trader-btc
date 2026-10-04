@@ -1,8 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import axios from 'axios';
+import type { DataSource } from 'typeorm';
 import type { Candle, Timeframe } from '@ai-trader/shared';
 import { axiosTransport } from '../common/proxy';
+import { MarketCandleEntity } from '../database/entities/market-candle.entity';
 
 /**
  * 历史 K 线数据源。
@@ -81,7 +83,47 @@ function cachePath(cacheDir: string, symbol: string, interval: string, from: num
 }
 
 /**
- * 回测统一取数入口：file > 缓存 > 联网（并落缓存）。
+ * 从 DB market_candles 读合约 K 线（离线主源，多年 1m 归档灌库后命中此路径）。
+ * 走 (symbol, market, interval, openTime) 唯一索引前缀，按时间升序返回 Candle[]。
+ */
+export async function loadCandlesFromDb(
+  ds: DataSource,
+  symbol: string,
+  interval: Timeframe,
+  from: number,
+  to: number,
+): Promise<Candle[]> {
+  const rows = await ds
+    .getRepository(MarketCandleEntity)
+    .createQueryBuilder('c')
+    .select([
+      'c.openTime AS time',
+      'c.open AS open',
+      'c.high AS high',
+      'c.low AS low',
+      'c.close AS close',
+      'c.volume AS volume',
+    ])
+    .where('c.symbol = :symbol', { symbol })
+    .andWhere('c.market = :market', { market: 'futures' })
+    .andWhere('c.interval = :interval', { interval })
+    .andWhere('c.openTime BETWEEN :from AND :to', { from, to })
+    .orderBy('c.openTime', 'ASC')
+    .getRawMany<{ time: string | number; open: number; high: number; low: number; close: number; volume: number }>();
+  // bigint 列经驱动常回传字符串，统一 Number 化
+  return rows.map((r) => ({
+    time: Number(r.time),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume),
+  }));
+}
+
+/**
+ * 回测统一取数入口：file > 缓存 > DB > 联网（并落缓存）。
+ * 提供 `dataSource` 且 DB 命中区间数据时走离线 DB，多年 1m 归档灌库后 `interval=1m` 免联网。
  */
 export async function loadHistoricalCandles(args: {
   symbol: string;
@@ -90,6 +132,7 @@ export async function loadHistoricalCandles(args: {
   to?: number;
   file?: string;
   cacheDir?: string;
+  dataSource?: DataSource;
 }): Promise<Candle[]> {
   if (args.file) return loadCandlesFromFile(args.file);
 
@@ -100,6 +143,11 @@ export async function loadHistoricalCandles(args: {
   if (cacheDir) {
     const p = cachePath(cacheDir, symbol, interval, from, to);
     if (existsSync(p)) return loadCandlesFromFile(p);
+  }
+
+  if (args.dataSource) {
+    const fromDb = await loadCandlesFromDb(args.dataSource, symbol, interval, from, to);
+    if (fromDb.length > 0) return fromDb; // DB 有数据即返回（离线）；空则回退联网
   }
 
   const candles = await fetchFuturesKlines(symbol, interval, from, to);

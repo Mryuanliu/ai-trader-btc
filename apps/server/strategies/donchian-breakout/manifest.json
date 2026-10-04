@@ -3,6 +3,7 @@
   "label": "唐奇安突破",
   "description": "N 根 K 线通道突破入场（Turtle 风格）+ 反向 M 根通道破位出场；仓位走波动率定标，兜底走 ATR 吊灯 + 时间止损。",
   "enabled": true,
+  "runtimeInterval": "1h",
   "version": "1.0.0",
   "author": "platform-internal",
   "capabilities": {

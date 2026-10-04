@@ -6,8 +6,10 @@ import type {
   OrderStatus,
   OrderType,
   RunMode,
+  Timeframe,
 } from '../types/common';
 import type { MarketPulse, Ticker } from '../types/market';
+import type { GateCriterion } from '../types/backtest';
 import type { NewsItemDTO, KeywordTrend } from '../types/news';
 import type {
   BasketDirection,
@@ -197,6 +199,11 @@ export interface StrategyDescriptor {
   /** 参数 JSON Schema：前端据此动态渲染配置表单 */
   paramSchema: Record<string, unknown>;
   /**
+   * 策略原生运行周期（runner 据此喂 K 线；缺省 `1m`）。
+   * 由清单 `runtimeInterval` 透出，供前端展示与启动时作为周期默认值。
+   */
+  runtimeInterval?: Timeframe;
+  /**
    * 上架元信息（版本 / 能力声明 / 风险提示）。
    *
    * 前端据此展示「谁写的、需要什么数据、有什么风险」——
@@ -231,6 +238,8 @@ export interface GateVerdict {
   oosMaxDD?: number;
   /** 依据的回测运行 id */
   runId?: string;
+  /** 闸门 v2 逐条判据明细（哪条未达 / 哪条待 P1） */
+  criteria?: GateCriterion[];
 }
 
 /**
@@ -253,6 +262,11 @@ export interface StrategyRunStatus {
   label: string | null;
   /** 当前生效参数 */
   params: Record<string, unknown> | null;
+  /**
+   * 当前（首个）实例的实际运行周期——runner 据此喂 K 线。
+   * 便于前端/运维确认策略跑在它被调出来的周期上（如唐奇安=1h）。
+   */
+  interval?: Timeframe;
   startedAt: string | null;
   lastTickAt: string | null;
   /** 最近一次 tick 的错误（无错误为 null） */

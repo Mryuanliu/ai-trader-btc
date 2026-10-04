@@ -6,6 +6,14 @@ import type { BacktestConfig, Candle } from '@ai-trader/shared';
 import type { StrategyContext, StrategyExecutor, TradingStrategy } from '../../strategy/types';
 import { STRATEGY_REGISTRY } from '../strategy-registry';
 import { cpcv } from '../research/cpcv';
+import { computePbo } from '../research/pbo';
+import { blockBootstrapMaxDD } from '../research/monte-carlo';
+import {
+  aggregateDailyCloses,
+  classifyDailyRegimes,
+  regimeSummary,
+  timedReturnsFromEquity,
+} from '../research/regime';
 import {
   deflatedSharpe,
   expectedMaxSharpe,
@@ -133,6 +141,49 @@ describe('CPCV', () => {
   });
 });
 
+describe('PBO / regime / MC 端到端（真实回放造矩阵）', () => {
+  it('computePbo 跑通并给出 [0,1] 概率', async () => {
+    const res = await computePbo(
+      'trend_following',
+      baseConfig(),
+      candles,
+      [
+        { atrPeriod: 10, stopAtrMult: 1.5 },
+        { atrPeriod: 14, stopAtrMult: 2 },
+        { atrPeriod: 20, stopAtrMult: 3 },
+      ],
+      { nSubsets: 6 },
+    );
+    expect(res.pbo).toBeGreaterThanOrEqual(0);
+    expect(res.pbo).toBeLessThanOrEqual(1);
+    expect(res.nConfigs).toBe(3);
+    expect(res.nSubsets).toBe(6);
+    expect(res.subsetBars).toBeGreaterThan(0);
+  });
+
+  it('research 侧二次度量链路：OOS 收益 → MC + regime 分桶不抛错', async () => {
+    const wf = await walkForward('trend_following', baseConfig(), candles, {
+      trainBars: 120,
+      testBars: 60,
+    });
+    const obsReturns = wf.oosEquity
+      .map((p, i, a) => (i > 0 && a[i - 1].equity > 0 ? p.equity / a[i - 1].equity - 1 : null))
+      .filter((x): x is number => x != null);
+    const mc = blockBootstrapMaxDD(obsReturns, { n: 200, block: 20 });
+    expect(mc.maxDD_p95).toBeGreaterThanOrEqual(mc.maxDD_p5);
+
+    const byDay = classifyDailyRegimes(aggregateDailyCloses(candles), {
+      trendWindow: 20,
+      volWindow: 5,
+      volLookback: 30,
+    });
+    const sum = regimeSummary(timedReturnsFromEquity(wf.oosEquity), byDay, '5m');
+    // 该 fixture 日线历史很短，可能 0 覆盖——只要求结构合法、无 NaN 崩溃
+    expect(Number.isNaN(sum.classifiedBars)).toBe(false);
+    expect(sum.buckets.length).toBeLessThanOrEqual(5);
+  });
+});
+
 describe('参数扫描', () => {
   it('笛卡尔积组合数正确、bestIndex 有效、逐组合带 DSR', async () => {
     const res = await runSweep('trend_following', baseConfig(), candles, {
@@ -153,6 +204,28 @@ describe('参数扫描', () => {
       big.b.push(i);
     }
     await expect(runSweep('trend_following', baseConfig(), candles, big)).rejects.toThrow(/上限/);
+  });
+
+  it('开 PBO 时产出 [0,1] 区间内的概率与子集元信息；不开时字段缺省', async () => {
+    const on = await runSweep(
+      'trend_following',
+      baseConfig(),
+      candles,
+      { atrPeriod: [10, 14], stopAtrMult: [1.5, 2] },
+      { pbo: { nSubsets: 8 } },
+    );
+    expect(on.pbo).toBeDefined();
+    expect(on.pbo!.pbo).toBeGreaterThanOrEqual(0);
+    expect(on.pbo!.pbo).toBeLessThanOrEqual(1);
+    expect(on.pbo!.nSubsets).toBe(8);
+    expect(on.pbo!.nConfigs).toBe(4);
+    const off = await runSweep(
+      'trend_following',
+      baseConfig(),
+      candles,
+      { atrPeriod: [10, 14] },
+    );
+    expect(off.pbo).toBeUndefined();
   });
 });
 

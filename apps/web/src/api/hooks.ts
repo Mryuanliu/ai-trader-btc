@@ -574,6 +574,10 @@ export function useBacktestRuns(params: { page?: number; pageSize?: number; stra
   return useQuery<PageResult<BacktestRunSummary>>({
     queryKey: ['backtest-runs', params],
     queryFn: () => http.get('/backtest/runs', { params }),
+    // 跨会话/他端发起的运行不会被本客户端 invalidate 感知：改为每次挂载即重取 + 窗口聚焦重取，
+    // 保证切回历史页/回到本窗口就能看到最新运行（配合 HistoryPanel 的手动「刷新」按钮兜底）。
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 }
 

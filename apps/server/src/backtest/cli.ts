@@ -22,7 +22,14 @@ import { runSweep } from './research/sweep';
 import { deflatedSharpe } from './research/deflated-sharpe';
 import { perBarReturns, sharpePerBar } from './research/stats';
 import { lookaheadCheck } from './research/lookahead-check';
-import type { Candle } from '@ai-trader/shared';
+import { blockBootstrapMaxDD } from './research/monte-carlo';
+import {
+  aggregateDailyCloses,
+  classifyDailyRegimes,
+  regimeSummary,
+  timedReturnsFromEquity,
+} from './research/regime';
+import type { Candle, MonteCarloResult, RegimeSummary as RegimeSummaryT } from '@ai-trader/shared';
 
 function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -57,6 +64,8 @@ interface ResearchBundle {
   cv: Awaited<ReturnType<typeof cpcv>>;
   la: Awaited<ReturnType<typeof lookaheadCheck>>;
   dsr: ReturnType<typeof deflatedSharpe>;
+  mc?: MonteCarloResult;
+  regime?: RegimeSummaryT;
 }
 
 async function runResearchOnce(
@@ -81,7 +90,19 @@ async function runResearchOnce(
     trialSharpes,
     obsReturns,
   });
-  return { whole, wf, cv, la, dsr };
+  // A6 v2 二次度量：Monte Carlo 回撤分布 + regime 分层（与 service 同口径）
+  const mc = obsReturns.length >= 4 ? blockBootstrapMaxDD(obsReturns, {}) : undefined;
+  let regime: RegimeSummaryT | undefined;
+  try {
+    const byDay = classifyDailyRegimes(aggregateDailyCloses(candles), {});
+    if (byDay.size > 0) {
+      const s = regimeSummary(timedReturnsFromEquity(wf.oosEquity), byDay, config.interval);
+      if (s.classifiedBars > 0) regime = s;
+    }
+  } catch {
+    regime = undefined;
+  }
+  return { whole, wf, cv, la, dsr, mc, regime };
 }
 
 /** 将一份 ResearchBundle 缩写成一行文本（--compare 日志展示） */
@@ -128,8 +149,66 @@ async function main(): Promise<void> {
 
   const mode = (args.mode ?? 'single').toLowerCase();
 
+  // —— 可选 DB 源：--source db 时 K 线优先从 market_candles 离线读（多年 1m 归档灌库后） ——
+  let dataSource: import('typeorm').DataSource | undefined;
+  if (args.source === 'db') {
+    const { AppDataSource } = await import('../database/data-source');
+    if (!AppDataSource.isInitialized) await AppDataSource.initialize();
+    dataSource = AppDataSource;
+  }
+
+  // —— event-driven-v1：从 DB 读 aggTrades/markPrice/funding，逐笔撮合 ——
+  if (mode === 'event-driven' || mode === 'event') {
+    const { withDataSource } = await import('./pull/history-pull');
+    const { runBacktestEventDriven } = await import('./event-driven/runner');
+    // 预加载 K 线（与 vectorized 同数据源，避免 DB 没同步 market_candles）
+    const edCandles = await loadHistoricalCandles({
+      symbol: config.symbol,
+      interval: config.interval,
+      from: config.from,
+      to: config.to,
+      file: config.file,
+      cacheDir: config.cacheDir,
+      dataSource,
+    });
+    const outFile =
+      args.out ??
+      join(
+        'reports/backtest',
+        `${new Date().toISOString().replace(/[:.]/g, '-')}-${strategyName}-${interval}-event-driven.json`,
+      );
+    mkdirSync(dirname(outFile), { recursive: true });
+    const result = await withDataSource((ds) =>
+      runBacktestEventDriven({
+        ds,
+        strategy: createStrategy(strategyName),
+        config,
+        candles: edCandles,
+        allowBarFallback: args['allow-bar-fallback'] === 'true',
+        maintMarginRatio: args['mmr'] ? Number(args['mmr']) : undefined,
+      }),
+    );
+    writeFileSync(outFile, JSON.stringify(result.report, null, 2));
+    const m = result.report.metrics;
+    const s = result.engineStats;
+    // eslint-disable-next-line no-console
+    console.log(
+      [
+        `event-driven-v1 ${strategyName} @ ${config.symbol} ${config.interval}（${config.from}~${config.to}）`,
+        `事件流：aggTrades=${s.aggTradeCount} markPrice=${s.markPriceCount} funding=${s.fundingEvents} bars=${s.barsProcessed}`,
+        `撮合：openFills=${m.tradeCount} stopTriggers=${s.stopTriggers} liquidations=${s.liquidations}`,
+        `费后总收益 ${m.totalReturnPct}% | 年化 ${m.annualizedReturnPct}% | 回撤 ${m.maxDrawdownPct}%`,
+        `夏普 ${m.sharpeRatio} | 胜率 ${m.winRate} | 盈亏比 ${m.profitFactor}`,
+        `买入持有 ${m.buyHoldReturnPct}% | 超额 ${m.excessVsBuyHoldPct}%`,
+        `费用 ${result.report.costBreakdown.totalFees}U | 滑点 ${result.report.costBreakdown.totalSlippage}U | 资金费 ${result.report.costBreakdown.totalFunding}U`,
+        `报告 → ${outFile}`,
+      ].join('\n'),
+    );
+    return;
+  }
+
   if (mode === 'single') {
-    const result = await runBacktest(createStrategy(strategyName), config);
+    const result = await runBacktest(createStrategy(strategyName), config, dataSource);
     const { report } = result;
     const outFile =
       args.out ??
@@ -156,7 +235,7 @@ async function main(): Promise<void> {
   }
 
   if (mode !== 'single' && mode !== 'research' && mode !== 'compare' && mode !== 'sweep') {
-    throw new Error(`未知 mode：${mode}（可选：single | research | compare | sweep）`);
+    throw new Error(`未知 mode：${mode}（可选：single | research | compare | sweep | event-driven）`);
   }
 
   // research / compare 共用：先一次性加载 candles，后续切窗回放
@@ -167,6 +246,7 @@ async function main(): Promise<void> {
     to: config.to,
     file: config.file,
     cacheDir: config.cacheDir,
+    dataSource,
   });
   const trainBars = Number(args.train ?? 240);
   const testBars = Number(args.test ?? 120);
@@ -228,7 +308,9 @@ async function main(): Promise<void> {
     const gridRaw = args.grid;
     if (!gridRaw) throw new Error('--mode sweep 需提供 --grid \'{"emaFast":[6,9,12],...}\'');
     const grid = JSON.parse(gridRaw) as Record<string, number[]>;
-    const res = await runSweep(strategyName, config, candles, grid);
+    const pboS = args['pbo-s'] ? Number(args['pbo-s']) : undefined;
+    const withPbo = pboS !== undefined || args['pbo'] === 'true';
+    const res = await runSweep(strategyName, config, candles, grid, withPbo ? { pbo: { nSubsets: pboS } } : {});
     const outFile =
       args.out ??
       join(
@@ -256,7 +338,85 @@ async function main(): Promise<void> {
         `网格键：${res.gridKeys.join(', ')}`,
         `最优 index=${res.bestIndex}`,
         ...lines,
+        res.plateau
+          ? `冠军 plateau: passed=${res.plateau.passed} worstNeighborDrop=${res.plateau.worstNeighborDropPct.toFixed(2)}% neighbors=${res.plateau.neighborCount}`
+          : `冠军 plateau: n/a`,
+        res.pbo
+          ? `全组合 CSCV-PBO=${res.pbo.pbo.toFixed(4)} (S=${res.pbo.nSubsets}, N=${res.pbo.nConfigs}, combos=${res.pbo.nCombos})`
+          : withPbo
+            ? `PBO: 未产出（组合<2 或 决策区长度<16）`
+            : `PBO: 未开启（加 --pbo true 或 --pbo-s 16 计算）`,
         `报告 → ${outFile}`,
+      ].join('\n'),
+    );
+    return;
+  }
+
+  // —— event-driven research（轻量 WF + 统计严格性） ——
+  if (args.engine === 'event-driven' || args.engine === 'event') {
+    const { withDataSource: wds } = await import('./pull/history-pull');
+    const { runBacktestEventDriven } = await import('./event-driven/runner');
+    const { approximateWalkForward } = await import('./event-driven/research-bridge');
+    const edResult = await wds((ds) =>
+      runBacktestEventDriven({
+        ds,
+        strategy: createStrategy(strategyName),
+        config,
+        candles,
+        allowBarFallback: args['allow-bar-fallback'] === 'true',
+      }),
+    );
+    const eqCurve = edResult.report.equityCurve;
+    const wfEd = approximateWalkForward(eqCurve, config, {
+      trainBars,
+      testBars,
+      stepBars,
+      warmupBars: config.warmupBars,
+    });
+    // DSR / MC / regime 从近似 WF OOS 段计算
+    const barsPerYearEd = (365 * 86_400_000) / TIMEFRAME_MS[config.interval];
+    const obsReturnsEd = perBarReturns(wfEd.oosEquity.map((p) => p.equity));
+    const trialSharpesEd = wfEd.segments.map((s) => s.oosSharpe / Math.sqrt(barsPerYearEd));
+    const dsrEd = deflatedSharpe({
+      obsSharpe: sharpePerBar(obsReturnsEd),
+      trialSharpes: trialSharpesEd,
+      obsReturns: obsReturnsEd,
+    });
+    const mcEd = obsReturnsEd.length >= 4 ? blockBootstrapMaxDD(obsReturnsEd, {}) : undefined;
+    let regimeEd: RegimeSummaryT | undefined;
+    try {
+      const byDay = classifyDailyRegimes(aggregateDailyCloses(candles), {});
+      if (byDay.size > 0) {
+        const s2 = regimeSummary(timedReturnsFromEquity(wfEd.oosEquity), byDay, config.interval);
+        if (s2.classifiedBars > 0) regimeEd = s2;
+      }
+    } catch { regimeEd = undefined; }
+
+    const outFileEd =
+      args.out ??
+      join(
+        'reports/backtest',
+        `${new Date().toISOString().replace(/[:.]/g, '-')}-${strategyName}-${interval}-event-research.json`,
+      );
+    mkdirSync(dirname(outFileEd), { recursive: true });
+    writeFileSync(
+      outFileEd,
+      JSON.stringify(
+        { engineVersion: 'event-driven-v1', wholeSampleReport: edResult.report, walkForwardApprox: wfEd, deflatedSharpe: dsrEd, monteCarlo: mcEd, regime: regimeEd, engineStats: edResult.engineStats },
+        null, 2,
+      ),
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      [
+        `event-driven-v1 research ${strategyName} @ ${config.symbol} ${config.interval}（${candles.length} bars，${edResult.engineStats.aggTradeCount} aggTrades）`,
+        `WF approx: ${wfEd.segments.length} 窗  IS均 ${wfEd.aggregateIsSharpe} → OOS ${wfEd.aggregateOosSharpe}`,
+        `OOS 收益 ${wfEd.oosTotalReturnPct}% | 回撤 ${wfEd.oosMaxDrawdownPct}%`,
+        `DSR=${dsrEd.dsr.toFixed(4)} passed=${dsrEd.passed}`,
+        mcEd ? `MC maxDD p5/p50/p95 = ${mcEd.maxDD_p5.toFixed(2)}%/${mcEd.maxDD_p50.toFixed(2)}%/${mcEd.maxDD_p95.toFixed(2)}%` : 'MC skip',
+        regimeEd ? `Regime ${regimeEd.regimesCovered}桶 min=${regimeEd.minRegimeSharpe.toFixed(2)}` : 'Regime skip',
+        `整段回测：费后 ${edResult.report.metrics.totalReturnPct}% | 回撤 ${edResult.report.metrics.maxDrawdownPct}% | 笔数 ${edResult.report.metrics.tradeCount}`,
+        `报告 → ${outFileEd}`,
       ].join('\n'),
     );
     return;
@@ -264,7 +424,7 @@ async function main(): Promise<void> {
 
   // —— 单份 research ——
   const bundle = await runResearchOnce(strategyName, config, candles, trainBars, testBars, stepBars, cpcvK, cpcvSize);
-  const { whole, wf, cv, la, dsr } = bundle;
+  const { whole, wf, cv, la, dsr, mc, regime } = bundle;
 
   const outFile =
     args.out ??
@@ -276,7 +436,7 @@ async function main(): Promise<void> {
   writeFileSync(
     outFile,
     JSON.stringify(
-      { wholeSampleReport: whole.report, walkForward: wf, cpcv: cv, deflatedSharpe: dsr, lookahead: la },
+      { wholeSampleReport: whole.report, walkForward: wf, cpcv: cv, deflatedSharpe: dsr, lookahead: la, monteCarlo: mc, regime },
       null,
       2,
     ),
@@ -291,8 +451,16 @@ async function main(): Promise<void> {
       `walk-forward 窗口：train=${trainBars} test=${testBars} → ${wf.segments.length} 窗`,
       `IS 均 sharpe ${wf.aggregateIsSharpe} → OOS 拼接 sharpe ${wf.aggregateOosSharpe}（落差 ${gap.toFixed(2)}）`,
       `OOS 费后收益 ${wf.oosTotalReturnPct}% | 回撤 ${wf.oosMaxDrawdownPct}% | 笔数 ${wf.oosTradeCount}`,
-      `CPCV 组合数 ${cv.nCombos} | mean ${cv.mean.toFixed(2)} | std ${cv.std.toFixed(2)} | 最差 ${cv.min.toFixed(2)}`,
+      `CPCV 组合数 ${cv.nCombos} | mean ${cv.mean.toFixed(2)} | std ${cv.std.toFixed(2)} | 最差 ${cv.min.toFixed(2)} | p5 ${(cv.quantiles[0] ?? 0).toFixed(2)}`,
       `Deflated Sharpe dsr=${dsr.dsr} passed=${dsr.passed}（N=${dsr.nTrials}, T=${dsr.T}, expMax.perBar=${dsr.expectedMaxSharpe.toFixed(4)}）`,
+      mc
+        ? `Monte Carlo maxDD p5/p50/p95 = ${mc.maxDD_p5.toFixed(2)}% / ${mc.maxDD_p50.toFixed(2)}% / ${mc.maxDD_p95.toFixed(2)}%（block=${mc.block}, n=${mc.n}）`
+        : `Monte Carlo 跳过（OOS 收益不足）`,
+      regime
+        ? `Regime 分层（${regime.regimesCovered} 桶，最差 Sharpe ${regime.minRegimeSharpe.toFixed(2)}）：${regime.buckets
+            .map((b) => `${b.regime}=${b.oosSharpe.toFixed(2)}/${b.bars}根`)
+            .join(' ')}`
+        : `Regime 分层跳过（日线历史不足）`,
       `lookahead 自检 ok=${la.ok}${la.messages.length ? ` messages=${JSON.stringify(la.messages)}` : ''}`,
       `报告 → ${outFile}`,
     ].join('\n'),
@@ -320,11 +488,19 @@ function fullPayload(b: ResearchBundle) {
     cpcv: b.cv,
     deflatedSharpe: b.dsr,
     lookahead: b.la,
+    monteCarlo: b.mc,
+    regime: b.regime,
   };
 }
 
-main().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error('回测失败：', (err as Error).message);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    // --source db 会开连接池；跑完显式关闭以免进程挂住
+    const { AppDataSource } = await import('../database/data-source');
+    if (AppDataSource.isInitialized) await AppDataSource.destroy();
+  })
+  .catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('回测失败：', (err as Error).message);
+    process.exit(1);
+  });

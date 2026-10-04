@@ -33,6 +33,7 @@ export class StrategyInstanceService {
     strategyName: string;
     symbol: string;
     params: Record<string, unknown> | null;
+    interval?: string | null;
   }): Promise<StrategyInstanceEntity> {
     const instanceId = StrategyInstanceService.instanceIdOf(input.strategyName, input.symbol);
     let row = await this.repo.findOne({ where: { instanceId } });
@@ -44,6 +45,7 @@ export class StrategyInstanceService {
       });
     }
     row.params = input.params;
+    row.interval = input.interval ?? null;
     row.shouldRun = true;
     row.startedAt = new Date();
     return this.repo.save(row);

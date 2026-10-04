@@ -103,8 +103,13 @@ export interface BacktestReport {
     fundingPctPer8h: number;
     strategyName: string;
     strategyParams: Record<string, unknown>;
-    /** 成交约定：市价/入场次开成交，STOP 高低价触发 */
-    fillConvention: 'next-open';
+    /** 成交约定：
+     * - `next-open`：vectorized——市价在下根 bar 开盘成交，STOP 用高低价单次触发
+     * - `event-driven-v1`：以 aggTrade 为主时间轴，市价在下笔成交撮合、STOP 逐笔触发、
+     *   markPrice/funding 独立事件精确入账（P1a 交付；L2/队列/冲击待 P1b）*/
+    fillConvention: 'next-open' | 'event-driven-v1';
+    /** 撮合引擎版本标识（vectorized 默认 'vectorized-v1'，event-driven 默认 'event-driven-v1'）*/
+    engineVersion?: string;
     generatedAt: string;
   };
   metrics: BacktestMetrics;
@@ -173,6 +178,94 @@ export interface CpcvResult {
 }
 
 /**
+ * PBO（Probability of Backtest Overfitting，Bailey & López de Prado 2014）。
+ *
+ * 用 CSCV（组合对称交叉验证）在「配置 × 时间子集」收益矩阵上衡量：
+ * 样本内被挑为最优的配置，在样本外落到中位数以下的概率。
+ * `pbo` 越低越好（闸门要求 < 0.2）。
+ */
+export interface PboResult {
+  /** 过拟合概率 [0,1] */
+  pbo: number;
+  /** 实际枚举的 CSCV 组合数 C(N,S)（可能被上限采样裁剪） */
+  nCombos: number;
+  /** 每个组合的 λ = ln(ω/(1-ω)) 样本 */
+  lambdas: number[];
+  /** 参与比较的配置数 N */
+  nConfigs: number;
+  /** 时间对称子集数 S */
+  nSubsets: number;
+  /** 每子集bar 数 */
+  subsetBars: number;
+}
+
+/**
+ * Regime 标签：日线趋势方向（close vs SMA200）× 30d 实现波动分位（高/低）。
+ * 趋势不明确或波动居中时归 `neutral`。
+ */
+export type RegimeLabel = 'bull_lowvol' | 'bull_highvol' | 'bear_lowvol' | 'bear_highvol' | 'neutral';
+
+/** 单个 regime 桶的样本外表现 */
+export interface RegimeBucket {
+  regime: RegimeLabel;
+  /** 落在该 regime 的 OOS bar 数 */
+  bars: number;
+  /** 该 regime 子样本年化 OOS 夏普 */
+  oosSharpe: number;
+  /** 该 regime 占全部可归类 OOS bar 的百分比 */
+  weightPct: number;
+}
+
+/**
+ * Regime 分层汇总：闸门要求**每个出现的 regime 桶 OOS 夏普 > -0.3**
+ * （某一市况下巨亏 = 策略只在顺风局有效，不予放行）。
+ */
+export interface RegimeSummary {
+  buckets: RegimeBucket[];
+  /** 有样本覆盖的 regime 数 */
+  regimesCovered: number;
+  /** 各桶 OOS 夏普最小值（闸门判据） */
+  minRegimeSharpe: number;
+  /** 可归类的 OOS bar 数（daily regime 历史不足时为 0 → 闸门跳过该项） */
+  classifiedBars: number;
+}
+
+/**
+ * Monte Carlo block bootstrap 回撤分布（López de Prado Ch.12）。
+ *
+ * 对 OOS 逐根收益做**固定块长**自助重采样（保留序列自相关），
+ * 每次生成一条合成净值曲线并记录最大回撤，得 p5/p50/p95。
+ * 闸门要求 `maxDD_p95 < 10%`。
+ */
+export interface MonteCarloResult {
+  /** 模拟次数 */
+  n: number;
+  /** 块长（bar 数） */
+  block: number;
+  /** 随机种子（确定性可复现） */
+  seed: number;
+  maxDD_p5: number;
+  maxDD_p50: number;
+  maxDD_p95: number;
+}
+
+/**
+ * 参数高原检验：冠军邻域（每维 ±1 step）的夏普掉多少。
+ * 掉幅 > 20% 判「孤峰」（参数过拟合），闸门拒绝。
+ */
+export interface PlateauResult {
+  passed: boolean;
+  /** 冠军 per-bar 夏普 */
+  championSharpe: number;
+  /** 邻居 per-bar 夏普 */
+  neighborSharpes: number[];
+  /** 相对冠军的最大掉幅（%） */
+  worstNeighborDropPct: number;
+  /** 邻居数量（0 = 网格无可比邻居 → 闸门跳过该项） */
+  neighborCount: number;
+}
+
+/**
  * Deflated Sharpe Ratio（Bailey & López de Prado）。
  * 校正「多次试验挑选最优」造成的夏普高估；dsr<0 判定为过拟合。
  */
@@ -192,11 +285,17 @@ export interface DeflatedSharpeResult {
   passed: boolean;
 }
 
-/** 稳健性研究报告：walk-forward + 可选 CPCV + DSR 闸门 */
+/** 稳健性研究报告：walk-forward + CPCV + DSR + PBO / regime 分层 / Monte Carlo 回撤 */
 export interface ResearchResult {
   walkForward: WalkForwardResult;
   cpcv?: CpcvResult;
   deflatedSharpe: DeflatedSharpeResult;
+  /** PBO（需要额外一组配置收益矩阵，未提供网格时缺省） */
+  pbo?: PboResult;
+  /** regime 分层 OOS 表现（日线历史不足时缺省） */
+  regime?: RegimeSummary;
+  /** OOS 收益 block bootstrap 回撤分布 */
+  monteCarlo?: MonteCarloResult;
   /** 闸门结论：'pass' 可上架候选；'overfit' 判过拟合 */
   verdict: 'pass' | 'overfit';
   note: string;
@@ -208,6 +307,8 @@ export interface SweepCell {
   metrics: BacktestMetrics;
   /** 可选：对每组也算 DSR（试验数=组合数） */
   dsr?: DeflatedSharpeResult;
+  /** 该组合的参数高原检验（邻域 sharpe 掉幅） */
+  plateau?: PlateauResult;
 }
 
 /** 参数扫描结果 */
@@ -218,12 +319,37 @@ export interface SweepResult {
   combos: number;
   /** 按 Sharpe 排序后的最优组合下标 */
   bestIndex: number;
+  /** 冠军的参数高原结论（闸门直接读这一项） */
+  plateau?: PlateauResult;
+  /** 全组合 CSCV-PBO：以网格全体当「多重比较」样本，量「挑冠军」这一行为的过拟合概率 */
+  pbo?: PboResult;
 }
 
 /** lookahead 自检结论 */
 export interface LookaheadCheckResult {
   ok: boolean;
   messages: string[];
+}
+
+/**
+ * 闸门（v2）单条判据状态。
+ *
+ * - `pass` / `fail`：已计量并达标 / 未达标（`fail` 阻断放行）
+ * - `skip`：本次运行未产出该度量（如未给 PBO 网格），不阻断但必须留痕
+ * - `pending`：判据依赖尚未落地的能力（如 event-driven v2 撮合引擎），落地前恒为 `pending`
+ */
+export type GateCriterionStatus = 'pass' | 'fail' | 'skip' | 'pending';
+
+export interface GateCriterion {
+  /** 判据 key，如 'pbo' / 'cpcv_p5_sharpe' / 'engine_v2' */
+  key: string;
+  label: string;
+  status: GateCriterionStatus;
+  /** 实测值（skip/pending 时为空） */
+  value?: number;
+  /** 判据阈值描述 */
+  requirement: string;
+  detail?: string;
 }
 
 // ---------------------------------------------------------------- 历史留存 DTO
@@ -247,4 +373,8 @@ export interface BacktestRunSummary {
   sharpe: number | null;
   oosSharpe: number | null;
   dsr: number | null;
+  /** PBO（仅 research 产出时非空，0~1） */
+  pbo?: number | null;
+  /** 撮合引擎版本标识（v1=vectorized；P1 起有 event-driven-v2） */
+  engineVersion?: string;
 }

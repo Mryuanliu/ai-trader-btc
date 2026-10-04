@@ -41,6 +41,14 @@ export class StrategyInstanceEntity {
   @Column({ type: 'jsonb', nullable: true })
   params: Record<string, unknown> | null;
 
+  /**
+   * 本实例的实际运行周期（runner 据此喂 K 线）。
+   * 启动时取「显式覆盖 ?? 清单 runtimeInterval ?? 1m」并持久化，重启沿用。
+   * 旧行为 null（DB_SYNCHRONIZE 自动建列，历史行按 null 回退 1m）。
+   */
+  @Column({ type: 'varchar', length: 8, nullable: true })
+  interval: string | null;
+
   /** 重启后是否应自动恢复 */
   @Column({ type: 'boolean', default: false })
   shouldRun: boolean;

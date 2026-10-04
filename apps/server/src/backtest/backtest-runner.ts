@@ -4,6 +4,7 @@ import {
   TIMEFRAME_MS,
   type Candle,
 } from '@ai-trader/shared';
+import type { DataSource } from 'typeorm';
 import type { StrategyContext, TradingStrategy } from '../strategy/types';
 import { SimBroker } from './sim-broker';
 import { loadHistoricalCandles } from './historical-feed';
@@ -26,11 +27,13 @@ function computeAtr(candles: Candle[]): number {
 }
 
 /**
- * 回测入口：按 config 载入历史 K 线（文件/缓存/联网），再交给 runBacktestOnCandles 回放。
+ * 回测入口：按 config 载入历史 K 线（文件/缓存/DB/联网），再交给 runBacktestOnCandles 回放。
+ * 传入 `dataSource` 时 K 线优先从 DB market_candles 离线读（多年 1m 归档灌库后）。
  */
 export async function runBacktest(
   strategy: TradingStrategy,
   config: BacktestConfig,
+  dataSource?: DataSource,
 ): Promise<BacktestResult> {
   const candles = await loadHistoricalCandles({
     symbol: config.symbol,
@@ -39,6 +42,7 @@ export async function runBacktest(
     to: config.to,
     file: config.file,
     cacheDir: config.cacheDir,
+    dataSource,
   });
   return runBacktestOnCandles(strategy, config, candles);
 }

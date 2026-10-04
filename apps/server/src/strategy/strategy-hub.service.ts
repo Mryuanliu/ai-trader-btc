@@ -139,6 +139,7 @@ export class StrategyHub implements OnModuleInit {
           description: m.description ?? s.description,
           defaultParams: m.defaultParams ?? s.defaultParams,
           paramSchema: m.paramSchema ?? s.paramSchema,
+          runtimeInterval: m.runtimeInterval ?? '1m',
           enabled: m.enabled !== false,
           backtestRef: m.backtestRef ?? null,
           manifest: {

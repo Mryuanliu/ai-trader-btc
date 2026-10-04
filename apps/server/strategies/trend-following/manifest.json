@@ -2,7 +2,7 @@
   "name": "trend_following",
   "label": "趋势跟踪",
   "description": "双均线判定趋势方向，顺势开仓并带固定止盈止损；趋势反转时反手。与马丁网格思路相反——不逆势加仓，靠趋势段获利。",
-  "enabled": true,
+  "enabled": false,
   "version": "1.0.0",
   "author": "platform-internal",
   "capabilities": {
@@ -82,5 +82,6 @@
         "maximum": 3600
       }
     }
-  }
+  },
+  "backtestRef": null
 }

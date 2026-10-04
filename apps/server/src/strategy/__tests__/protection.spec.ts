@@ -189,6 +189,7 @@ describe('StrategyRunner · 熔断接线（basketClosed → stopInstance → pro
     const listOpenOrders = vi.fn(async () => []);
     const markStopped = vi.fn(async () => undefined);
     const noop = () => undefined;
+    const journal = { lifecycle: noop, decision: noop, forgetInstance: noop };
     const runner = new StrategyRunner(
       noop as never, // registry
       noop as never, // executor
@@ -201,6 +202,7 @@ describe('StrategyRunner · 熔断接线（basketClosed → stopInstance → pro
       { markStopped } as never, // instanceService
       protection, // protection
       events, // events
+      journal as never, // journal
     );
     const instances = (runner as unknown as { instances: Map<string, unknown> }).instances;
     if (opts.running) {

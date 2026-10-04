@@ -5,6 +5,7 @@ import type {
   Candle,
   FuturesPositionSnapshot,
   StrategyStartResult,
+  Timeframe,
 } from '@ai-trader/shared';
 import { EventBusService } from '../common/events';
 import { MarketService } from '../market/market.service';
@@ -17,6 +18,7 @@ import { StrategyRegistry } from './strategy-registry.service';
 import { StrategyExecutorService } from './strategy-executor.service';
 import { StrategyInstanceService } from './strategy-instance.service';
 import { ProtectionService, ProtectionVerdict } from './protection.service';
+import { TradingJournalService } from './trading-journal.service';
 import type {
   StrategyContext,
   StrategyDescriptor,
@@ -61,6 +63,8 @@ export class StrategyRunner implements OnModuleInit {
       symbol: string;
       strategy: TradingStrategy;
       params: Record<string, unknown>;
+      /** 本实例运行周期：buildContextFor 据此喂对应周期 K 线 */
+      interval: Timeframe;
       startedAt: Date;
     }
   >();
@@ -86,6 +90,7 @@ export class StrategyRunner implements OnModuleInit {
     private readonly instanceService: StrategyInstanceService,
     private readonly protection: ProtectionService,
     private readonly events: EventBusService,
+    private readonly journal: TradingJournalService,
   ) {
     this.subscribePriceTicks();
     this.subscribeProtections();
@@ -179,7 +184,7 @@ export class StrategyRunner implements OnModuleInit {
   async start(
     name: string,
     rawParams?: Record<string, unknown>,
-    opts?: { adoptExisting?: boolean },
+    opts?: { adoptExisting?: boolean; interval?: Timeframe },
   ): Promise<StrategyStartResult> {
     const symbol = (await this.futuresConfig.get()).symbol;
     return this.startInstance(name, symbol, rawParams, opts);
@@ -196,7 +201,7 @@ export class StrategyRunner implements OnModuleInit {
     name: string,
     symbol: string,
     rawParams?: Record<string, unknown>,
-    opts?: { adoptExisting?: boolean },
+    opts?: { adoptExisting?: boolean; interval?: Timeframe },
   ): Promise<StrategyStartResult> {
     const instanceId = `${name}:${symbol}`;
     const existing = this.instances.get(instanceId);
@@ -287,19 +292,26 @@ export class StrategyRunner implements OnModuleInit {
     }
 
     strategy.onStart?.(params);
+    const interval: Timeframe = opts?.interval ?? '1m';
     this.instances.set(instanceId, {
       instanceId,
       strategyName: name,
       symbol,
       strategy,
       params,
+      interval,
       startedAt: new Date(),
     });
     this.lastError = null;
     // 运行意图持久化到实例表：重启后按 shouldRun 逐个恢复
-    await this.instanceService.markRunning({ strategyName: name, symbol, params });
+    await this.instanceService.markRunning({ strategyName: name, symbol, params, interval });
     this.logger.log(
-      `策略实例已启动：${strategy.label} @ ${symbol}（${JSON.stringify(params)}）`,
+      `策略实例已启动：${strategy.label} @ ${symbol}（周期=${interval}，${JSON.stringify(params)}）`,
+    );
+    this.journal.lifecycle(
+      instanceId,
+      'START',
+      `${strategy.label} @ ${symbol} 周期=${interval} 参=${JSON.stringify(params)}`,
     );
     return {
       ok: true,
@@ -340,6 +352,12 @@ export class StrategyRunner implements OnModuleInit {
       this.logger.log(
         `策略实例已停止：${inst.strategy.label} @ ${inst.symbol}（持仓保留，需手动处理）`,
       );
+      this.journal.lifecycle(
+        instanceId,
+        'STOP',
+        `${inst.strategy.label} @ ${inst.symbol}（持仓保留）`,
+      );
+      this.journal.forgetInstance(instanceId);
       this.instances.delete(instanceId);
     }
     // 清运行意图：停止是用户显式动作，重启后不应自动拉起该实例
@@ -387,7 +405,7 @@ export class StrategyRunner implements OnModuleInit {
         row.strategyName,
         row.symbol,
         row.params ?? undefined,
-        { adoptExisting: true },
+        { adoptExisting: true, interval: (row.interval as Timeframe | null) ?? '1m' },
       );
       if (result.ok) {
         this.logger.log(`服务重启后已自动恢复策略实例：${result.message}`);
@@ -517,6 +535,7 @@ export class StrategyRunner implements OnModuleInit {
       const cfg = await this.futuresConfig.get();
       if (this.lastMode !== null && this.lastMode !== cfg.mode) {
         this.logger.warn(`运行模式由 ${this.lastMode} 变为 ${cfg.mode}，撤销旧挂单以避免对账错乱`);
+        this.journal.lifecycle('-', 'MODE', `运行模式 ${this.lastMode} → ${cfg.mode}，撤销旧挂单`);
         await this.cancelOpenOrdersSafely();
       }
       this.lastMode = cfg.mode;
@@ -526,6 +545,8 @@ export class StrategyRunner implements OnModuleInit {
           const ctx = await this.buildContextFor(inst);
           if (!ctx) continue;
           await inst.strategy.onTick(ctx, this.executorFor(inst.instanceId));
+          // 逐轮回灌策略决策注解（变化才落盘），供日终总结「为什么动/没动」
+          this.journal.decision(inst.instanceId, inst.strategy.getState?.()?.note as string);
         } catch (err) {
           // 实例级隔离：单实例失败不影响其他实例
           this.lastError = `实例 ${inst.instanceId}: ${(err as Error).message}`;
@@ -564,6 +585,7 @@ export class StrategyRunner implements OnModuleInit {
       name: first?.strategy.name ?? null,
       label: first?.strategy.label ?? null,
       params: first?.params ?? null,
+      interval: first?.interval,
       startedAt: first ? first.startedAt.toISOString() : null,
       lastTickAt: this.lastTickAt ? this.lastTickAt.toISOString() : null,
       lastError: this.lastError,
@@ -611,6 +633,7 @@ export class StrategyRunner implements OnModuleInit {
     instanceId: string;
     symbol: string;
     params: Record<string, unknown>;
+    interval: Timeframe;
   }): Promise<StrategyContext | null> {
     const symbol = inst.symbol;
 
@@ -621,7 +644,12 @@ export class StrategyRunner implements OnModuleInit {
       return null;
     }
 
-    const candles: Candle[] = this.market.getCandles(symbol, '1m', CONTEXT_CANDLE_LIMIT);
+    // 按**实例运行周期**喂线：冠军参是在哪个周期调出来的就在哪个周期实跑，
+    // 否则通道/持仓「根数」量纲错位（如 1h 调的 brk=80 喂 1m 会退化成 80 分钟）。
+    // 拉够入场通道根数：max(基础上限, 通道根数+余量)，受 store 各周期保有量自然约束。
+    const brk = Number((inst.params as { breakoutLookbackBars?: number }).breakoutLookbackBars ?? 0);
+    const ctxLimit = Math.max(CONTEXT_CANDLE_LIMIT, brk + 5);
+    const candles: Candle[] = this.market.getCandles(symbol, inst.interval, ctxLimit);
     const [openLots, openOrders, availableMargin, positions, pendingCloseLots] =
       await Promise.all([
         this.lots.listOpen('futures', symbol),

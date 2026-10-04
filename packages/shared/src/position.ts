@@ -20,8 +20,18 @@ export interface PositionFill {
 
 export type LotDirection = 'LONG' | 'SHORT';
 export type LotStatus = 'OPEN' | 'CLOSED' | 'CANCELLED';
-/** 出场原因：信号出场（预留）/止损/止盈/手动/反手解除 */
-export type LotExitReason = 'SIGNAL' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'MANUAL' | 'REVERSE';
+/**
+ * 出场原因：信号出场（预留）/止损/止盈/手动/反手解除/强平（保证金追缴）。
+ * MARGIN_CALL 专指账户 equity 跌破维持保证金被引擎强制平仓，与策略主动 STOP_LOSS 区分开——
+ * 二者归因完全不同（前者=杠杆/风控失效，后者=止损位设计），混记会误导日志诊断。
+ */
+export type LotExitReason =
+  | 'SIGNAL'
+  | 'STOP_LOSS'
+  | 'TAKE_PROFIT'
+  | 'MANUAL'
+  | 'REVERSE'
+  | 'MARGIN_CALL';
 
 // ---------------------------------------------------------------- 篮子（Basket）
 

@@ -11,6 +11,13 @@ import {
   TradeFillEntity,
   UserEntity,
   BacktestRunEntity,
+  MarketAggTradeEntity,
+  MarketFundingRateEntity,
+  MarketMarkPriceEntity,
+  MarketOpenInterestEntity,
+  MarketL2SnapshotEntity,
+  MarketLiquidationEntity,
+  MarketSymbolMetaEntity,
 } from './index';
 import { FeishuMessageReceiptEntity } from '../../feishu/entities/feishu-message-receipt.entity';
 import { FeishuChatSessionEntity } from '../../feishu/entities/feishu-chat-session.entity';
@@ -32,4 +39,11 @@ export const ALL_ENTITIES = [
   FeishuMessageReceiptEntity,
   FeishuChatSessionEntity,
   BacktestRunEntity,
+  MarketAggTradeEntity,
+  MarketFundingRateEntity,
+  MarketMarkPriceEntity,
+  MarketOpenInterestEntity,
+  MarketL2SnapshotEntity,
+  MarketLiquidationEntity,
+  MarketSymbolMetaEntity,
 ];

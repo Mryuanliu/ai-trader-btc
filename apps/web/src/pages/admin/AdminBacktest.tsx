@@ -342,30 +342,42 @@ function ResearchPanel({ r }: { r: ResearchResult }) {
 // ------------------------------------------------------------------ 参数扫描面板
 
 function SweepPanel({ r }: { r: SweepResult }) {
-  const dsrOf = (i: number) => r.cells[i]?.dsr?.dsr;
+  // 稳定行键：按网格键序列化参数（不用数组下标作 rowKey，消除 antd index-deprecation 告警，翻页也不串位）
+  const keyOf = (c: (typeof r.cells)[number]) => r.gridKeys.map((k) => `${k}=${c.params[k]}`).join('|');
+  // 高亮：按「费后收益」列取最高的**有效**组合（笔数>0）——与可见列同源自洽，且避免
+  // 0 笔退化组合（per-bar 夏普=0）反胜负值而被误当冠军。
+  let hiKey = '';
+  let best = Number.NEGATIVE_INFINITY;
+  r.cells.forEach((c) => {
+    if (c.metrics.tradeCount > 0 && c.metrics.totalReturnPct > best) {
+      best = c.metrics.totalReturnPct;
+      hiKey = keyOf(c);
+    }
+  });
   return (
     <div className="space-y-3">
       <div className="text-[12px] text-subtle">
-        共 <b className="text-white">{r.combos}</b> 组参数；高亮行为 per-bar 夏普最优者。DSR 列按「试验数=组合数」校正挑选偏差，&lt; 0.95 视为多重比较的运气。
+        共 <b className="text-white">{r.combos}</b> 组参数；高亮行为「费后收益」最高的有效组合（笔数&gt;0）。DSR 列按「试验数=组合数」校正挑选偏差，&lt; 0.95 视为多重比较的运气。
       </div>
       <Table
         size="small"
-        rowKey={(_, i) => String(i)}
+        rowKey={keyOf}
         dataSource={r.cells}
         pagination={{ pageSize: 12, showSizeChanger: false }}
-        rowClassName={(_, i) => (i === r.bestIndex ? 'bg-btc/10' : '')}
+        rowClassName={(c) => (hiKey && keyOf(c) === hiKey ? 'bg-btc/10' : '')}
         columns={[
           ...r.gridKeys.map((k) => ({
             title: k,
             render: (_: unknown, cell: (typeof r.cells)[number]) => String(cell.params[k]),
           })),
           { title: '费后收益', render: (_: unknown, c: (typeof r.cells)[number]) => formatPct(c.metrics.totalReturnPct) },
+          { title: '笔数', render: (_: unknown, c: (typeof r.cells)[number]) => c.metrics.tradeCount },
           { title: '夏普', render: (_: unknown, c: (typeof r.cells)[number]) => c.metrics.sharpeRatio.toFixed(2) },
           { title: '最大回撤', render: (_: unknown, c: (typeof r.cells)[number]) => formatPct(-c.metrics.maxDrawdownPct) },
           {
             title: 'DSR',
-            render: (_: unknown, c: (typeof r.cells)[number], i: number) => {
-              const d = dsrOf(i);
+            render: (_: unknown, c: (typeof r.cells)[number]) => {
+              const d = c.dsr?.dsr;
               if (d === undefined) return '--';
               return <span className={d >= 0.95 ? 'text-up' : 'text-down'}>{d.toFixed(3)}</span>;
             },
@@ -383,7 +395,17 @@ function HistoryPanel({ onPreview }: { onPreview: (id: string) => void }) {
   const del = useDeleteBacktestRun();
   const KIND_COLOR: Record<string, string> = { single: 'blue', research: 'gold', sweep: 'purple' };
   return (
-    <Table
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[12px] text-subtle">
+          最近 20 条
+          {runs.dataUpdatedAt ? ` · 更新于 ${dayjs(runs.dataUpdatedAt).format('MM-DD HH:mm:ss')}` : ''}
+        </span>
+        <Button size="small" onClick={() => void runs.refetch()} loading={runs.isFetching}>
+          刷新
+        </Button>
+      </div>
+      <Table
       size="small"
       rowKey="id"
       loading={runs.isLoading}
@@ -417,7 +439,8 @@ function HistoryPanel({ onPreview }: { onPreview: (id: string) => void }) {
           ),
         },
       ]}
-    />
+      />
+    </div>
   );
 }
 
