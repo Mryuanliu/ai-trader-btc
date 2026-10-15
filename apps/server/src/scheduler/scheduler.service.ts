@@ -91,9 +91,6 @@ export class SchedulerService {
         );
     }
 
-    // dry-run 的网格挂单需要每 tick 检查触发（否则要等一个对账周期才成交）
-    await this.triggerDryRunOrders();
-
     // 保险丝对账（缺挂/数量漂移/孤儿/账外）：PROTECTION_MODE=off 时 reconcileProtections 立即返回。
     const protectionInterval =
       Number(this.config.get<string>('PROTECTION_RECONCILE_SEC', '300')) * 1000;
@@ -108,20 +105,6 @@ export class SchedulerService {
 
     // 驱动已挂载的策略（无策略时是空操作）
     await this.strategy.tick();
-  }
-
-  /** dry-run 模式：按当前行情模拟触发网格挂单（真实模式由交易所触发） */
-  private async triggerDryRunOrders() {
-    try {
-      const cfg = await this.futuresConfig.get();
-      if (cfg.mode !== 'dry_run') return;
-      const result = await this.futuresTrading.processDryRunGridOrders(cfg.symbol);
-      if (result.triggered > 0) {
-        this.logger.log(`dry-run 网格挂单触发 ${result.triggered} 笔`);
-      }
-    } catch (err) {
-      this.throttledWarn('dry-run-trigger', `dry-run 挂单触发检查异常: ${(err as Error).message}`, 60_000);
-    }
   }
 
   /** 按 key 节流输出告警，避免每 5 秒刷屏 */

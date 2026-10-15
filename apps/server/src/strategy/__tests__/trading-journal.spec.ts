@@ -6,7 +6,7 @@ import { EventBusService } from '../../common/events';
 import { TradingJournalService } from '../trading-journal.service';
 
 /**
- * 每日交易运行日志：验证「按天归档 + 决策去重 + 含 dry_run 成交事件」。
+ * 每日交易运行日志：验证「按天归档 + 决策去重 + 成交事件全模式记录」。
  * 用临时目录跑真实写盘（写队列是链式 promise，await 队尾即全部落定）。
  */
 let dir = '';
@@ -48,7 +48,7 @@ describe('TradingJournalService', () => {
     expect(content).toContain('上破开 LONG');
   });
 
-  it('lotOpened 事件被记录（含 dry_run）', async () => {
+  it('lotOpened 事件被记录（testnet）', async () => {
     const { events, journal } = await makeJournal();
     events.emit('lotOpened', {
       symbol: 'BTCUSDT',
@@ -59,13 +59,13 @@ describe('TradingJournalService', () => {
       fee: 0.04,
       strategyInstanceId: 'donchian_breakout:BTCUSDT',
       source: 'strategy',
-      mode: 'dry_run',
+      mode: 'testnet',
       ts: Date.now(),
     });
     await flush(journal);
 
     const content = await fs.readFile(await onlyLogFile(), 'utf8');
     expect(content).toContain('| OPEN |');
-    expect(content).toContain('dry_run');
+    expect(content).toContain('testnet');
   });
 });

@@ -74,7 +74,7 @@ export class OverviewService {
     const marketPulse = this.market.getMarketPulse(symbol);
     // 当前环境的 REST 校验价：与 WS 实时价同源交叉校验（demo→demo-fapi，实盘→fapi.binance.com）
     const referencePrice = await this.market.getReferencePrice(symbol).catch(() => 0);
-    const { rows: balances, source: balanceSource } = await this.getBalancesSafe(config.mode);
+    const { rows: balances, source: balanceSource } = await this.getBalancesSafe();
     const stats = await this.trading.statsToday();
 
     // 回合盈亏按「全部标的」取：既用于今日已实现盈亏，也用于给近期订单逐行标注，
@@ -191,50 +191,28 @@ export class OverviewService {
   /**
    * 合约账户余额。
    *
-   * 真实模式读合约钱包（币安 fapi account）；dry_run 用合约可用保证金构造单行虚拟 USDT。
-   * 读取失败按空处理不拖垮概览——前端对空 balances 显示 `--`。
+   * 读合约钱包（币安 fapi account）。dry_run 本地模拟模式已于 2026-10-15 移除，
+   * 虚拟余额兜底随之取消——密钥未配置/读取失败按空处理，前端显示 `--`。
    */
-  private async getBalancesSafe(
-    mode: 'dry_run' | 'testnet' | 'live',
-  ): Promise<{ rows: BalanceRow[]; source: 'exchange' | 'virtual' }> {
+  private async getBalancesSafe(): Promise<{ rows: BalanceRow[]; source: 'exchange' }> {
     const now = new Date().toISOString();
     try {
-      if (mode !== 'dry_run') {
-        const adapter = await this.registry.get('binance-futures');
-        if (adapter.hasCredentials) {
-          const rows: BalanceRow[] = (await adapter.getBalances()).map((b) => ({
-            exchange: adapter.code as ExchangeCode,
-            environment: adapter.environment,
-            asset: b.asset,
-            free: b.free,
-            locked: b.locked,
-            total: b.total,
-            usdtValue: b.asset === 'USDT' ? b.total : 0,
-            updatedAt: now,
-          }));
-          if (rows.length > 0) return { rows, source: 'exchange' };
-        }
-      }
-      // dry_run（或交易所读取失败）：合约可用保证金作为虚拟权益展示
-      const margin = await this.futuresTrading.getAvailableMargin();
-      return {
-        rows: [
-          {
-            exchange: 'binance-futures',
-            environment: mode === 'live' ? 'live' : 'testnet',
-            asset: 'USDT',
-            free: margin,
-            locked: 0,
-            total: margin,
-            usdtValue: margin,
-            updatedAt: now,
-          },
-        ],
-        source: 'virtual',
-      };
+      const adapter = await this.registry.get('binance-futures');
+      if (!adapter.hasCredentials) return { rows: [], source: 'exchange' };
+      const rows: BalanceRow[] = (await adapter.getBalances()).map((b) => ({
+        exchange: adapter.code as ExchangeCode,
+        environment: adapter.environment,
+        asset: b.asset,
+        free: b.free,
+        locked: b.locked,
+        total: b.total,
+        usdtValue: b.asset === 'USDT' ? b.total : 0,
+        updatedAt: now,
+      }));
+      return { rows, source: 'exchange' };
     } catch (err) {
       this.logger.warn(`读取合约余额失败，按空处理: ${(err as Error).message}`);
-      return { rows: [], source: 'virtual' };
+      return { rows: [], source: 'exchange' };
     }
   }
 
@@ -260,9 +238,7 @@ export class OverviewService {
     return mergePnlCalendar(lotsRows, incomeRows);
   }
 
-  private async dataSources(
-    balanceSource: 'exchange' | 'virtual',
-  ): Promise<DataSourceStatus[]> {
+  private async dataSources(balanceSource: 'exchange'): Promise<DataSourceStatus[]> {
     const sources: DataSourceStatus[] = [];
 
     const dbStart = Date.now();
@@ -313,8 +289,7 @@ export class OverviewService {
       name: 'balance',
       label: '账户余额',
       ok: true,
-      message:
-        balanceSource === 'exchange' ? '来自合约钱包实时查询' : '使用虚拟保证金（dry-run 模拟）',
+      message: '来自合约钱包实时查询',
     });
 
     return sources;

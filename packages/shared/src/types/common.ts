@@ -61,14 +61,13 @@ export const ENVIRONMENT_LABELS: Record<Environment, string> = {
 };
 
 /**
- * 运行模式：dry_run 只落库不真实发单
- * testnet / live 会真实发单到账户环境对应的主机
+ * 运行模式：testnet / live 都会真实发单到账户环境对应的主机
+ * （dry_run 本地模拟模式已于 2026-10-15 移除——币安测试网即唯一测试环境）
  */
-export const RUN_MODES = ['dry_run', 'testnet', 'live'] as const;
+export const RUN_MODES = ['testnet', 'live'] as const;
 export type RunMode = (typeof RUN_MODES)[number];
 
 export const RUN_MODE_LABELS: Record<RunMode, string> = {
-  dry_run: '模拟撮合',
   testnet: '测试网',
   live: '实盘',
 };

@@ -61,7 +61,7 @@ export class LotService {
     this.logger.log(
       `Lot 建仓 ${order.market} ${direction} ${fill.quantity} ${order.symbol} @ ${fill.price}`,
     );
-    // 开仓成交事件：供飞书等外推通知订阅（mode 决定 dry_run 是否过滤）
+    // 开仓成交事件：供飞书等外推通知订阅（mode 随运行环境记录）
     this.events.emit('lotOpened', {
       symbol: saved.symbol,
       market: saved.market,
@@ -89,7 +89,7 @@ export class LotService {
     closeOrderId: string;
     fill: { price: number; quantity: number; fee: number };
     exitReason: LotExitReason;
-    /** 结算所属运行模式（dry_run/testnet/live）：供通知层过滤 */
+    /** 结算所属运行模式（testnet/live） */
     mode: RunMode;
   }): Promise<PositionLotEntity | null> {
     const { lotId, closeOrderId, fill, exitReason, mode } = params;

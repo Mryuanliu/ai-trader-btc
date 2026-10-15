@@ -20,7 +20,7 @@ export interface AppEnv {
   // 注：LIVE_TRADING_CONFIRM_TOKEN 已移除——实盘二次确认改为前端弹窗
   /**
    * 交易所侧灾难保险丝总开关（见 docs/exchange-protection-orders-plan.md）。
-   * off=全部新路径短路 no-op（默认，与当前 dry_run 行为零差异）；
+   * off=全部新路径短路 no-op（默认，与现有行为零差异）；
    * fixed=开仓时挂一次不移动（Phase 1）；trailing=吊灯同步（Phase 2，后置）。
    */
   PROTECTION_MODE: 'off' | 'fixed' | 'trailing';
@@ -102,7 +102,7 @@ export const envSchema = Joi.object({
   DB_SYNCHRONIZE: Joi.boolean().default(true),
   DB_LOGGING: Joi.boolean().default(false),
 
-  APP_RUN_MODE: Joi.string().valid('dry_run', 'testnet', 'live').default('dry_run'),
+  APP_RUN_MODE: Joi.string().valid('testnet', 'live').default('testnet'),
 
   // 交易所侧灾难保险丝（默认 off：新路径全部短路，不改现有行为）
   PROTECTION_MODE: Joi.string().valid('off', 'fixed', 'trailing').default('off'),

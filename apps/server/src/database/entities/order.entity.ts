@@ -44,7 +44,7 @@ export class OrderEntity {
   @Column({ type: 'varchar', length: 16, default: 'testnet' })
   environment: Environment;
 
-  @Column({ type: 'varchar', length: 16, default: 'dry_run' })
+  @Column({ type: 'varchar', length: 16, default: 'testnet' })
   mode: RunMode;
 
   @Column({ length: 32 })

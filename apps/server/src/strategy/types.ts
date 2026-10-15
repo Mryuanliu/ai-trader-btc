@@ -122,7 +122,7 @@ export interface OpenLotRequest {
   reason: string;
   /**
    * 交易所侧灾难止损价（策略给）：省略则平台按 `PROTECTION_DEFAULT_PCT` 兜底；
-   * 显式 `null` 表示该 Lot 关闭保险丝。仅实盘（live/testnet）与 dry_run 模拟有意义，
+   * 显式 `null` 表示该 Lot 关闭保险丝。仅实盘（live/testnet）有意义，
    * 回测引擎不消费（I-3 量具零污染）。`PROTECTION_MODE=off` 时整条路径短路 no-op。
    */
   protectionStopPrice?: number | null;

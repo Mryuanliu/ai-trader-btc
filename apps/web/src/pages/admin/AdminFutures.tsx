@@ -108,7 +108,7 @@ export function AdminFutures() {
   } | null>(null);
 
   const cur = {
-    mode: draft?.mode ?? cfg?.mode ?? 'dry_run',
+    mode: draft?.mode ?? cfg?.mode ?? 'testnet',
     leverage: draft?.leverage ?? cfg?.leverage ?? 5,
     positionPct: draft?.positionPct ?? cfg?.positionPct ?? 0.1,
   };
@@ -340,7 +340,6 @@ export function AdminFutures() {
               value={cur.mode}
               style={{ width: '100%' }}
               options={[
-                { label: 'dry_run（本地模拟，不触交易所）', value: 'dry_run' },
                 { label: 'testnet（币安测试网）', value: 'testnet' },
                 { label: 'live（实盘 · 真实资金）', value: 'live' },
               ]}

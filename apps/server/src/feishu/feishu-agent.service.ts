@@ -62,7 +62,7 @@ export class FeishuAgentService {
     const system = buildBotSystemPrompt({
       now: Date.now(),
       env: (this.config.get<string>('BINANCE_ENV') as 'demo' | 'testnet' | 'live') || 'demo',
-      runMode: this.config.get<string>('APP_RUN_MODE', 'dry_run'),
+      runMode: this.config.get<string>('APP_RUN_MODE', 'testnet'),
       skills: this.skills.listBriefs(),
     });
 

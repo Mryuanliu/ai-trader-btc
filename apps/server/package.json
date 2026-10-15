@@ -4,7 +4,7 @@
   "private": true,
   "description": "AI BTC Trader 后端服务 (Nest.js + PostgreSQL)",
   "scripts": {
-    "prebuild": "rimraf dist",
+    "prebuild": "rm -rf dist",
     "build": "nest build",
     "dev": "nest start --watch",
     "start": "nest start",

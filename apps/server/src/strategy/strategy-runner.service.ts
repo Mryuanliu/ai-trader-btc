@@ -4,6 +4,7 @@ import type {
   BlockingLot,
   Candle,
   FuturesPositionSnapshot,
+  StrategyInstanceInfo,
   StrategyStartResult,
   Timeframe,
 } from '@ai-trader/shared';
@@ -275,20 +276,17 @@ export class StrategyRunner implements OnModuleInit {
     // 双向持仓是「多空 Lot 共存 + 挂单必须带 positionSide」的交易所前提。
     // 平台不做风控，但这属于「指令能否成立」的硬约束：不满足时挂单会被
     // 交易所以 -4061 全数拒绝，必须阻止启动而不是让策略空转。
-    // dry_run 不触交易所，跳过。
-    const cfg = await this.futuresConfig.get();
-    if (cfg.mode !== 'dry_run') {
-      try {
-        await this.trading.ensureHedgeMode();
-      } catch (err) {
-        const detail = (err as Error).message;
-        this.logger.error(`双向持仓切换失败，策略未启动：${detail}`);
-        return {
-          ok: false,
-          status: await this.getStatus(),
-          message: `双向持仓（hedge mode）切换失败，无法启动策略：${detail}`,
-        };
-      }
+    // （dry_run 本地模拟模式已于 2026-10-15 移除，两种真实模式都必须确保。）
+    try {
+      await this.trading.ensureHedgeMode();
+    } catch (err) {
+      const detail = (err as Error).message;
+      this.logger.error(`双向持仓切换失败，策略未启动：${detail}`);
+      return {
+        ok: false,
+        status: await this.getStatus(),
+        message: `双向持仓（hedge mode）切换失败，无法启动策略：${detail}`,
+      };
     }
 
     strategy.onStart?.(params);
@@ -529,9 +527,9 @@ export class StrategyRunner implements OnModuleInit {
     this.lastTickMs = nowMs;
     this.ticking = true;
     try {
-      // 运行模式切换会把已有挂单变成「孤儿」：dry_run 的单不在交易所、
-      // 切到真实模式后回查必然失败；反之切到 dry_run 后真实挂单则无人触发。
-      // 两种情况下都该先撤掉重挂，这里做一次清理（跨全部实例）。
+      // 运行模式切换会把已有挂单变成「孤儿」：testnet 与 live 是两套账户环境，
+      // 切换后旧挂单在对面无人触发/无人对账，两种情况下都该先撤掉重挂，
+      // 这里做一次清理（跨全部实例）。
       const cfg = await this.futuresConfig.get();
       if (this.lastMode !== null && this.lastMode !== cfg.mode) {
         this.logger.warn(`运行模式由 ${this.lastMode} 变为 ${cfg.mode}，撤销旧挂单以避免对账错乱`);
@@ -580,6 +578,18 @@ export class StrategyRunner implements OnModuleInit {
           .listOpenByInstance(first.instanceId, (sym) => this.market.getTicker(sym)?.price ?? 0)
           .catch(() => [])
       : [];
+    // 全部实例（含已停止的）：数据源是 strategy_instances 表。
+    // 参数配置弹窗按「策略名:交易对」回填实际参数；已停止实例的 params 是上次实跑值（留痕）。
+    const instances: StrategyInstanceInfo[] = (await this.instanceService.listAll()).map((r) => ({
+      instanceId: r.instanceId,
+      strategyName: r.strategyName,
+      symbol: r.symbol,
+      params: r.params ?? null,
+      interval: r.interval ?? null,
+      shouldRun: r.shouldRun,
+      running: this.instances.has(r.instanceId),
+      startedAt: r.startedAt ? r.startedAt.toISOString() : null,
+    }));
     return {
       running: this.instances.size > 0,
       name: first?.strategy.name ?? null,
@@ -587,13 +597,14 @@ export class StrategyRunner implements OnModuleInit {
       params: first?.params ?? null,
       interval: first?.interval,
       startedAt: first ? first.startedAt.toISOString() : null,
-      lastTickAt: this.lastTickAt ? this.lastTickAt.toISOString() : null,
+      lastTickAt: this.lastTickAt ? new Date(this.lastTickAt).toISOString() : null,
       lastError: this.lastError,
       state: first?.strategy.getState() ?? null,
       openLotCount: openLots.length,
       // P2 新增：实例数（前端据此判断是否多实例运行）
       instanceCount: this.instances.size,
       baskets,
+      instances,
     };
   }
 

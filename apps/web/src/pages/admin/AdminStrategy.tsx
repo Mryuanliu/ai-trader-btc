@@ -71,6 +71,43 @@ export function AdminStrategy() {
   const st = status.data;
   const running = st?.running ?? false;
 
+  /** 弹窗表单初值：有实例记录 → 回填数据库实际参数；没有 → 参数留空、默认推荐值作 placeholder */
+  const formValuesFor = (s: StrategyDescriptor, symbol: string): Record<string, any> => {
+    const defaults = (s.defaultParams ?? {}) as Record<string, unknown>;
+    const boolKeys = new Set(
+      Object.entries(
+        (s.paramSchema as { properties?: Record<string, { type?: string }> } | undefined)
+          ?.properties ?? {},
+      )
+        .filter(([, spec]) => spec.type === 'boolean')
+        .map(([k]) => k),
+    );
+    const values: Record<string, any> = { symbol };
+    // 「策略名:交易对」= instanceId，精确命中该实例上次实跑值（已停止的实例也留痕）
+    const inst = (st?.instances ?? []).find(
+      (i) => i.strategyName === s.name && i.symbol === symbol,
+    );
+    for (const [key, dflt] of Object.entries(defaults)) {
+      if (inst?.params) {
+        // 实例行里没有的键（策略后来新增的参数）回退默认值，保证表单完整
+        values[key] = inst.params[key] ?? dflt;
+      } else if (boolKeys.has(key)) {
+        // 布尔开关没有「空」态（Switch 恒有值）：无实例时直接给默认值
+        values[key] = dflt;
+      }
+      // 其余（number/enum）留空 → placeholder 显示默认推荐值，
+      // 提交时缺失字段由策略 normalizeParams 回落默认值
+    }
+    return values;
+  };
+
+  /** 打开参数配置弹窗（重置表单后按当前币种回填实际值） */
+  const openConfig = (s: StrategyDescriptor) => {
+    setConfiguring(s);
+    form.resetFields();
+    form.setFieldsValue(formValuesFor(s, futuresCfg?.symbol ?? 'BTCUSDT'));
+  };
+
   /**
    * 未平仓拦截提示。
    *
@@ -245,13 +282,16 @@ export function AdminStrategy() {
       | { properties?: Record<string, Record<string, unknown>> }
       | undefined;
     const props = schema?.properties ?? {};
+    const defaults = (configuring?.defaultParams ?? {}) as Record<string, unknown>;
     return Object.entries(props).map(([key, spec]) => {
       const type = String(spec.type ?? 'number');
       const title = String(spec.title ?? key);
       const tip = [spec.minimum !== undefined ? `最小 ${spec.minimum}` : '', spec.maximum !== undefined ? `最大 ${spec.maximum}` : '']
         .filter(Boolean)
         .join('，');
-      return { key, type, title, tip, spec };
+      // 默认推荐值：无实例回填时作 placeholder（留空即用默认）
+      const dflt = defaults[key];
+      return { key, type, title, tip, spec, dflt };
     });
   }, [configuring]);
 
@@ -300,8 +340,7 @@ export function AdminStrategy() {
                   <Tooltip title="启动前可调整参数" key="config">
                     <span
                       onClick={() => {
-                        setConfiguring(s);
-                        form.setFieldsValue(s.defaultParams);
+                        openConfig(s);
                       }}
                     >
                       <SettingOutlined /> 参数配置
@@ -313,8 +352,7 @@ export function AdminStrategy() {
                       if (running) {
                         // 多实例语义：已有实例运行时不再硬拦——
                         // 打开配置弹窗，用户改个币种就能启动新实例
-                        setConfiguring(s);
-                        form.setFieldsValue(s.defaultParams);
+                        openConfig(s);
                         return;
                       }
                       void doStart(s, s.defaultParams);
@@ -359,16 +397,32 @@ export function AdminStrategy() {
             doStart(configuring, params, undefined, sym || undefined);
           })
         }
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div className="flex items-center justify-between">
+            <Button
+              onClick={() => {
+                if (!configuring) return;
+                // 重置 = 恢复到默认推荐值（直接填入表单，区别于打开时的「空值+placeholder」态）
+                form.setFieldsValue({
+                  ...configuring.defaultParams,
+                  symbol: form.getFieldValue('symbol') ?? futuresCfg?.symbol ?? 'BTCUSDT',
+                });
+              }}
+            >
+              重置
+            </Button>
+            <Space>
+              <CancelBtn />
+              <OkBtn />
+            </Space>
+          </div>
+        )}
         width={680}
       >
         <Form
           form={form}
           layout="vertical"
-          initialValues={
-            configuring
-              ? { ...configuring.defaultParams, symbol: futuresCfg?.symbol ?? 'BTCUSDT' }
-              : undefined
-          }
+          initialValues={{ symbol: futuresCfg?.symbol ?? 'BTCUSDT' }}
         >
           <Row gutter={16}>
             <Col xs={24} md={8}>
@@ -378,12 +432,28 @@ export function AdminStrategy() {
                 tooltip="每个「策略 + 币种」是一个独立实例，各自管理各自的仓位；同策略可同时跑多个币种"
                 rules={[{ required: true, message: '请输入交易对，如 BTCUSDT' }]}
               >
-                <Input placeholder="BTCUSDT" />
+                <Input
+                  placeholder="BTCUSDT"
+                  onChange={(e) => {
+                    // 换币种 = 换实例：参数按实例归属。用户没手动改过参数时，
+                    // 按新币种重新回填实际值（有实例回填、无实例留空走 placeholder）
+                    const sym = e.target.value.trim().toUpperCase();
+                    if (!sym || !configuring) return;
+                    const paramKeys = Object.keys(
+                      (configuring.paramSchema as
+                        | { properties?: Record<string, unknown> }
+                        | undefined)?.properties ?? {},
+                    );
+                    if (!form.isFieldsTouched(paramKeys)) {
+                      form.setFieldsValue(formValuesFor(configuring, sym));
+                    }
+                  }}
+                />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
-            {paramFields.map(({ key, type, title, tip }) => (
+            {paramFields.map(({ key, type, title, tip, dflt }) => (
               <Col xs={24} md={12} key={key}>
                 <Form.Item
                   name={key}
@@ -394,13 +464,17 @@ export function AdminStrategy() {
                   {type === 'boolean' ? (
                     <Switch />
                   ) : type === 'integer' || type === 'number' ? (
-                    <InputNumber className="!w-full" />
+                    <InputNumber
+                      className="!w-full"
+                      placeholder={dflt !== undefined ? String(dflt) : undefined}
+                    />
                   ) : (
                     <Select
                       options={(
                         (configuring?.paramSchema as { properties?: Record<string, { enum?: string[] }> })
                           ?.properties?.[key]?.enum ?? []
                       ).map((v) => ({ value: v, label: v }))}
+                      placeholder={dflt !== undefined ? String(dflt) : '请选择'}
                     />
                   )}
                 </Form.Item>

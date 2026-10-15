@@ -213,7 +213,7 @@ export interface FuturesAgentConfigShape {
 export const DEFAULT_FUTURES_AGENT_CONFIG: FuturesAgentConfigShape = {
   enabled: true,
   symbol: 'BTCUSDT',
-  mode: 'dry_run',
+  mode: 'testnet',
   positionPct: 0.1,
   // 默认 5 倍：杠杆是双刃剑，5 倍下约 20% 反向波动即爆仓。
   // 平台不设上限——用多少由策略自己决定（定位是策略托管平台）。

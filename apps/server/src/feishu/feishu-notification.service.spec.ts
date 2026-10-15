@@ -90,13 +90,13 @@ describe('FeishuNotificationService', () => {
     expect(sendCard).toHaveBeenCalledWith('oc_test_chat', expect.stringContaining('【开仓成交】'));
   });
 
-  it('filters out dry_run events', () => {
+  it('pushes all events (dry_run filter removed 2026-10-15)', () => {
     const { events, sendCard, svc } = build({});
     svc.onModuleInit();
-    events.emit('lotOpened', { ...open, mode: 'dry_run' });
-    events.emit('lotClosed', { ...close, mode: 'dry_run' });
-    events.emit('basketClosed', { ...basket, mode: 'dry_run' });
-    expect(sendCard).not.toHaveBeenCalled();
+    events.emit('lotOpened', { ...open, mode: 'testnet' });
+    events.emit('lotClosed', { ...close, mode: 'live' });
+    events.emit('basketClosed', { ...basket, mode: 'testnet' });
+    expect(sendCard).toHaveBeenCalledTimes(3);
   });
 
   it('is a no-op when chat id is missing', () => {

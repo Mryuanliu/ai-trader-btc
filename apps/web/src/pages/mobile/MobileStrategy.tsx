@@ -146,7 +146,7 @@ export function MobileStrategy() {
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-3 text-[11px]">
-          <Field label="运行模式" value={RUN_MODE_LABELS[(config?.mode as RunMode) ?? 'dry_run']} />
+          <Field label="运行模式" value={RUN_MODE_LABELS[(config?.mode as RunMode) ?? 'testnet']} />
           <Field label="交易对" value={config?.symbol ?? '--'} />
           <Field label="杠杆" value={`${config?.leverage ?? 0}x`} />
           <Field label="未完结仓位单" value={String(status?.openLotCount ?? 0)} />

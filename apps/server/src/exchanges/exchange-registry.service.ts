@@ -33,7 +33,7 @@ export class ExchangeRegistry {
    * 合约读 BINANCE_FUTURES_ENV，未显式配置时回退现货的 BINANCE_ENV。
    */
   private defaultEnvironmentOf(code: ExchangeCode): Environment {
-    const mode = this.config.get<string>('APP_RUN_MODE', 'dry_run');
+    const mode = this.config.get<string>('APP_RUN_MODE', 'testnet');
     if (mode === 'live') return 'live';
 
     const fallback = this.config.get<string>('BINANCE_ENV', 'demo');

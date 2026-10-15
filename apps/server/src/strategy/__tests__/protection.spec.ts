@@ -171,7 +171,7 @@ function basketClosedEvent(inst: string | null): BasketClosedEvent {
     feeTotal: 1,
     fundingFee: 0,
     strategyInstanceId: inst,
-    mode: 'dry_run',
+    mode: 'testnet',
     ts: Date.now(),
   };
 }
@@ -188,6 +188,8 @@ describe('StrategyRunner · 熔断接线（basketClosed → stopInstance → pro
     const protection = { evaluate } as unknown as ProtectionService;
     const listOpenOrders = vi.fn(async () => []);
     const markStopped = vi.fn(async () => undefined);
+    // getStatus（stopInstance 尾部会调）需要 listAll 返回实例摘要
+    const listAll = vi.fn(async () => []);
     const noop = () => undefined;
     const journal = { lifecycle: noop, decision: noop, forgetInstance: noop };
     const runner = new StrategyRunner(
@@ -199,7 +201,7 @@ describe('StrategyRunner · 熔断接线（basketClosed → stopInstance → pro
       noop as never, // positions
       noop as never, // lots
       noop as never, // baskets
-      { markStopped } as never, // instanceService
+      { markStopped, listAll } as never, // instanceService
       protection, // protection
       events, // events
       journal as never, // journal

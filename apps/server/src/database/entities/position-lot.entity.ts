@@ -99,7 +99,7 @@ export class PositionLotEntity {
 
   /**
    * 交易所侧灾难保险丝（`PROTECTION` 挂单）当前有效订单 id（1:1）；NULL=未注册/已撤。
-   * 仅 live/testnet/dry_run 有义；回测不写此列。
+   * 仅 live/testnet 有义；回测不写此列。
    */
   @Column({ type: 'varchar', length: 64, nullable: true })
   protectionOrderId: string | null;

@@ -285,6 +285,12 @@ export interface StrategyRunStatus {
    * 策略详情页据此展示「哪些订单属于一轮、会被一起平掉」。
    */
   baskets?: BasketSummary[];
+  /**
+   * 全部实例（含已停止的）——数据源是 strategy_instances 表。
+   * 参数配置弹窗按 `策略名:交易对` 查找并回填实际参数；
+   * 已停止实例的 params 是上次实跑值（留痕）。
+   */
+  instances?: StrategyInstanceInfo[];
 }
 
 /** 阻止策略启动的未完结仓位单（需用户手动平掉） */
@@ -295,6 +301,25 @@ export interface BlockingLot {
   entryPrice: number;
   unrealizedPnl: number;
   openedAt: string;
+}
+
+/**
+ * 策略实例摘要（P2 多实例，参数配置弹窗据此回填「数据库里的实际值」）。
+ *
+ * `params` 是 strategy_instances 表里持久化的**归一化后**参数——
+ * 实例停止后也保留（追溯上次实跑值），前端据此回填表单。
+ */
+export interface StrategyInstanceInfo {
+  instanceId: string;
+  strategyName: string;
+  symbol: string;
+  params: Record<string, unknown> | null;
+  interval: string | null;
+  /** 是否标记为应运行（重启自动恢复的依据） */
+  shouldRun: boolean;
+  /** 当前是否真的在内存里跑着 */
+  running: boolean;
+  startedAt: string | null;
 }
 
 /**

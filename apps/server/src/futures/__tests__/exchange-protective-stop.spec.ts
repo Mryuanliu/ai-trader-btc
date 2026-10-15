@@ -9,7 +9,7 @@ import { FuturesTradingService } from '../futures-trading.service';
  * 覆盖 docs/exchange-protection-orders-plan.md §9 Phase1 单测项：
  * - 灾难价 I-2（先于强平）约束与收窄
  * - PROTECTION_MODE=off 零副作用
- * - fixed + dry_run/testnet 挂单（source PROTECTION、reduceOnly、反向 side、positionSide、priceProtect）
+ * - fixed + testnet 挂单（source PROTECTION、reduceOnly、反向 side、positionSide、priceProtect）
  * - detach 拆保险丝
  * - reconcileProtections 缺挂补挂 + 幂等
  */
@@ -57,7 +57,7 @@ const FILTERS = {
 function harness(
   opts: {
     mode?: 'off' | 'fixed' | 'trailing';
-    runMode?: 'dry_run' | 'testnet' | 'live';
+    runMode?: 'testnet' | 'live';
     defaultPct?: string;
     leverage?: number;
   } = {},
@@ -129,7 +129,7 @@ function harness(
   const futuresConfig: any = {
     get: () =>
       Promise.resolve({
-        mode: opts.runMode ?? 'dry_run',
+        mode: opts.runMode ?? 'testnet',
         symbol: 'BTCUSDT',
         leverage: opts.leverage ?? 10,
         marginType: 'isolated',
@@ -241,16 +241,16 @@ describe('PROTECTION_MODE=off → 零副作用', () => {
   });
 });
 
-describe('fixed + dry_run 注册保险丝', () => {
-  it('建 PROTECTION 平仓意图订单（不触交易所），回写 lot 字段', async () => {
-    const { svc, lotsById, ordersById, attachLog, placed } = harness({ mode: 'fixed', runMode: 'dry_run' });
+describe('fixed + testnet 注册保险丝', () => {
+  it('真实发单（algoOrder）并建 PROTECTION 本地订单，回写 lot 字段', async () => {
+    const { svc, lotsById, ordersById, attachLog, placed } = harness({ mode: 'fixed', runMode: 'testnet' });
     const l = lot();
     lotsById.set('lot-1', l);
 
     await svc.attachProtectionForLot(l as any, 10);
 
-    // dry_run 不发真实单
-    expect(placed.length).toBe(0);
+    // dry_run 已移除（2026-10-15）：保险丝必须真实注册到交易所
+    expect(placed.length).toBe(1);
     expect(attachLog.length).toBe(1);
 
     const order = [...ordersById.values()].find((o) => o.source === 'PROTECTION');
@@ -284,7 +284,7 @@ describe('fixed + testnet 发 algoOrder 带 priceProtect', () => {
 
 describe('detach 拆保险丝', () => {
   it('有 protectionOrderId → clearProtection 被调（撤单失败也照样清）', async () => {
-    const { svc, lotsById, clearLog } = harness({ mode: 'fixed', runMode: 'dry_run' });
+    const { svc, lotsById, clearLog } = harness({ mode: 'fixed', runMode: 'testnet' });
     // ord-old 不在 ordersById → cancelOrder 抛 NOT_FOUND → 被 detach 吞掉 → finally 仍清
     lotsById.set('lot-1', lot({ protectionOrderId: 'ord-old', protectedStopPrice: 95_250 }));
 
@@ -297,7 +297,7 @@ describe('detach 拆保险丝', () => {
 
 describe('reconcileProtections 缺挂补挂 + 幂等', () => {
   it('OPEN 缺挂补挂一次；再次运行不重复挂', async () => {
-    const { svc, lotsById, ordersById, attachLog } = harness({ mode: 'fixed', runMode: 'dry_run' });
+    const { svc, lotsById, ordersById, attachLog } = harness({ mode: 'fixed', runMode: 'testnet' });
     lotsById.set('lot-1', lot()); // 无 protectionOrderId
 
     const r1 = await svc.reconcileProtections();
@@ -314,7 +314,7 @@ describe('reconcileProtections 缺挂补挂 + 幂等', () => {
   });
 
   it('孤儿：CLOSED 却仍挂 NEW → 撤并清', async () => {
-    const { svc, lotsById, ordersById, clearLog } = harness({ mode: 'fixed', runMode: 'dry_run' });
+    const { svc, lotsById, ordersById, clearLog } = harness({ mode: 'fixed', runMode: 'testnet' });
     const orphan = lot({ id: 'lot-x', status: 'CLOSED', protectionOrderId: 'ord-x' });
     lotsById.set('lot-x', orphan);
     // 把 ord-x 登记成一个仍 NEW 的保险丝单

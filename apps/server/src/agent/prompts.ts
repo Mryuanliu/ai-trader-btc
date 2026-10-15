@@ -19,7 +19,7 @@ export interface BotPromptContext {
   now: number;
   /** 交易所账户环境：demo=币安模拟盘 testnet live=实盘 */
   env: 'demo' | 'testnet' | 'live';
-  /** 平台运行模式（下单链路）：dry_run/testnet/live */
+  /** 平台运行模式（下单链路）：testnet/live */
   runMode: string;
   skills?: SkillBrief[];
 }

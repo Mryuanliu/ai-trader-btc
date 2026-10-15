@@ -107,9 +107,6 @@ function isConditionalOrder(type: string): boolean {
   return type === 'STOP_MARKET' || type === 'TAKE_PROFIT_MARKET';
 }
 
-/** dry-run 模拟撮合滑点（bps）。合约配置未单列该参数，先固定，与现货默认一致 */
-const DRY_RUN_SLIPPAGE_BPS = 5;
-
 /**
  * 估算手续费费率（bps，单边 taker）。
  *
@@ -284,11 +281,8 @@ export class FuturesTradingService {
       ).map((r) => r.orderId),
     );
     const rows = candidates
-      // dry_run 的单只存在于本地，交易所没有它，回查必然失败 →
-      // 交给 processDryRunGridOrders 按行情模拟触发。
-      .filter((o) => o.mode !== 'dry_run')
-      // exchangeOrderId 为空但 clientOrderId 存在时也要回查：
-      // 这是 syncOpenOrders 历史上漏写交易所单号后的存量修复路径。
+      // dry_run 已移除（2026-10-15）：本地单不再产生。历史 dry_run 行没有
+      // exchangeOrderId，下面的 exchangeOrderId/clientOrderId 非空过滤天然排除。
       .filter((o) => (o.exchangeOrderId || o.clientOrderId) && !withFillIds.has(o.id))
       .slice(0, limit);
 
@@ -513,6 +507,11 @@ export class FuturesTradingService {
     if (!isFuturesAdapter(adapter)) {
       throw new BusinessException('EXCHANGE_ERROR', '合约适配器不支持交易');
     }
+    // dry_run 本地模拟模式已于 2026-10-15 移除：所有模式都真实发单。
+    // 密钥缺失必须明确失败——静默写本地单正是「显示有持仓但交易所没有」的困惑源头。
+    if (!adapter.hasCredentials) {
+      throw new BusinessException('EXCHANGE_ERROR', '合约交易所未配置 API 密钥，无法下单');
+    }
 
     // 用合约自身行情定价，而非现货 ticker：两者存在基差，
     // 用现货价算合约保证金会系统性偏差
@@ -631,39 +630,8 @@ export class FuturesTradingService {
     });
     order = await this.orderRepo.save(order);
 
-    // ---- 6. 发单 / 模拟撮合 ----
-    if (mode === 'dry_run') {
-      const slippage = DRY_RUN_SLIPPAGE_BPS / 10_000;
-      const fillPrice = intent.side === 'BUY' ? price * (1 + slippage) : price * (1 - slippage);
-      const dryFee = quantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
-      order.status = 'FILLED';
-      order.filledQuantity = quantity;
-      order.filledPrice = fillPrice;
-      order.exchangeOrderId = `DRYF_${order.id.slice(0, 8)}`;
-      order = await this.orderRepo.save(order);
-      await this.fillRepo.save(
-        this.fillRepo.create({
-          orderId: order.id,
-          symbol,
-          price: fillPrice,
-          quantity,
-          // 模拟撮合同样要计费：合约盈亏对费率极度敏感，记 0 会让 dry-run 结果系统性偏乐观
-          fee: dryFee,
-          feeAsset: 'USDT',
-          filledAt: new Date(),
-        }),
-      );
-      // Lot 生命周期挂接（dry-run 与真实同口径，保证回测/模拟可对账）
-      await this.settleOrOpenLot(input, intent, order, {
-        price: fillPrice,
-        quantity,
-        fee: dryFee,
-      });
-      this.logger.log(
-        `[dry-run][合约] ${intent.kind} ${intent.positionSide} ${quantity} ${symbol} @ ${fillPrice.toFixed(2)}`,
-      );
-    } else {
-      try {
+    // ---- 6. 发单 ----
+    try {
         // 开仓/加仓前设置保证金模式与杠杆；平仓单无需设置（不增加风险敞口）
         if (intent.kind !== 'close') {
           await adapter.setMarginType(symbol, cfg.marginType);
@@ -778,12 +746,11 @@ export class FuturesTradingService {
           `[${mode}][合约] ${intent.kind} ${intent.positionSide} ${quantity} ${symbol} ` +
             `@ ${price} 杠杆 ${leverage}x -> ${result.status}`,
         );
-      } catch (err) {
-        order.status = 'FAILED';
-        order.error = (err as Error).message;
-        order = await this.orderRepo.save(order);
-        this.logger.error(`合约下单失败: ${order.error}`);
-      }
+    } catch (err) {
+      order.status = 'FAILED';
+      order.error = (err as Error).message;
+      order = await this.orderRepo.save(order);
+      this.logger.error(`合约下单失败: ${order.error}`);
     }
 
     const dto = this.toDTO(order);
@@ -862,7 +829,6 @@ export class FuturesTradingService {
    * 与 `placeOrder` 的区别：
    * - 不立即成交、不建 Lot——订单停在 `NEW`，交易所触发后由 `syncPendingFills` 补记
    * - 不做数量推导（数量由策略决定），只做精度取整与最小名义校验
-   * - `dry_run` 不触交易所，由 `processDryRunGridOrders` 按行情模拟触发
    *
    * 触发语义即 MT5 挂单：BUY 上破 stopPrice 买入 / SELL 下破 stopPrice 卖出。
    */
@@ -937,14 +903,6 @@ export class FuturesTradingService {
     });
     order = await this.orderRepo.save(order);
 
-    if (mode === 'dry_run') {
-      this.logger.log(
-        `[dry_run] 网格挂单 ${input.side}/${input.positionSide} ${quantity} ${symbol} ` +
-          `触发价 ${stopPrice}（${input.note ?? ''}）`,
-      );
-      return this.toDTO(order);
-    }
-
     try {
       const result = await adapter.placeOrder({
         symbol,
@@ -975,7 +933,7 @@ export class FuturesTradingService {
 
   /**
    * 撤销未成交订单（网格重排 / 篮子出场前清理挂单）。
-   * dry_run 的单只在本地，直接标记撤销。
+   * 没有交易所单号的（历史 dry_run 遗留）直接本地标记撤销。
    */
   async cancelOrder(orderId: string): Promise<OrderDTO> {
     const order = await this.orderRepo.findOne({ where: { id: orderId } });
@@ -986,7 +944,7 @@ export class FuturesTradingService {
       throw new BusinessException('BAD_REQUEST', `订单当前状态 ${order.status}，不可撤销`);
     }
 
-    if (order.mode === 'dry_run' || !order.exchangeOrderId) {
+    if (!order.exchangeOrderId) {
       order.status = 'CANCELED';
       return this.toDTO(await this.orderRepo.save(order));
     }
@@ -1058,7 +1016,7 @@ export class FuturesTradingService {
 
   /**
    * 为 Lot 挂一条 STOP_MARKET 反向平仓灾难单（数量=lot.quantity，触发价=灾难线）。
-   * dry_run 只本地落 NEW（由 processDryRunGridOrders 模拟触发）；live/testnet 走 algoOrder。
+   * 走 algoOrder 端点真实注册到交易所。
    */
   private async placeProtectiveStop(lot: PositionLotEntity, stopPrice: number): Promise<OrderEntity> {
     const cfg = await this.futuresConfig.get();
@@ -1113,12 +1071,7 @@ export class FuturesTradingService {
       strategyInstanceId: lot.strategyInstanceId ?? null,
     });
     order = await this.orderRepo.save(order);
-    if (mode === 'dry_run') {
-      this.logger.log(
-        `[dry_run] 保险丝注册 ${reverseSide}/${lot.direction} ${quantity} ${symbol} 灾难价 ${alignedStop}`,
-      );
-      return order;
-    }
+
     try {
       const result = await adapter.placeOrder({
         symbol,
@@ -1363,89 +1316,5 @@ export class FuturesTradingService {
       order: { createdAt: 'ASC' },
       take: 100,
     });
-  }
-
-  /**
-   * `dry_run` 挂单的模拟触发。
-   *
-   * dry_run 不触交易所，挂单永远不会被撮合；这里按当前价判断是否穿越触发价，
-   * 穿越即按「触发价 ± 滑点」模拟成交并建 Lot——与真实成交共用同一套记账与
-   * Lot 结算路径，保证 dry-run 的结果与实盘口径一致（只差真实滑点）。
-   */
-  async processDryRunGridOrders(symbol: string): Promise<{ triggered: number }> {
-    const cfg = await this.futuresConfig.get();
-    if (cfg.mode !== 'dry_run') return { triggered: 0 };
-
-    const orders = await this.orderRepo.find({
-      where: { market: 'futures', symbol, status: 'NEW', mode: 'dry_run' },
-      order: { createdAt: 'ASC' },
-      take: 50,
-    });
-    if (orders.length === 0) return { triggered: 0 };
-
-    const adapter = await this.registry.get(FUTURES_EXCHANGE);
-    const ticker = await adapter.getTicker(symbol);
-    const price = ticker.price || 0;
-    if (!(price > 0)) return { triggered: 0 };
-
-    let triggered = 0;
-    for (const order of orders) {
-      const stop = Number(order.stopPrice ?? 0);
-      if (!(stop > 0)) continue;
-      // STOP_MARKET：BUY 上破触发 / SELL 下破触发
-      const hit = order.side === 'BUY' ? price >= stop : price <= stop;
-      if (!hit) continue;
-
-      const slippage = DRY_RUN_SLIPPAGE_BPS / 10_000;
-      const fillPrice = order.side === 'BUY' ? stop * (1 + slippage) : stop * (1 - slippage);
-      const fee = order.quantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
-
-      await this.fillRepo.save(
-        this.fillRepo.create({
-          orderId: order.id,
-          symbol,
-          price: fillPrice,
-          quantity: order.quantity,
-          fee,
-          feeAsset: 'USDT',
-          filledAt: new Date(),
-        }),
-      );
-      order.status = 'FILLED';
-      order.filledQuantity = Number(order.quantity);
-      order.filledPrice = fillPrice;
-      await this.orderRepo.save(order);
-
-      if (order.reduceOnly) {
-        // 保险丝（灾难止损）被行情穿越 → 本地模拟触发平仓结算，与实盘同走 settleFromCloseFill
-        if (order.lotId) {
-          await this.lots.settleFromCloseFill({
-            lotId: order.lotId,
-            closeOrderId: order.id,
-            fill: { price: fillPrice, quantity: Number(order.quantity), fee },
-            exitReason: order.source === 'PROTECTION' ? 'STOP_ON_EXCHANGE' : 'MANUAL',
-            mode: 'dry_run',
-          });
-          await this.detachProtectionForLot(order.lotId);
-        }
-        triggered += 1;
-        this.logger.log(
-          `[dry_run] 保险丝触发平仓：${order.side}/${order.positionSide} ` +
-            `${order.quantity} ${symbol} @ ${fillPrice.toFixed(2)}（lot=${order.lotId?.slice(0, 8)}）`,
-        );
-      } else {
-        const lot = await this.lots.createFromOpenFill({
-          order,
-          fill: { price: fillPrice, quantity: Number(order.quantity), fee },
-        });
-        if (lot) await this.attachProtectionForLot(lot, order.leverage);
-        triggered += 1;
-        this.logger.log(
-          `[dry_run] 网格挂单触发成交：${order.side}/${order.positionSide} ` +
-            `${order.quantity} ${symbol} @ ${fillPrice.toFixed(2)}`,
-        );
-      }
-    }
-    return { triggered };
   }
 }

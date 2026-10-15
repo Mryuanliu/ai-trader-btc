@@ -54,7 +54,7 @@ export class FuturesConfigService {
     const row = await this.repo.findOne({ where: { key: CONFIG_KEY } });
     if (row) return row;
 
-    const mode = (this.config.get<string>('APP_RUN_MODE', 'dry_run') || 'dry_run') as RunMode;
+    const mode = (this.config.get<string>('APP_RUN_MODE', 'testnet') || 'testnet') as RunMode;
     try {
       const created = await this.repo.save(
         this.repo.create({

@@ -15,7 +15,7 @@ import { FeishuService } from './feishu.service';
  *
  * 与主交易链路解耦——推送 fire-and-forget + catch 记日志，任何失败都不回抛。
  * 未配置 FEISHU_APP_ID/SECRET/CHAT_ID 或 FEISHU_PUSH_ENABLED=false 时整体 no-op；
- * `dry_run` 模拟成交不推送，只推 testnet/live 真实链路。
+ * 所有运行模式（testnet/live）的成交都推送（dry_run 模式已于 2026-10-15 移除）。
  */
 @Injectable()
 export class FeishuNotificationService implements OnModuleInit {
@@ -40,19 +40,16 @@ export class FeishuNotificationService implements OnModuleInit {
     this.chatId = chatId;
 
     this.events.on$('lotOpened').subscribe((e) => {
-      if (e.mode === 'dry_run') return;
       this.push(this.formatOpen(e), '开仓成交');
     });
     this.events.on$('lotClosed').subscribe((e) => {
-      if (e.mode === 'dry_run') return;
       this.push(this.formatClose(e), '平仓结束');
     });
     this.events.on$('basketClosed').subscribe((e) => {
-      if (e.mode === 'dry_run') return;
       this.push(this.formatBasket(e), '整轮了结');
     });
-    // 熔断停实例是低频且关键的平台安全事件，各模式（含 dry_run）都推——
-    // 运营必须第一时间知道「哪个实例被兜底停掉了、持仓需手动处理」。
+    // 熔断停实例是低频且关键的平台安全事件，必须第一时间推送——
+    // 运营需要知道「哪个实例被兜底停掉了、持仓需手动处理」。
     this.events.on$('protectionTripped').subscribe((e) => {
       this.push(this.formatProtection(e), '熔断停实例');
     });
