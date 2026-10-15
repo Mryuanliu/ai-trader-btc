@@ -24,6 +24,7 @@ import {
 import { useRequireAuth } from '@/components/AuthGate';
 import { DevDocsButton } from '@/components/DevDocsDrawer';
 import { SideTag } from '@/components/OrderStatusTag';
+import { MartingaleV2Status } from '@/components/strategy/MartingaleV2Status';
 import { formatPrice, formatQty, formatSignedUsd, formatTime } from '@/utils/format';
 import { LeaderboardCard } from './LeaderboardCard';
 
@@ -61,6 +62,8 @@ export function AdminStrategyDetail() {
   const isThisRunning = !!st?.running && st.name === name;
 
   const s = (st?.state ?? {}) as Record<string, unknown>;
+  // 马丁 V2 运行快照（stateV:2）→ 专用三列状态区；老策略无此字段走现有分支零影响（M8-②）
+  const isV2State = s.stateV === 2;
   const numOf = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const layers = (s.layers ?? {}) as Record<string, number>;
   const pending = (s.pending ?? {}) as Record<string, number>;
@@ -182,7 +185,9 @@ export function AdminStrategyDetail() {
               {/* P1 上架闸门徽标（当前未接入 setEnabled，仅占位展示）：
                   pass=绿 / overfit=红 / 未测=灰 */}
               {(() => {
-                const ref = strategy.manifest?.backtestRef ?? null;
+                // backtestRef 挂在 descriptor 顶层（/api/strategy 返回），非 manifest 下；
+                // 旧代码读 manifest?.backtestRef 恒 undefined → 徽标永远显示“未测”。
+                const ref = strategy.backtestRef ?? strategy.manifest?.backtestRef ?? null;
                 if (!ref) return <Tag className="!mr-0">DSR 闸门·未测</Tag>;
                 return ref.verdict === 'pass' ? (
                   <Tag color="green" className="!mr-0">DSR 闸门·PASS ({ref.dsr.toFixed(2)})</Tag>
@@ -233,6 +238,9 @@ export function AdminStrategyDetail() {
 
       {/* 运行状态 */}
       {isThisRunning && st ? (
+        isV2State ? (
+          <MartingaleV2Status st={st} />
+        ) : (
         <Card size="small" title="运行状态" className="!border-white/[0.06] !bg-white/[0.02]">
           <Row gutter={[16, 16]}>
             <Col xs={12} md={6}>
@@ -445,6 +453,7 @@ export function AdminStrategyDetail() {
             />
           ) : null}
         </Card>
+        )
       ) : (
         <Card size="small" className="!border-white/[0.06] !bg-white/[0.02]">
           <Empty
@@ -452,6 +461,13 @@ export function AdminStrategyDetail() {
             description={
               <span className="text-[12px] text-muted">
                 该策略当前未运行 —— 返回列表页点「启动」后，这里会显示实时状态与阶梯
+                {strategy.name === 'martingale_grid_v2' ? (
+                  <span className="mt-2 block space-y-0.5 text-left text-[11px] text-muted">
+                    <span className="block">· Brain 六因子内核：三框架评分决定定向、间距与倍率（不止 EMA 斜率）</span>
+                    <span className="block">· 四层出场链：首单追踪 → 篮子双口径追踪 → 分侧均值目标/配对减 → 固定止损兜底</span>
+                    <span className="block">· 护栏常驻：挂单纪律 + 保证金预检 + funding 窗 + ATR 尖峰熔断（各机制独立开关，默认关）</span>
+                  </span>
+                ) : null}
               </span>
             }
           />

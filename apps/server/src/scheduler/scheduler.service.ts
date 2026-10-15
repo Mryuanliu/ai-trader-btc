@@ -24,6 +24,7 @@ export class SchedulerService {
   private lastNewsAt = 0;
   private lastOrderSyncAt = 0;
   private lastIncomeSyncAt = 0;
+  private lastProtectionSyncAt = 0;
   /** 按 key 记录上次告警时间，避免高频刷屏 */
   private readonly warnThrottle = new Map<string, number>();
 
@@ -92,6 +93,18 @@ export class SchedulerService {
 
     // dry-run 的网格挂单需要每 tick 检查触发（否则要等一个对账周期才成交）
     await this.triggerDryRunOrders();
+
+    // 保险丝对账（缺挂/数量漂移/孤儿/账外）：PROTECTION_MODE=off 时 reconcileProtections 立即返回。
+    const protectionInterval =
+      Number(this.config.get<string>('PROTECTION_RECONCILE_SEC', '300')) * 1000;
+    if (now - this.lastProtectionSyncAt > protectionInterval) {
+      this.lastProtectionSyncAt = now;
+      void this.futuresTrading
+        .reconcileProtections()
+        .catch((err) =>
+          this.throttledWarn('protection-reconcile', `保险丝对账异常: ${err.message}`, 300_000),
+        );
+    }
 
     // 驱动已挂载的策略（无策略时是空操作）
     await this.strategy.tick();

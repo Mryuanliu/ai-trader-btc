@@ -68,6 +68,12 @@ export interface PlaceOrderInput {
   positionSide?: PositionSide;
   /** 只平仓单（反手信号的第一跳），仅合约有意义 */
   reduceOnly?: boolean;
+  /**
+   * 条件单价格保护（仅合约条件单有效）：`priceProtect=true` 时，若触发瞬间标记价
+   * 穿越最新价超过一定阈值，交易所会拒单（-4183），防插针假触发。
+   * 默认不下发（马丁网格入场挂单行为不变）；灾难保险丝显式置 true。
+   */
+  priceProtect?: boolean;
 }
 
 export interface CancelOrderInput {

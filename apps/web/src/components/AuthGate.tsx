@@ -51,7 +51,7 @@ export function LoginModal({
       keyboard={!required}
       confirmLoading={submitting}
       width={360}
-      destroyOnClose
+      destroyOnHidden
     >
       <Form form={form} layout="vertical" className="mt-4" initialValues={{ username: 'admin' }}>
         <Form.Item name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>

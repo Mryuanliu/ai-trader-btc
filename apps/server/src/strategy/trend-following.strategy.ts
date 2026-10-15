@@ -164,6 +164,8 @@ export class TrendFollowingStrategy implements TradingStrategy {
       // intervalMs 从 ctx.candles 相邻两根 time 差推得（不引 ctx 未带字段）
       const intervalMs = this.inferIntervalMs(ctx);
       for (const lot of ctx.openLots) {
+        // 在途平仓去重：已有 reduceOnly 平单未结算时不再重复下平仓单（对齐马丁 hasPendingClose 闸）。
+        if (lot.hasPendingClose) continue;
         // 记录 entryTime（首见）
         if (!this.entryTimes.has(lot.id)) {
           this.entryTimes.set(lot.id, lot.openedAt ? Date.parse(lot.openedAt) : ctx.now);

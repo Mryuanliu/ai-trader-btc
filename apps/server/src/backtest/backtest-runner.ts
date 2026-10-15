@@ -12,7 +12,7 @@ import type { BacktestConfig, BacktestMetrics, BacktestReport, BacktestResult, E
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** 构造 ctx 时携带的回看 K 线根数（够算长均线/ATR 并留余量） */
+/** 构造 ctx 时携带的回看 K 线根数基础值（策略可用 contextCandles 声明抬高，同实盘 runner） */
 const CONTEXT_LOOKBACK = 300;
 
 function computeAtr(candles: Candle[]): number {
@@ -67,6 +67,7 @@ export async function runBacktestOnCandles(
   strategy.onStart?.(params);
 
   const intervalMs = TIMEFRAME_MS[config.interval];
+  const contextLookback = Math.max(CONTEXT_LOOKBACK, strategy.contextCandles ?? 0);
   const instanceId = `${config.strategyName}:${config.symbol}`;
   const broker = new SimBroker({
     symbol: config.symbol,
@@ -89,7 +90,7 @@ export async function runBacktestOnCandles(
 
     const mark = bar.close;
     if (i >= config.warmupBars) {
-      const window = candles.slice(Math.max(0, i + 1 - CONTEXT_LOOKBACK), i + 1);
+      const window = candles.slice(Math.max(0, i + 1 - contextLookback), i + 1);
       const ctx: StrategyContext = {
         instanceId,
         symbol: config.symbol,
@@ -166,6 +167,9 @@ export async function runBacktestOnCandles(
     costBreakdown: costs,
     equityCurve,
     trades: broker.trades,
+    exitSummary: [...broker.exitSummary.entries()]
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([exitReason, v]) => ({ exitReason, count: v.count, realizedPnl: Number(v.realizedPnl.toFixed(8)) })),
   };
 
   strategy.onStop?.();

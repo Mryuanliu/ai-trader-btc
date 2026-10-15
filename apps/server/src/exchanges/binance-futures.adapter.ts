@@ -603,6 +603,8 @@ export class BinanceFuturesAdapter implements FuturesExchangeAdapter {
       payload.triggerPrice = input.stopPrice;
       // 用标记价触发，避免插针造成的假触发
       payload.workingType = 'MARK_PRICE';
+      // 灾难保险丝显式开启价格保护（网格入场单不下发，行为不变）
+      if (input.priceProtect) payload.priceProtect = 'true';
     } else {
       // 普通单：FULL 才带 fills[].commission，手续费是盈亏口径的关键输入
       payload.newOrderRespType = 'FULL';

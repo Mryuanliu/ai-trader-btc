@@ -18,6 +18,18 @@ export interface AppEnv {
   DB_LOGGING: boolean;
   APP_RUN_MODE: RunMode;
   // 注：LIVE_TRADING_CONFIRM_TOKEN 已移除——实盘二次确认改为前端弹窗
+  /**
+   * 交易所侧灾难保险丝总开关（见 docs/exchange-protection-orders-plan.md）。
+   * off=全部新路径短路 no-op（默认，与当前 dry_run 行为零差异）；
+   * fixed=开仓时挂一次不移动（Phase 1）；trailing=吊灯同步（Phase 2，后置）。
+   */
+  PROTECTION_MODE: 'off' | 'fixed' | 'trailing';
+  /** 策略未声明灾难线时的兜底距离（%，相对开仓价） */
+  PROTECTION_DEFAULT_PCT: number;
+  /** I-1：灾难线亏损距离 ≥ 策略最近止损 × 该系数（不满足则收窄到 floor） */
+  PROTECTION_FLOOR_RATIO: number;
+  /** ProtectionReconciler 对账周期（秒） */
+  PROTECTION_RECONCILE_SEC: number;
   LLM_ENABLED: boolean;
   LLM_BASE_URL: string;
   LLM_API_KEY: string;
@@ -91,6 +103,12 @@ export const envSchema = Joi.object({
   DB_LOGGING: Joi.boolean().default(false),
 
   APP_RUN_MODE: Joi.string().valid('dry_run', 'testnet', 'live').default('dry_run'),
+
+  // 交易所侧灾难保险丝（默认 off：新路径全部短路，不改现有行为）
+  PROTECTION_MODE: Joi.string().valid('off', 'fixed', 'trailing').default('off'),
+  PROTECTION_DEFAULT_PCT: Joi.number().default(5),
+  PROTECTION_FLOOR_RATIO: Joi.number().default(1.2),
+  PROTECTION_RECONCILE_SEC: Joi.number().default(300),
 
   LLM_ENABLED: Joi.boolean().default(true),
   LLM_BASE_URL: Joi.string().default('https://api.deepseek.com'),

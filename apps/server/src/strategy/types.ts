@@ -33,6 +33,11 @@ export interface StrategyLotView {
    * 策略据此判断「出场是否已在进行中」，避免同一个 Lot 被平两次。
    */
   hasPendingClose: boolean;
+  /**
+   * 交易所侧灾难保险丝（`PROTECTION` 挂单）当前触发价；null=未注册。
+   * 第一期只落字段供可观测/重启回读，策略不消费；第二期吊灯同步以其为地板。
+   */
+  protectionStopPrice?: number | null;
 }
 
 /** 策略运行时看到的挂单（未成交的 STOP / 限价单） */
@@ -115,6 +120,12 @@ export interface OpenLotRequest {
   leverage?: number;
   /** 开仓原因（审计留痕） */
   reason: string;
+  /**
+   * 交易所侧灾难止损价（策略给）：省略则平台按 `PROTECTION_DEFAULT_PCT` 兜底；
+   * 显式 `null` 表示该 Lot 关闭保险丝。仅实盘（live/testnet）与 dry_run 模拟有意义，
+   * 回测引擎不消费（I-3 量具零污染）。`PROTECTION_MODE=off` 时整条路径短路 no-op。
+   */
+  protectionStopPrice?: number | null;
 }
 
 /** 挂单请求（策略 → 平台）：EA 式网格靠 STOP 挂单实现 */
@@ -179,6 +190,15 @@ export interface TradingStrategy {
    * 否则 Hub 会拒绝加载（没有风险提示的策略不能上架）。
    */
   readonly manifest?: StrategyManifest;
+
+  /**
+   * 策略决策需要的历史 K 线根数（执行周期，声明值；可选）。
+   *
+   * runner（实盘与回测）以此为准喂 ctx.candles：窗口不一致会让多框架
+   * 重采样/长周期指标在回测与实盘间语义漂移（如 V2 Brain 的 15× 框架
+   * 需 70×15=1050 根）。不声明则用平台默认（实盘 150 / 回测 300）。
+   */
+  readonly contextCandles?: number;
 
   /** 校验并合并外部参数；非法值回落默认，策略永不因参数崩溃 */
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown>;

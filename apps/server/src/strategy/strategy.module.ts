@@ -6,6 +6,7 @@ import { AccountModule } from '../account/account.module';
 import { BacktestModule } from '../backtest/backtest.module';
 import { BasketEntity, StrategyInstanceEntity } from '../database/entities';
 import { MartingaleGridStrategy } from './martingale-grid.strategy';
+import { MartingaleGridV2Strategy } from './martingale-grid-v2.strategy';
 import { TrendFollowingStrategy } from './trend-following.strategy';
 import { DonchianBreakoutStrategy } from './donchian-breakout.strategy';
 import { MeanReversionStrategy } from './mean-reversion.strategy';
@@ -36,6 +37,7 @@ import { StrategyController } from './strategy.controller';
   ],
   providers: [
     MartingaleGridStrategy,
+    MartingaleGridV2Strategy,
     TrendFollowingStrategy,
     DonchianBreakoutStrategy,
     MeanReversionStrategy,

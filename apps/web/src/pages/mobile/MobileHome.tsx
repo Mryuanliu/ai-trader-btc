@@ -74,7 +74,7 @@ export function MobileHome() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: 0.05 }}
-        onClick={() => navigate('/m/agent')}
+        onClick={() => navigate('/m/strategy')}
         className="glass-card glass-card-hover p-4 text-left"
       >
         <div className="flex items-center justify-between">
@@ -115,7 +115,7 @@ export function MobileHome() {
         <div className="mb-3 flex items-center justify-between">
           <span className="section-title">最近合约订单</span>
           <button
-            onClick={() => navigate('/m/orders')}
+            onClick={() => navigate('/m/trade')}
             className="text-[11px] text-btc-light hover:underline"
           >
             全部

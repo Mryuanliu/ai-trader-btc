@@ -284,6 +284,34 @@ export class LotService {
     return this.lotRepo.findOne({ where: { id: lotId, status: 'OPEN' } });
   }
 
+  /** 按 id 取任意状态 Lot（保险丝撤单/对账前置用） */
+  async getLotById(lotId: string): Promise<PositionLotEntity | null> {
+    return this.lotRepo.findOne({ where: { id: lotId } });
+  }
+
+  /** 保险丝注册：记录当前有效保护单 id 与触发价（1:1，幂等覆盖） */
+  async attachProtection(lotId: string, protectionOrderId: string, stopPrice: number): Promise<void> {
+    await this.lotRepo.update({ id: lotId }, { protectionOrderId, protectedStopPrice: stopPrice });
+  }
+
+  /** 保险丝注销/清空（撤单或触发结算后调用） */
+  async clearProtection(lotId: string): Promise<void> {
+    await this.lotRepo.update({ id: lotId }, { protectionOrderId: null, protectedStopPrice: 0 });
+  }
+
+  /**
+   * 仍挂着保险丝、但已非 OPEN 的 Lot（孤儿保险丝，Reconciler 撤单用）。
+   * 防止归档仓的灾难单埋伏下一轮同方向新仓（hedge 下 SELL+LONG 只吃多仓）。
+   */
+  async listOrphanProtections(): Promise<PositionLotEntity[]> {
+    return this.lotRepo
+      .createQueryBuilder('l')
+      .where('l.protectionOrderId IS NOT NULL')
+      .andWhere('l.status IN (:...st)', { st: ['CLOSED', 'CANCELLED'] })
+      .take(200)
+      .getMany();
+  }
+
   /**
    * 按开仓订单查 Lot。
    *

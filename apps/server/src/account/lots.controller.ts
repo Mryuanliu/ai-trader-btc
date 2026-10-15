@@ -27,7 +27,9 @@ export class LotsController {
     const m: MarketType = market === 'futures' ? 'futures' : 'spot';
     const currentPrice = await this.getSymbolPrice(m, symbol);
 
-    if (status === 'open') {
+    // 返回值是大写枚举（OPEN/CLOSED），但过滤旧代码只识别小写 'open'：传 status=OPEN 会静默落全量分支。
+    // 改为大小写不敏感，使返回的枚举值能原样传回过滤。
+    if ((status ?? '').toLowerCase() === 'open') {
       const rows = await this.lots.listOpen(m, symbol);
       return rows.map((r) => this.lots.toDTO(r, currentPrice ?? undefined));
     }

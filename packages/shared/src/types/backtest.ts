@@ -118,6 +118,12 @@ export interface BacktestReport {
   costBreakdown: CostBreakdown;
   equityCurve: EquityPoint[];
   trades: BacktestTrade[];
+  /**
+   * 出场归因现金流（按 exitReason 聚合，W6 报告层）：
+   * V2 马丁的配对减=SIGNAL、侧目标/篮子止盈=TAKE_PROFIT、止损=STOP_LOSS…。
+   * 旧报告无此字段（optional，向前兼容）。
+   */
+  exitSummary?: Array<{ exitReason: string; count: number; realizedPnl: number }>;
 }
 
 /** runner 产出、CLI/服务序列化成报告的中间结果 */

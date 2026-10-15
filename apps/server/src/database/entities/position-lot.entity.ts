@@ -97,6 +97,17 @@ export class PositionLotEntity {
   // 注：原 stopLossPct / takeProfitPct（逐层止盈止损）已移除——
   // 出场由策略负责（马丁网格用篮子追踪止盈），平台不扫描也不落这两个参数。
 
+  /**
+   * 交易所侧灾难保险丝（`PROTECTION` 挂单）当前有效订单 id（1:1）；NULL=未注册/已撤。
+   * 仅 live/testnet/dry_run 有义；回测不写此列。
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  protectionOrderId: string | null;
+
+  /** 保险丝触发价；0=未注册（DB_SYNCHRONIZE 历史行取默认） */
+  @Column({ type: 'decimal', precision: 28, scale: 10, default: 0 })
+  protectedStopPrice: number;
+
   @Column({ type: 'varchar', length: 24, nullable: true })
   exitReason: LotExitReason | null;
 

@@ -194,6 +194,8 @@ export class MeanReversionStrategy implements TradingStrategy {
       const closes = closed.map((c) => c.close);
       const mark = ctx.markPrice > 0 ? ctx.markPrice : ctx.price;
       for (const lot of ctx.openLots) {
+        // 在途平仓去重：已有 reduceOnly 平单未结算时不再重复下平仓单（对齐马丁 hasPendingClose 闸）。
+        if (lot.hasPendingClose) continue;
         if (!this.entryTimes.has(lot.id)) {
           this.entryTimes.set(lot.id, lot.openedAt ? Date.parse(lot.openedAt) : ctx.now);
         }

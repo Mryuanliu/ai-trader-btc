@@ -7,6 +7,7 @@ import {
   floorToStep,
   FUTURES_TAKER_FEE_RATE,
   FuturesOrderIntent,
+  LotDirection,
   LotExitReason,
   normalizeOrder,
   NormalizeResult,
@@ -53,6 +54,11 @@ export interface PlaceFuturesOrderInput {
   lotId?: string;
   /** 平仓原因（结算 Lot 用） */
   exitReason?: LotExitReason;
+  /**
+   * 交易所侧灾难保险丝触发价（仅开仓意图有效）：省略吃平台兜底，null 显式关闭本 Lot 保险丝。
+   * `PROTECTION_MODE=off` 时整条挂载路径短路 no-op。
+   */
+  protectionStopPrice?: number | null;
   /**
    * 策略运行实例（P2 多实例隔离）：`策略名:交易对`。
    *
@@ -172,8 +178,12 @@ export class FuturesTradingService {
           exitReason: input.exitReason ?? 'MANUAL',
           mode: order.mode,
         });
+        // 平仓成交 → 拆掉该 Lot 的灾难保险丝（否则撤单后仍会在交易所侧埋伏未来仓位）
+        await this.detachProtectionForLot(input.lotId);
       } else {
-        await this.lots.createFromOpenFill({ order, fill });
+        const lot = await this.lots.createFromOpenFill({ order, fill });
+        // 开仓成交 → 注册灾难保险丝（PROTECTION_MODE=off 时短路 no-op）
+        if (lot) await this.attachProtectionForLot(lot, order.leverage, input.protectionStopPrice);
       }
     } catch (err) {
       // Lot 记账失败不应让下单流程失败，但必须留痕排查
@@ -380,17 +390,23 @@ export class FuturesTradingService {
               lotId: target.id,
               closeOrderId: order.id,
               fill: { price: fillPrice, quantity: detail.filledQuantity, fee },
-              exitReason: 'MANUAL',
+              exitReason: order.source === 'PROTECTION' ? 'STOP_ON_EXCHANGE' : 'MANUAL',
               mode: order.mode,
             });
             lots += 1;
+            // 平仓成交（含保险丝自身触发）→ 拆掉该 Lot 保险丝（已成交的撤单失败会被吞）
+            await this.detachProtectionForLot(target.id);
           }
         } else {
           const created = await this.lots.createFromOpenFill({
             order,
             fill: { price: fillPrice, quantity: detail.filledQuantity, fee },
           });
-          if (created) lots += 1;
+          if (created) {
+            lots += 1;
+            // 异步补建的 Lot 同样要注册保险丝（off 短路）
+            await this.attachProtectionForLot(created, order.leverage);
+          }
         }
 
         this.logger.log(
@@ -997,6 +1013,274 @@ export class FuturesTradingService {
     return this.toDTO(saved);
   }
 
+  // ============================================================ 交易所侧灾难保险丝
+  // 见 docs/exchange-protection-orders-plan.md。纯实盘运维层：PROTECTION_MODE=off 时全部
+  // 方法短路 no-op；回测/闸门不经过此处（I-3 量具零污染）。策略侧出场（吊灯/信号）仍是第一道闸，
+  // 保险丝只在进程失能时兜底（I-1 不抢跑，由灾难线默认足够宽保证）。
+
+  private protectionMode(): 'off' | 'fixed' | 'trailing' {
+    const m = this.config.get<string>('PROTECTION_MODE') ?? 'off';
+    return m === 'fixed' || m === 'trailing' ? m : 'off';
+  }
+
+  /** 灾难线兜底距离（%），受 I-2 约束不超过杠杆安全区 1/(2×lev) 的 95% */
+  private resolveProtectionStopPrice(args: {
+    direction: LotDirection;
+    entryPrice: number;
+    leverage: number;
+    declared?: number | null;
+  }): number | null {
+    const { direction, entryPrice, leverage, declared } = args;
+    if (declared === null) return null; // 策略显式关闭本 Lot 保险丝
+    if (!(entryPrice > 0)) return null;
+    const lev = Math.max(1, Math.floor(leverage || 1));
+    const maxLossPct = ((100 / (2 * lev)) * 0.95); // I-2 退化校验：灾难线亏损须 < 1/(2×lev)
+    const defaultPct = Number(this.config.get<string>('PROTECTION_DEFAULT_PCT') ?? 5) || 5;
+    let stop: number;
+    if (declared !== undefined && declared > 0) {
+      stop = declared;
+    } else {
+      const pct = Math.min(defaultPct, maxLossPct);
+      stop = direction === 'LONG' ? entryPrice * (1 - pct / 100) : entryPrice * (1 + pct / 100);
+    }
+    // I-2 兜底：无论声明还是默认，灾难线亏损距离若越出强平安全区，收窄到区内
+    const lossPct =
+      direction === 'LONG' ? ((entryPrice - stop) / entryPrice) * 100 : ((stop - entryPrice) / entryPrice) * 100;
+    if (!(lossPct > 0) || lossPct > maxLossPct) {
+      const clamped = Math.min(lossPct > 0 ? lossPct : defaultPct, maxLossPct);
+      stop = direction === 'LONG' ? entryPrice * (1 - clamped / 100) : entryPrice * (1 + clamped / 100);
+      this.logger.warn(
+        `保险丝灾难线被 I-2 约束收窄到 ${clamped.toFixed(2)}%（杠杆 ${lev}x 安全区内，原方向亏损 ${lossPct.toFixed(2)}%）`,
+      );
+    }
+    return stop;
+  }
+
+  /**
+   * 为 Lot 挂一条 STOP_MARKET 反向平仓灾难单（数量=lot.quantity，触发价=灾难线）。
+   * dry_run 只本地落 NEW（由 processDryRunGridOrders 模拟触发）；live/testnet 走 algoOrder。
+   */
+  private async placeProtectiveStop(lot: PositionLotEntity, stopPrice: number): Promise<OrderEntity> {
+    const cfg = await this.futuresConfig.get();
+    const mode = cfg.mode;
+    const symbol = lot.symbol;
+    const adapter = await this.registry.get(FUTURES_EXCHANGE);
+    if (!isFuturesAdapter(adapter)) {
+      throw new BusinessException('EXCHANGE_ERROR', '合约适配器不支持交易');
+    }
+    const filters: SymbolFilters = await adapter.getSymbolFilters(symbol);
+    const reverseSide: OrderSide = lot.direction === 'LONG' ? 'SELL' : 'BUY';
+    const normalized = normalizeOrder({
+      quantity: Number(lot.quantity),
+      price: stopPrice,
+      filters,
+      type: 'LIMIT',
+    });
+    if (!normalized.ok) {
+      const failure = normalized as Extract<NormalizeResult, { ok: false }>;
+      throw new BusinessException('BAD_REQUEST', failure.note);
+    }
+    const ok = normalized as Extract<NormalizeResult, { ok: true }>;
+    const quantity = ok.quantity;
+    const alignedStop = ok.price ?? stopPrice;
+    const notional = quantity * alignedStop;
+    if (filters.minNotional > 0 && notional < filters.minNotional) {
+      throw new BusinessException(
+        'BAD_REQUEST',
+        `保险丝名义价值 ${notional.toFixed(2)} 低于交易所最小要求 ${filters.minNotional}`,
+      );
+    }
+    const clientOrderId = `pt_${lot.id.slice(0, 8)}_${Date.now().toString(36)}`;
+    let order = this.orderRepo.create({
+      exchange: FUTURES_EXCHANGE,
+      market: 'futures',
+      environment: mode === 'live' ? 'live' : 'testnet',
+      mode,
+      symbol,
+      side: reverseSide,
+      type: 'STOP_MARKET',
+      price: 0,
+      stopPrice: alignedStop,
+      quantity,
+      quoteAmount: notional,
+      status: 'NEW',
+      clientOrderId,
+      source: 'PROTECTION',
+      leverage: Math.max(1, Math.floor(cfg.leverage)),
+      positionSide: lot.direction as PositionSide,
+      reduceOnly: true, // 本地记平仓意图（对账据此走 close 分支）；hedge 下发由适配器决定
+      lotId: lot.id,
+      strategyInstanceId: lot.strategyInstanceId ?? null,
+    });
+    order = await this.orderRepo.save(order);
+    if (mode === 'dry_run') {
+      this.logger.log(
+        `[dry_run] 保险丝注册 ${reverseSide}/${lot.direction} ${quantity} ${symbol} 灾难价 ${alignedStop}`,
+      );
+      return order;
+    }
+    try {
+      const result = await adapter.placeOrder({
+        symbol,
+        side: reverseSide,
+        type: 'STOP_MARKET',
+        quantity,
+        stopPrice: alignedStop,
+        positionSide: lot.direction as PositionSide,
+        reduceOnly: true,
+        clientOrderId,
+        priceProtect: true,
+      });
+      order.exchangeOrderId = result.exchangeOrderId;
+      order.status = result.status === 'FILLED' ? 'FILLED' : 'NEW';
+      order = await this.orderRepo.save(order);
+      this.logger.log(
+        `[${mode}] 保险丝已挂 ${reverseSide}/${lot.direction} ${quantity} ${symbol} 灾难价 ${alignedStop} -> ${order.status}`,
+      );
+    } catch (err) {
+      order.status = 'FAILED';
+      order.error = (err as Error).message;
+      order = await this.orderRepo.save(order);
+      throw new BusinessException('EXCHANGE_ERROR', `保险丝挂单失败：${order.error}`);
+    }
+    return order;
+  }
+
+  /** 开仓成交后注册保险丝：off 短路；已挂跳过；失败不阻断记账主流程（Reconciler 下轮补挂） */
+  async attachProtectionForLot(
+    lot: PositionLotEntity,
+    leverage: number,
+    declared?: number | null,
+  ): Promise<void> {
+    if (this.protectionMode() === 'off') return;
+    if (lot.market !== 'futures' || Number(lot.quantity) <= 0) return;
+    if (lot.protectionOrderId) return;
+    const stop = this.resolveProtectionStopPrice({
+      direction: lot.direction,
+      entryPrice: Number(lot.entryPrice),
+      leverage,
+      declared,
+    });
+    if (stop === null) return;
+    try {
+      const order = await this.placeProtectiveStop(lot, stop);
+      await this.lots.attachProtection(lot.id, order.id, Number(order.stopPrice));
+    } catch (err) {
+      this.logger.warn(
+        `保险丝挂单失败（lot=${lot.id.slice(0, 8)}），交由对账补挂：${(err as Error).message}`,
+      );
+    }
+  }
+
+  /** 平仓结算后拆保险丝：先撤单（已触发/已成交的撤单失败被吞），finally 清空本地记录 */
+  async detachProtectionForLot(lotId: string): Promise<void> {
+    if (this.protectionMode() === 'off') return;
+    const lot = await this.lots.getLotById(lotId);
+    if (!lot || !lot.protectionOrderId) return;
+    const orderId = lot.protectionOrderId;
+    try {
+      await this.cancelOrder(orderId);
+    } catch (err) {
+      // 已触发/已成交/已撤 → 撤单失败不报错，以查询/结算结果为准
+      this.logger.debug(`撤销保险丝忽略（lot=${lotId.slice(0, 8)}）：${(err as Error).message}`);
+    } finally {
+      await this.lots.clearProtection(lotId);
+    }
+  }
+
+  /**
+   * 保险丝对账（幂等，供调度器按 PROTECTION_RECONCILE_SEC 调用）：
+   * - 缺挂：OPEN 且无有效保险丝 → 补挂
+   * - 数量漂移：保险丝数量 ≠ lot.quantity → 先挂新（新量）成功再撤旧
+   * - 孤儿：CLOSED/CANCELLED 仍挂 NEW → 撤
+   * - 账外脱漏（仅 live）：交易所还挂着 pt_ 前缀单但本地无记录 → 撤
+   */
+  async reconcileProtections(): Promise<{ attached: number; replaced: number; orphans: number }> {
+    const out = { attached: 0, replaced: 0, orphans: 0 };
+    if (this.protectionMode() === 'off') return out;
+    const cfg = await this.futuresConfig.get();
+
+    for (const lot of await this.lots.listOpen('futures')) {
+      if (Number(lot.quantity) <= 0) continue;
+      if (!lot.protectionOrderId) {
+        await this.attachProtectionForLot(lot, cfg.leverage);
+        out.attached += 1;
+        continue;
+      }
+      const po = await this.orderRepo.findOne({ where: { id: lot.protectionOrderId } });
+      const alive = po && (po.status === 'NEW' || po.status === 'PARTIALLY_FILLED');
+      if (!alive) {
+        // 保险丝已不在途（被触发/失败）→ 清记录重挂
+        await this.lots.clearProtection(lot.id);
+        await this.attachProtectionForLot(lot, po?.leverage ?? cfg.leverage);
+        out.attached += 1;
+        continue;
+      }
+      if (Number(po.quantity) !== Number(lot.quantity)) {
+        // 数量漂移：以灾难线地板重挂新量，成功再撤旧（双挂窗口只多不减、不反手）
+        const stop =
+          Number(lot.protectedStopPrice) ||
+          this.resolveProtectionStopPrice({
+            direction: lot.direction,
+            entryPrice: Number(lot.entryPrice),
+            leverage: po.leverage || cfg.leverage,
+          }) ||
+          0;
+        if (stop > 0) {
+          try {
+            const nu = await this.placeProtectiveStop(lot, stop);
+            await this.lots.attachProtection(lot.id, nu.id, Number(nu.stopPrice));
+            try {
+              await this.cancelOrder(po.id);
+            } catch {
+              /* 旧单可能刚被触发，忽略 */
+            }
+            out.replaced += 1;
+          } catch (err) {
+            this.logger.warn(`保险丝换单失败（lot=${lot.id.slice(0, 8)}）：${(err as Error).message}`);
+          }
+        }
+      }
+    }
+
+    // 孤儿保险丝：已非 OPEN 却仍挂着（含 reconcileOrphanLots 归档的仓）
+    for (const lot of await this.lots.listOrphanProtections()) {
+      const po = await this.orderRepo.findOne({ where: { id: lot.protectionOrderId! } });
+      if (po && (po.status === 'NEW' || po.status === 'PARTIALLY_FILLED')) {
+        try {
+          await this.cancelOrder(po.id);
+        } catch {
+          /* 可能刚触发 */
+        }
+      }
+      await this.lots.clearProtection(lot.id);
+      out.orphans += 1;
+    }
+
+    // 账外脱漏（仅 live）：交易所挂着 pt_ 单但本地无记录 → 撤（宁可暂奔也不留错单）
+    if (cfg.mode === 'live') {
+      try {
+        const adapter = await this.registry.get(FUTURES_EXCHANGE);
+        const open = await adapter.getOpenOrders();
+        for (const o of open) {
+          if (!o.clientOrderId?.startsWith('pt_')) continue;
+          const known = await this.orderRepo.findOne({ where: { clientOrderId: o.clientOrderId } });
+          if (known) continue;
+          await adapter.cancelOrder({
+            symbol: o.symbol,
+            clientOrderId: o.clientOrderId,
+            conditional: isConditionalOrder(o.type),
+          });
+          this.logger.warn(`撤除账外保险丝孤儿单：${o.clientOrderId}（本地无记录）`);
+        }
+      } catch (err) {
+        this.logger.debug(`账外保险丝对账跳过：${(err as Error).message}`);
+      }
+    }
+
+    return out;
+  }
+
   /**
    * 有**在途平仓委托**的 Lot id 列表。
    *
@@ -1057,6 +1341,8 @@ export class FuturesTradingService {
         });
         if (created) {
           repaired += 1;
+          // 补建的 Lot 也注册保险丝（off 短路）
+          await this.attachProtectionForLot(created, order.leverage);
           this.logger.warn(
             `补建缺失 Lot：订单 ${order.id.slice(0, 8)} ${order.side} ${order.quantity} ${order.symbol}`,
           );
@@ -1130,16 +1416,35 @@ export class FuturesTradingService {
       order.filledPrice = fillPrice;
       await this.orderRepo.save(order);
 
-      await this.lots.createFromOpenFill({
-        order,
-        fill: { price: fillPrice, quantity: Number(order.quantity), fee },
-      });
-
-      triggered += 1;
-      this.logger.log(
-        `[dry_run] 网格挂单触发成交：${order.side}/${order.positionSide} ` +
-          `${order.quantity} ${symbol} @ ${fillPrice.toFixed(2)}`,
-      );
+      if (order.reduceOnly) {
+        // 保险丝（灾难止损）被行情穿越 → 本地模拟触发平仓结算，与实盘同走 settleFromCloseFill
+        if (order.lotId) {
+          await this.lots.settleFromCloseFill({
+            lotId: order.lotId,
+            closeOrderId: order.id,
+            fill: { price: fillPrice, quantity: Number(order.quantity), fee },
+            exitReason: order.source === 'PROTECTION' ? 'STOP_ON_EXCHANGE' : 'MANUAL',
+            mode: 'dry_run',
+          });
+          await this.detachProtectionForLot(order.lotId);
+        }
+        triggered += 1;
+        this.logger.log(
+          `[dry_run] 保险丝触发平仓：${order.side}/${order.positionSide} ` +
+            `${order.quantity} ${symbol} @ ${fillPrice.toFixed(2)}（lot=${order.lotId?.slice(0, 8)}）`,
+        );
+      } else {
+        const lot = await this.lots.createFromOpenFill({
+          order,
+          fill: { price: fillPrice, quantity: Number(order.quantity), fee },
+        });
+        if (lot) await this.attachProtectionForLot(lot, order.leverage);
+        triggered += 1;
+        this.logger.log(
+          `[dry_run] 网格挂单触发成交：${order.side}/${order.positionSide} ` +
+            `${order.quantity} ${symbol} @ ${fillPrice.toFixed(2)}`,
+        );
+      }
     }
     return { triggered };
   }

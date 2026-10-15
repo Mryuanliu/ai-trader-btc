@@ -68,6 +68,8 @@ export function AdminStrategyGovernance() {
       if (r.gated && r.gate) {
         // 正常上架被拦：弹出未达详情；带理由重推时若仍返回 gated（理论不会）也走这里
         setGateCtx({ name: s.name, label: s.label, gate: r.gate });
+        // 打开即清空理由：避免上一次填写的强推理由残留被误提交（reason 是受控 state，即使 Modal 销组件也不会重置它）。
+        setReason('');
         message.warning('闸门未达，未上架');
         return;
       }

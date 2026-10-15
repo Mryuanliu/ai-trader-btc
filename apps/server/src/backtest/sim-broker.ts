@@ -81,6 +81,16 @@ export interface SimBrokerConfig {
  * - STOP 触发单（`placeStopOrder`）在后续 bar 用 **high/low** 判定穿越，
  *   触发价成交并处理跳空（BUY 取 max(stopPrice, open)、SELL 取 min(stopPrice, open)）。
  * - 滑点恒对成交方不利（BUY 抬价、SELL 压价）；开/平各按 taker 费率双边计费。
+ *
+ * 挂单撤换语义（W6 钉死，单测守护）：runner 每根 bar 先 `beginBar`（触发判定）
+ * 后 `onTick`，故同 tick 内「撤旧+重挂」的新单**当根不参与触发判定**，从下一根
+ * bar 的高低价起效；被撤的旧价从此不会再成交。MT5 实盘允许新单当根剩余时间
+ * 内立即触发，这里略保守——与策略「收盘后决策、只看已闭合 bar」的 C-1 parity 口径自洽。
+ *
+ * 粒度差如实记录（不新开修复）：bar 极值近似 EA 的 tick 级触发/标记价流——
+ * intrabar 穿越但收盘回落时 vectorized 仍判成交（偏乐观）；event-driven-v1
+ * 引擎逐笔aggTrade/markPrice 流才消除该偏差。M4 双口径的「钱」判定用收盘
+ * ctx（mark=bar.close），与 EA 每 5s 扫净值存在粒度差。
  */
 export class SimBroker implements StrategyExecutor {
   private readonly lots = new Map<string, SimLot>();
@@ -102,6 +112,9 @@ export class SimBroker implements StrategyExecutor {
 
   readonly trades: BacktestTrade[] = [];
   readonly closedRounds: PerfRound[] = [];
+
+  /** 出场归因现金流（按 exitReason 聚合）：配对减=SIGNAL、侧目标/篮子=TAKE_PROFIT…（W6/M4 报告层） */
+  readonly exitSummary = new Map<string, { count: number; realizedPnl: number }>();
 
   constructor(private readonly cfg: SimBrokerConfig) {}
 
@@ -333,6 +346,11 @@ export class SimBroker implements StrategyExecutor {
     this.realizedCum += realizedPnl;
     this.feeCum += exitFee;
     this.slipCum += slipCost;
+
+    const ex = this.exitSummary.get(reason) ?? { count: 0, realizedPnl: 0 };
+    ex.count += 1;
+    ex.realizedPnl += realizedPnl;
+    this.exitSummary.set(reason, ex);
 
     const round = this.rounds.get(lot.roundId);
     if (round) {

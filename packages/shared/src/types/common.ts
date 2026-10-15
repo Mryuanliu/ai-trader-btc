@@ -264,8 +264,9 @@ export const TIMEFRAME_LABELS: Record<Timeframe, string> = {
  * - `strategy`：策略自动下单（当前唯一的自动来源）
  * - `manual`：用户在面板手动下单
  * - `agent`：历史遗留（旧决策引擎），仅存量数据中存在
+ * - `PROTECTION`：交易所侧灾难保险丝（`STOP_MARKET` 反向平仓单），futures-trading 开仓后自动注册；syncPendingFills 结算时归因 `STOP_ON_EXCHANGE`
  */
-export type OrderSource = 'agent' | 'manual' | 'strategy';
+export type OrderSource = 'agent' | 'manual' | 'strategy' | 'PROTECTION';
 
 export const DEFAULT_SYMBOL = 'BTCUSDT';
 export const QUOTE_ASSET = 'USDT';

@@ -72,6 +72,56 @@ describe('SimBroker 撮合约定', () => {
     expect(b.orderViews()).toHaveLength(1);
   });
 
+  // ---- W6 钉死：挂单撤换语义（M3-3 跟踪换单的回测落点）----
+  it('同 tick 撤旧换新：旧价永不成交，新单从下一根 bar 起判触发', async () => {
+    const b = broker();
+    const a = await b.placeStopOrder({ direction: 'LONG', stopPrice: 100, quantity: 1, leverage: 1, reason: 'grid-L2' });
+    // 同一「tick」内撤换（beginBar 之后、下根 beginBar 之前）：模拟挂单跟踪撤旧换新
+    await b.cancelOrder(a.orderId!);
+    const nb = await b.placeStopOrder({ direction: 'LONG', stopPrice: 108, quantity: 1, leverage: 1, reason: 'grid-L2-trail' });
+    // 新单尚未跨过 beginBar → 不成交（当根不判触发）
+    expect(b.lotViews(110)).toHaveLength(0);
+    // 下一根：high 110 越过新单 108（若旧单 100 未撤会同价成交）→ 只按新价成交一次
+    b.beginBar(mk(300_000, 105, 110, 104, 109));
+    const v = b.lotViews(109);
+    expect(v).toHaveLength(1);
+    // 跳空处理：BUY 取 max(stop 108, open 105)=108，再叠不利滑点
+    expect(v[0].entryPrice).toBeCloseTo(108 * 1.001, 6);
+    expect(b.orderViews()).toHaveLength(0);
+    expect(nb.orderId).toBeTruthy();
+  });
+
+  it('撤单后跨过任何 bar 都不复活；重挂同价新单独立起效', async () => {
+    const b = broker();
+    const a = await b.placeStopOrder({ direction: 'SHORT', stopPrice: 90, quantity: 1, leverage: 1, reason: 'grid-L2' });
+    await b.cancelOrder(a.orderId!);
+    b.beginBar(mk(0, 95, 96, 80, 90)); // low 80 深穿旧 stop 90 → 已撤不复活
+    expect(b.lotViews(90)).toHaveLength(0);
+    const n = await b.placeStopOrder({ direction: 'SHORT', stopPrice: 90, quantity: 1, leverage: 1, reason: 'grid-L2-2' });
+    b.beginBar(mk(300_000, 91, 92, 85, 88)); // 新单下一根正常触发：SELL 取 min(stop 90, open 91)=90
+    const v = b.lotViews(88);
+    expect(v).toHaveLength(1);
+    expect(v[0].entryPrice).toBeCloseTo(90 * 0.999, 6);
+    expect(n.orderId).toBeTruthy();
+  });
+
+  it('exitSummary：平仓现金流按 exitReason 归因聚合（配对减=SIGNAL 可分辨）', async () => {
+    const b = broker();
+    await b.openLot({ direction: 'LONG', quantity: 1, leverage: 1, reason: 'L1' });
+    await b.openLot({ direction: 'LONG', quantity: 1, leverage: 1, reason: 'L2' });
+    b.beginBar(mk(0, 110, 112, 109, 111));
+    const v = b.lotViews(111);
+    await b.closeLot(v[0].id, 'SIGNAL'); // 配对减归因
+    await b.closeLot(v[1].id, 'TAKE_PROFIT'); // 侧目标/篮子归因
+    b.beginBar(mk(300_000, 115, 116, 114, 115));
+    const sum = Object.fromEntries([...b.exitSummary.entries()].map(([k, x]) => [k, x.count]));
+    expect(sum).toEqual({ SIGNAL: 1, TAKE_PROFIT: 1 });
+    const sig = b.exitSummary.get('SIGNAL')!;
+    expect(sig.realizedPnl).toBeGreaterThan(0); // 110.11 入 → 115×0.999 出，盈利了结
+    const total = [...b.exitSummary.values()].reduce((a, x) => a + x.realizedPnl, 0);
+    expect(total).toBeCloseTo(b.finalize().rounds[0].realizedPnl, 6); // 聚合与轮次同源
+  });
+
   it('同一建仓周期的多笔归为一个篮子（layerCount 累计，全平才结一轮）', async () => {
     const b = broker();
     await b.openLot({ direction: 'LONG', quantity: 1, leverage: 1, reason: 'L1' });

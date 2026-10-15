@@ -82,7 +82,7 @@ export function DevDocsButton() {
         onClose={() => setOpen(false)}
         title={<span className="text-[14px]">策略开发指南 · docs/strategy-dev-guide.md</span>}
         width="min(880px, 94vw)"
-        destroyOnClose
+        destroyOnHidden
       >
         <div className="-mx-1 px-1 pb-6">
           <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>

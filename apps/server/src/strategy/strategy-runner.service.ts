@@ -634,6 +634,7 @@ export class StrategyRunner implements OnModuleInit {
     symbol: string;
     params: Record<string, unknown>;
     interval: Timeframe;
+    strategy?: { contextCandles?: number };
   }): Promise<StrategyContext | null> {
     const symbol = inst.symbol;
 
@@ -646,9 +647,10 @@ export class StrategyRunner implements OnModuleInit {
 
     // 按**实例运行周期**喂线：冠军参是在哪个周期调出来的就在哪个周期实跑，
     // 否则通道/持仓「根数」量纲错位（如 1h 调的 brk=80 喂 1m 会退化成 80 分钟）。
-    // 拉够入场通道根数：max(基础上限, 通道根数+余量)，受 store 各周期保有量自然约束。
+    // 拉够入场通道根数：max(基础上限, 通道根数+余量, 策略声明窗口)，受 store 各周期保有量自然约束。
+    // 声明窗口（contextCandles）保证回测/实盘同构：多框架重采样吃不满会静默降档（W6）。
     const brk = Number((inst.params as { breakoutLookbackBars?: number }).breakoutLookbackBars ?? 0);
-    const ctxLimit = Math.max(CONTEXT_CANDLE_LIMIT, brk + 5);
+    const ctxLimit = Math.max(CONTEXT_CANDLE_LIMIT, brk + 5, inst.strategy?.contextCandles ?? 0);
     const candles: Candle[] = this.market.getCandles(symbol, inst.interval, ctxLimit);
     const [openLots, openOrders, availableMargin, positions, pendingCloseLots] =
       await Promise.all([

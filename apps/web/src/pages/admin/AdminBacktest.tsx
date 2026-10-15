@@ -39,6 +39,7 @@ import {
   type BacktestRunSummary,
   type EquityPoint,
   type ResearchResult,
+  type StrategyDescriptor,
   type SweepResult,
   type Timeframe,
 } from '@ai-trader/shared';
@@ -82,6 +83,30 @@ function parseJsonField(raw: string | undefined, field: string): Record<string, 
   } catch {
     throw new Error(`${field} 不是合法 JSON`);
   }
+}
+
+/**
+ * 从策略描述符提取参数键集合，供双模式对照前置校验：
+ * - allKeys：全参数名（defaultParams 键 ∪ paramSchema.properties 键）
+ * - boolKeys：其中布尔开关（paramSchema 声明 type==='boolean' 或 defaultParams 值推断）
+ */
+function describeParamKeys(desc: StrategyDescriptor): { allKeys: string[]; boolKeys: string[] } {
+  const all = new Set<string>();
+  const bool = new Set<string>();
+  const defaultParams = (desc.defaultParams ?? {}) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(defaultParams)) {
+    all.add(k);
+    if (typeof v === 'boolean') bool.add(k);
+  }
+  const props = (desc.paramSchema as { properties?: Record<string, { type?: string }> } | undefined)
+    ?.properties;
+  if (props) {
+    for (const [k, spec] of Object.entries(props)) {
+      all.add(k);
+      if (spec?.type === 'boolean') bool.add(k);
+    }
+  }
+  return { allKeys: [...all], boolKeys: [...bool] };
 }
 
 // ------------------------------------------------------------------ 净值曲线
@@ -545,6 +570,28 @@ export function AdminBacktest() {
     if (!key) {
       message.error('请填写要翻转的参数名（如 useVolSizing）');
       return;
+    }
+    // 前置校验：翻转的参数名必须真实存在于所选策略的参数集，且是 boolean 开关。
+    // 否则 TRUE/FALSE 两次跑的是完全相同的 params → 静默 no-op 却依旧报“对照完成”
+    // （历史上对无 useVolSizing 的马丁网格就踩过：两组回撤/收益逐位相同）。
+    const strategyName = form.getFieldValue('strategyName');
+    const desc = (strategies.data ?? []).find((s) => s.name === strategyName);
+    if (desc) {
+      const { allKeys, boolKeys } = describeParamKeys(desc);
+      if (!allKeys.includes(key)) {
+        message.error(
+          `参数「${key}」不在「${strategyName}」的参数集里，对照不会生效。可对照的布尔开关：${
+            boolKeys.length ? boolKeys.join('、') : '（该策略没有布尔开关）'
+          }`,
+        );
+        return;
+      }
+      if (boolKeys.length > 0 && !boolKeys.includes(key)) {
+        message.error(
+          `「${key}」不是布尔开关，双模式对照只翻转 boolean 参数。可对照的布尔开关：${boolKeys.join('、')}`,
+        );
+        return;
+      }
     }
     try {
       body = buildBody();

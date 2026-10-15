@@ -16,6 +16,7 @@ import { loadMarketEvents } from './events-feed';
 import { ENGINE_VERSION_V1, type EngineStats } from './types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** ctx 窗口基础值；策略可用 contextCandles 声明抬高（与 vectorized/实盘 runner 同规则） */
 const CONTEXT_LOOKBACK = 300;
 
 function computeAtr(candles: Candle[]): number {
@@ -93,7 +94,8 @@ export async function runBacktestEventDriven(
     maintMarginRatio: opts.maintMarginRatio ?? 0.005,
   });
 
-  // 用于 onTick 构造 ctx 的 bar 历史窗口（每根 bar 收盘时推入）
+  // 用于 onTick 构造 ctx 的 bar 历史窗口（每根 bar 收盘时推入）；上限同实盘按策略声明抬高
+  const contextLookback = Math.max(CONTEXT_LOOKBACK, strategy.contextCandles ?? 0);
   const barHistory: Candle[] = [];
   const equityCurve: EquityPoint[] = [];
   let peak = config.initialCapital;
@@ -113,7 +115,7 @@ export async function runBacktestEventDriven(
 
     barsProcessed += 1;
     barHistory.push(ev.bar);
-    if (barHistory.length > CONTEXT_LOOKBACK) barHistory.shift();
+    if (barHistory.length > contextLookback) barHistory.shift();
 
     const mark = broker.prices().mark || ev.bar.close;
     if (barsProcessed > config.warmupBars) {

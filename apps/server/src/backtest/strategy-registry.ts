@@ -2,6 +2,7 @@ import type { StrategyRegistry as NestStrategyRegistry } from '../strategy/strat
 import type { TradingStrategy } from '../strategy/types';
 import { TrendFollowingStrategy } from '../strategy/trend-following.strategy';
 import { MartingaleGridStrategy } from '../strategy/martingale-grid.strategy';
+import { MartingaleGridV2Strategy } from '../strategy/martingale-grid-v2.strategy';
 import { DonchianBreakoutStrategy } from '../strategy/donchian-breakout.strategy';
 import { MeanReversionStrategy } from '../strategy/mean-reversion.strategy';
 
@@ -19,6 +20,7 @@ import { MeanReversionStrategy } from '../strategy/mean-reversion.strategy';
 export const STRATEGY_REGISTRY: Record<string, () => TradingStrategy> = {
   trend_following: () => new TrendFollowingStrategy(),
   martingale_grid: () => new MartingaleGridStrategy(),
+  martingale_grid_v2: () => new MartingaleGridV2Strategy(),
   donchian_breakout: () => new DonchianBreakoutStrategy(),
   mean_reversion: () => new MeanReversionStrategy(),
 };
