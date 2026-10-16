@@ -34,7 +34,10 @@ export interface SizingCfg {
 export function trendStrength01(score: number, trendRange: number): number {
   const abs = Math.abs(score);
   if (abs <= trendRange) return 0;
-  return Math.min(1, Math.max(0, (abs - trendRange) / (100 - trendRange)));
+  // 卫句（2026-10-16 A13）：trendRange=100 时分母为 0 → NaN 会污染全部下游
+  const denom = 100 - trendRange;
+  if (!(denom > 0)) return 1;
+  return Math.min(1, Math.max(0, (abs - trendRange) / denom));
 }
 
 /**
@@ -52,7 +55,9 @@ export function directionalStep(s0: number, score: number, side: Side, cfg: Sizi
     return s0 * (1 + 0.25 * t);
   }
   // 确认/强趋势（≥45）：顺势加密、逆势拉宽（EA L1530–1536）
-  const t = (abs - cfg.trendConfirm) / (100 - cfg.trendConfirm);
+  // 卫句（2026-10-16 A13）：trendConfirm=100 时分母为 0 → NaN 间距
+  const denom = 100 - cfg.trendConfirm;
+  const t = denom > 0 ? (abs - cfg.trendConfirm) / denom : 1;
   if (trendSide) return s0 * Math.max(0.7, 1 - cfg.kStepTrend * t);
   return s0 * (1 + cfg.kStepCounter * t);
 }
@@ -70,7 +75,9 @@ export function scoreLotMultiplier(
   const abs = Math.abs(score);
   if (abs <= cfg.trendRange) return gridMult;
   if (abs >= cfg.trendStrong) return trendMultMin;
-  const t = (abs - cfg.trendRange) / (cfg.trendStrong - cfg.trendRange);
+  // 卫句（2026-10-16 A13）：trendStrong≤trendRange 时分母为 0 → NaN 倍率
+  const denom = cfg.trendStrong - cfg.trendRange;
+  const t = denom > 0 ? (abs - cfg.trendRange) / denom : 1;
   return gridMult - (gridMult - trendMultMin) * t;
 }
 

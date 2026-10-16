@@ -46,7 +46,10 @@ export function sideTargetUsdt(
 /** 趋势保护比例（EA MarketTrendProtectionRatio L1490–1496）：<confirm → 0 */
 export function trendProtectionMinRatio(absScore: number, trendConfirm: number): number {
   if (absScore < trendConfirm) return 0;
-  return Math.min(0.55, Math.max(0.35, 0.35 + 0.2 * ((absScore - trendConfirm) / (100 - trendConfirm))));
+  // 卫句（2026-10-16 A13）：trendConfirm=100 时分母为 0 → NaN 会让趋势保护永不拦截
+  const denom = 100 - trendConfirm;
+  if (!(denom > 0)) return 0.55;
+  return Math.min(0.55, Math.max(0.35, 0.35 + 0.2 * ((absScore - trendConfirm) / denom)));
 }
 
 /** 价格回撤判据（EA TrailPriceRetraced L2059 的比例形态） */
@@ -105,9 +108,11 @@ export function findReductionPair(args: {
       const net = p.netUsdt + r.netUsdt;
       if (net < minNet) continue;
       if (guard) {
-        const paired = Math.min(p.quantity, r.quantity);
+        // 帽按**保护侧实际减量**判（2026-10-16 A12）：Lot 不可分割、两单都全平，
+        // 保护侧减少的就是 p.quantity。原来按 min(p.qty, r.qty) 判帽——
+        // 顺势大手数 + 逆势小手数时帽放行而保护侧被打光，趋势防护失效。
         const cap = Math.max(minLotQty, guard.protectLotsQty * guard.maxShare);
-        if (paired > cap) continue; // EA L2436–2438：max_pair_share=0.30
+        if (p.quantity > cap) continue; // EA L2436–2438：max_pair_share=0.30
         const afterProtect = Math.max(0, guard.protectLotsQty - p.quantity);
         const afterRisk = Math.max(0, guard.riskLotsQty - r.quantity);
         if (afterRisk > 0 && afterProtect < afterRisk * guard.minRatio) continue; // EA L2440

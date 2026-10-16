@@ -16,7 +16,7 @@ import { StrategyRunner } from '../../strategy/strategy-runner.service';
 /**
  * 交易数据工具层：把行内服务薄映射成 LLM function-calling 工具。
  *
- * 设计约束（与 docs/feishu-llm-bot-plan.md 锁定决策一致）：
+ * 设计约束：
  * - 9 个只读工具：全部投影现有服务的权威口径数据，不做二次计算；
  * - 3 个写工具（stop_strategy/start_strategy/close_basket）：这里只定义 schema
  *   与执行方法，**执行权在确认流**（ConfirmationStore 确认后调 executeWrite），

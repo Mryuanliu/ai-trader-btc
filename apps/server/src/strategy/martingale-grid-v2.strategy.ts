@@ -56,6 +56,7 @@ const PARAM_SCHEMA = {
     basketStopLossPct: { type: 'number', title: '篮子止损(比例,0=关)', minimum: 0 },
     basketTakeProfitUsdt: { type: 'number', title: '篮子固定止盈(USDT,0=关)', minimum: 0 },
     basketStopLossUsdt: { type: 'number', title: '篮子固定止损(USDT,0=关)', minimum: 0 },
+    cooldownAfterStopSec: { type: 'integer', title: '止损后冷却(秒,0=关)', minimum: 0, maximum: 86400 },
     netExposureCapPct: { type: 'number', title: '净敞口上限(名义/保证金,0=不限)', minimum: 0 },
     triggerPriceType: { type: 'string', title: '止盈/止损判定基准', enum: ['mark', 'last'] },
     // ---- V2 机制开关（逐项接入，关断态 = 老策略 martingale_grid 逐位一致）----
@@ -135,6 +136,11 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   // 不依赖比例/追踪——便于用「赚够 X U / 亏到 X U 就走」的直观口径观察整条交易链路。
   basketTakeProfitUsdt: 0,
   basketStopLossUsdt: 0,
+  /**
+   * 止损后冷却（秒，2026-10-16 新增，0=关；与 V1 同参数同语义）。
+   * 切断震荡市「止损 → 反弹追入 → 再止损」的碎钞循环；止盈了结不触发。
+   */
+  cooldownAfterStopSec: 300,
   netExposureCapPct: 0,
   // 判定基准默认标记价（抗插针、与交易所风控同口径）；last=最新成交价（更跟手但可能被插针误触发）
   triggerPriceType: 'mark',
@@ -183,7 +189,7 @@ const EXIT_FEE_RATE = FUTURES_TAKER_FEE_RATE;
  * 目标：把黄金 EA `king-v4-balance.mq5` 的完整决策能力移植到平台引擎——
  * Brain 六因子市场内核（M1）、评分驱动间距/倍率/目标（M2）、挂单纪律（M3）、
  * 四层出场优先级链（M4）、pivot 双侧 carry（M5）、极端行情熔断（M6）。
- * 完整设计与 EA 行号锚点见 `docs/martingale-grid-v2-king-port-plan.md`。
+ * 完整设计已内化为本文件与实现注释（原 `docs/martingale-grid-v2-king-port-plan.md` 已归档至 git 历史）。
  *
  * 与老策略 `martingale_grid` 的关系（骨架克隆，非同盘改写）：
  * - 老策略全部 20 参同名同语义继承，行为代码逐位一致；
@@ -204,80 +210,7 @@ const EXIT_FEE_RATE = FUTURES_TAKER_FEE_RATE;
  *
  * 平台侧不参与以上任何判断：策略自治，平台只负责把单子送到交易所。
  */
-@Injectable()
-export class MartingaleGridV2Strategy implements TradingStrategy {
-  private readonly logger = new Logger(MartingaleGridV2Strategy.name);
-
-  readonly name = 'martingale_grid_v2';
-  readonly label = '马丁网格V2 · King内核';
-  readonly description =
-    '六因子 Brain 市场内核 + 评分驱动间距/倍率/目标 + 挂单纪律 + 四层出场链（完整移植自黄金 EA king-v4-balance）';
-  readonly defaultParams = DEFAULT_PARAMS;
-  readonly paramSchema = PARAM_SCHEMA;
-  /**
-   * Brain 三框架吃满需 70×15=1050 根执行周期 K 线（M1），加熔断/ATR 余量声明 1100；
-   * 实盘/回测 runner 据此喂窗口，两端同源（C-1 parity）。数据不足时 MarketRegime
-   * 自带「该框架 0 分进融合」（同 EA L1387），冷启动行为两环境一致。
-   */
-  readonly contextCandles = 1100;
-
-  // 注：版本 / 能力声明 / 风险提示统一由 `strategies/martingale-grid-v2/manifest.json` 提供，
-  // 改文案或上下架不必改代码、不必重新编译。两处都写会漂移，故此处不留。
-
-  /** 篮子净收益率的峰值（追踪止盈用）；篮子清空后重置 */
-  private basketPeakPct = 0;
-  /**
-   * 首层市价开仓的去重时间戳。
-   *
-   * 市价单发出到 Lot 入账之间有对账延迟，这段时间内 `openLots` 恒为空，
-   * 不设闸的话每个 tick 都会认为「该开首层」而重复市价开仓。
-   */
-  private firstMarketAt = 0;
-  /**
-   * M3-6 首 K 线锁（纪律态）：已发过市价首层的执行周期 K 线时间戳。
-   * 同一根 K 线内不重复市价开首层——替代脆弱的 20s 时间戳去重，回测语义也更干净。
-   */
-  private firstMarketBarTime = 0;
-  /** 篮子追踪是否进入 armed 态（M3-7）：峰值达启动线即 true，纪律态据此维持空挂单 */
-  private basketArmed = false;
-  /** 首单追踪状态（M4-1，G7）：arm 标志 / 方向 / 判定价峰值 */
-  private firstTrailActive = false;
-  private firstTrailSide: Side | null = null;
-  private firstTrailPeakPrice = 0;
-  /** 篮子追踪价格口径（M4-2，G14 双口径）：钱达标 arm 后跟踪判定价峰值，回撤离场 */
-  private basketTrailActive = false;
-  private basketTrailPeakPrice = 0;
-  /** M6 三层熔断评估结果：每 tick 重算一次；null = 未启用 */
-  private guardFlags: ExtremeGuardFlags | null = null;
-  /** 最近一次 tick 的决策摘要，供前端展示 */
-  private lastNote = '';
-  /** M5 pivot 警报是否在本 tick 触发（stateV:2 grid.exposure.pivotAlarm，展示用） */
-  private pivotAlarm = false;
-  /** 本 tick 保证金预检是否拦过单（暂停徽章的 margin 位，展示用） */
-  private marginBlocked = false;
-  /** 配对减仓候选预览（M8 exits.pair，纯展示不改交易） */
-  private pairCandidate: {
-    profitLotId: string;
-    riskLotId: string;
-    allowed: boolean;
-    why: string;
-  } | null = null;
-  /** stateV:2 三模块快照（regime/grid/exits/gates），每 tick 由 recordObservability 重建 */
-  private lastV2: Record<string, unknown> | null = null;
-
-  /** Brain 市场内核（useBrain/useScoreSizing/useExitChain/usePivotCarry 任一开启才创建） */
-  private regime?: MarketRegime;
-  /** 本 tick 的市场快照；null = 内核未启用/未初始化（关断态所有消费点回退老行为） */
-  private regimeSnap: RegimeSnapshot | null = null;
-
-  /**
-   * 可观测快照：纯派生数据，不参与任何决策。
-   *
-   * 用户看到「只下了一单就不动了」时，需要能回答「它在等什么」——
-   * 是等价格走到加层线，还是等净收益触及止盈启动线。
-   * 没有这些数字，正常的等待与真的卡死无法区分。
-   */
-  private lastObs: {
+  interface V2Obs {
     price: number;
     step: number;
     longLayers: number;
@@ -304,7 +237,113 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       long: Array<{ layer: number; price: number; qty: number }>;
       short: Array<{ layer: number; price: number; qty: number }>;
     };
-  } | null = null;
+  }
+
+  interface V2PairCandidate {
+    profitLotId: string;
+    riskLotId: string;
+    allowed: boolean;
+    why: string;
+  }
+
+interface V2InstanceState {
+  basketPeakPct: number;
+  /** 已发过市价首层的执行周期 K 线时间戳（首层去重闸） */
+  firstMarketBarTime: number;
+  /** 最近一次篮子止损时间（冷却闸用；止盈了结不更新） */
+  lastStopAt: number;
+  basketArmed: boolean;
+  firstTrailActive: boolean;
+  firstTrailSide: Side | null;
+  firstTrailPeakPrice: number;
+  basketTrailActive: boolean;
+  basketTrailPeakPrice: number;
+  guardFlags: ExtremeGuardFlags | null;
+  lastNote: string;
+  pivotAlarm: boolean;
+  marginBlocked: boolean;
+  pairCandidate: V2PairCandidate | null;
+  lastV2: Record<string, unknown> | null;
+  regime: MarketRegime | null;
+  regimeSnap: RegimeSnapshot | null;
+  /** Brain 已重算到的最后一根已收盘 K 线时间戳（bar 门控） */
+  regimeBarTime: number;
+  lastObs: V2Obs | null;
+}
+
+/** 真权益：钱包余额 + 浮盈（walletBalance 缺失时退化为可用保证金口径） */
+function trueEquity(ctx: StrategyContext): number {
+  const upnl = ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0);
+  return ctx.walletBalance > 0 ? ctx.walletBalance + upnl : ctx.availableMargin + upnl;
+}
+
+@Injectable()
+export class MartingaleGridV2Strategy implements TradingStrategy {
+  private readonly logger = new Logger(MartingaleGridV2Strategy.name);
+
+  readonly name = 'martingale_grid_v2';
+  readonly label = '马丁网格V2 · King内核';
+  readonly description =
+    '六因子 Brain 市场内核 + 评分驱动间距/倍率/目标 + 挂单纪律 + 四层出场链（完整移植自黄金 EA king-v4-balance）';
+  readonly defaultParams = DEFAULT_PARAMS;
+  readonly paramSchema = PARAM_SCHEMA;
+  /**
+   * Brain 三框架吃满需 70×15=1050 根执行周期 K 线（M1），加熔断/ATR 余量声明 1100；
+   * 实盘/回测 runner 据此喂窗口，两端同源（C-1 parity）。数据不足时 MarketRegime
+   * 自带「该框架 0 分进融合」（同 EA L1387），冷启动行为两环境一致。
+   */
+  readonly contextCandles = 1100;
+
+  // 注：版本 / 能力声明 / 风险提示统一由 `strategies/martingale-grid-v2/manifest.json` 提供，
+  // 改文案或上下架不必改代码、不必重新编译。两处都写会漂移，故此处不留。
+
+
+  /**
+   * 可观测快照：纯派生数据，不参与任何决策。
+   *
+   * 用户看到「只下了一单就不动了」时，需要能回答「它在等什么」——
+   * 是等价格走到加层线，还是等净收益触及止盈启动线。
+   * 没有这些数字，正常的等待与真的卡死无法区分。
+   */
+
+  /**
+   * 每实例可变状态（2026-10-16 修复「多实例状态互串」）。
+   *
+   * 策略是 DI 单例：同一策略的多个实例（不同币种）共享同一个对象，
+   * 可变状态放实例字段上时，一个实例的 tick 会抹掉另一个实例的状态——
+   * 空仓实例每 tick 重置 basketPeakPct，直接让有仓实例的追踪止盈失效。
+   * 所有可变状态按 `ctx.instanceId`（策略名:交易对）隔离。
+   */
+  private readonly states = new Map<string, V2InstanceState>();
+
+  private stateOf(instanceId: string): V2InstanceState {
+    let s = this.states.get(instanceId);
+    if (!s) {
+      s = {
+        basketPeakPct: 0,
+        firstMarketBarTime: 0,
+        lastStopAt: 0,
+        basketArmed: false,
+        firstTrailActive: false,
+        firstTrailSide: null,
+        firstTrailPeakPrice: 0,
+        basketTrailActive: false,
+        basketTrailPeakPrice: 0,
+        guardFlags: null,
+        lastNote: '',
+        pivotAlarm: false,
+        marginBlocked: false,
+        pairCandidate: null,
+        lastV2: null,
+        regime: null,
+        regimeSnap: null,
+        regimeBarTime: 0,
+        lastObs: null,
+      };
+      this.states.set(instanceId, s);
+    }
+    return s;
+  }
 
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown> {
     const src = raw ?? {};
@@ -335,6 +374,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       basketStopLossPct: num('basketStopLossPct', 0, 1),
       basketTakeProfitUsdt: num('basketTakeProfitUsdt', 0, 1e9),
       basketStopLossUsdt: num('basketStopLossUsdt', 0, 1e9),
+      cooldownAfterStopSec: Math.floor(num('cooldownAfterStopSec', 0, 86400)),
       netExposureCapPct: num('netExposureCapPct', 0, 100),
       triggerPriceType: ['mark', 'last'].includes(String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType))
         ? String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType)
@@ -347,9 +387,12 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       usePivotCarry: bool('usePivotCarry'),
       useExtremeGuard: bool('useExtremeGuard'),
       pauseAroundFunding: bool('pauseAroundFunding'),
-      trendRange: num('trendRange', 0, 100),
-      trendConfirm: num('trendConfirm', 0, 100),
-      trendStrong: num('trendStrong', 0, 100),
+      // 钳制上限 99 + trendStrong 必须 > trendRange（2026-10-16 A13）：
+      // 域值=100 会让 (100-x) 分母为 0 产生 NaN 间距/倍率（该侧静默停止挂单），
+      // trendStrong≤trendRange 同样让 scoreLotMultiplier 除零。
+      trendRange: num('trendRange', 0, 99),
+      trendConfirm: num('trendConfirm', 0, 99),
+      trendStrong: Math.max(num('trendStrong', 0, 99), num('trendRange', 0, 99) + 1),
       trendDirEnter: num('trendDirEnter', 0, 100),
       trendDirExit: num('trendDirExit', 0, 100),
       chopGate: num('chopGate', 0, 1),
@@ -374,29 +417,17 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     };
   }
 
-  onStart(params: Record<string, unknown>): void {
-    this.basketPeakPct = 0;
-    this.lastNote = `已启动（每侧最多 ${params.maxLayersPerSide} 层，倍率 ${params.lotMultiplier}）`;
+  onStart(params: Record<string, unknown>, instanceId?: string): void {
+    const id = instanceId ?? '';
+    this.states.delete(id);
+    const st = this.stateOf(id);
+    st.lastNote = `已启动（每侧最多 ${params.maxLayersPerSide} 层，倍率 ${params.lotMultiplier}）`;
   }
 
-  onStop(): void {
-    this.basketPeakPct = 0;
-    this.firstMarketAt = 0;
-    this.firstMarketBarTime = 0;
-    this.basketArmed = false;
-    this.firstTrailActive = false;
-    this.firstTrailSide = null;
-    this.firstTrailPeakPrice = 0;
-    this.basketTrailActive = false;
-    this.basketTrailPeakPrice = 0;
-    this.guardFlags = null;
-    this.lastNote = '';
-    this.pivotAlarm = false;
-    this.marginBlocked = false;
-    this.pairCandidate = null;
-    this.lastV2 = null;
-    this.regime = undefined;
-    this.regimeSnap = null;
+  onStop(instanceId?: string): void {
+    // 停实例即丢弃其全部运行态（Brain 自适应状态/追踪峰值/闸门一并清理）
+    if (instanceId) this.states.delete(instanceId);
+    else this.states.clear();
   }
 
   /**
@@ -404,14 +435,15 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
    * 四个消费开关任一开启就需要快照；全关时零开销（E0 关断态与老策略逐位一致）。
    */
   private refreshRegime(ctx: StrategyContext): void {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as Record<string, unknown>;
     const need = Boolean(p.useBrain || p.useScoreSizing || p.useExitChain || p.usePivotCarry);
     if (!need) {
-      this.regimeSnap = null;
+      st.regimeSnap = null;
       return;
     }
-    if (!this.regime) {
-      this.regime = new MarketRegime({
+    if (!st.regime) {
+      st.regime = new MarketRegime({
         tfMults: [1, 5, 15],
         frameWeights: [0.3, 0.36, 0.34],
         trendRange: p.trendRange as number,
@@ -424,7 +456,14 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         calib: { slopeNorm: 0.06, macdNorm: 0.30, diNorm: 40 },
       });
     }
-    this.regimeSnap = this.regime.update(ctx.candles);
+    // bar 门控 + 只用已收盘 K 线（2026-10-16 B3）：
+    // 实盘 tick 800ms 一次，不设闸会把自适应平滑施加 ~75 次/bar（防抖被中和），
+    // 且未收盘 bar 内容随价格跳动，与回测「每根 bar 一次、只用收盘数据」行为分叉。
+    const closedBars = ctx.candles.length > 0 ? ctx.candles.slice(0, -1) : ctx.candles;
+    const barT = closedBars.length > 0 ? closedBars[closedBars.length - 1].time : 0;
+    if (barT > 0 && barT === st.regimeBarTime) return;
+    if (barT > 0) st.regimeBarTime = barT;
+    st.regimeSnap = st.regime.update(closedBars);
   }
 
   /** 三件套分段函数的共用配置（来自策略参数，clamp 已在 normalizeParams 完成） */
@@ -439,13 +478,19 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     };
   }
 
-  getState(): Record<string, unknown> {
-    const o = this.lastObs;
+  getState(instanceId?: string): Record<string, unknown> {
+    // 无 instanceId 的调用（单实例场景/旧代码）：优先取有实际交易状态的条目，
+    // 跳过 onStart 无参调用遗留的空键条目
+    const st = instanceId
+      ? this.states.get(instanceId)
+      : ([...this.states.entries()].find(([k]) => k !== '')?.[1] ??
+        [...this.states.values()][0]);
+    const o = st?.lastObs ?? null;
     return {
       // 前端据此分流新策略展示（M8-①）；老策略无此字段走现有分支
       stateV: 2,
-      basketPeakPct: this.basketPeakPct,
-      note: this.lastNote,
+      basketPeakPct: st?.basketPeakPct ?? 0,
+      note: st?.lastNote ?? '',
       // 可观测信息：回答「为什么现在不动」
       ...(o
         ? {
@@ -469,35 +514,36 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
           }
         : {}),
       // stateV:2 三模块（regime/grid/exits）+ 暂停闸口；未跑过 tick 时缺失，前端降级显兜底字段
-      ...(this.lastV2 ?? {}),
+      ...(st?.lastV2 ?? {}),
     };
   }
 
   async onTick(ctx: StrategyContext, exec: StrategyExecutor): Promise<void> {
+    const st = this.stateOf(ctx.instanceId);
     const lots = ctx.openLots;
 
     // stateV:2 观察标志每 tick 复位（纯展示，不参与任何决策）
-    this.pivotAlarm = false;
-    this.pairCandidate = null;
-    this.marginBlocked = false;
+    st.pivotAlarm = false;
+    st.pairCandidate = null;
+    st.marginBlocked = false;
 
     // ---- 0. Brain 市场内核（开关全关时零开销，行为与老策略一致）----
     this.refreshRegime(ctx);
 
     // 篮子为空：重置追踪峰值与出场链状态（新周期）
     if (lots.length === 0) {
-      this.basketPeakPct = 0;
-      this.basketArmed = false;
-      this.firstTrailActive = false;
-      this.firstTrailSide = null;
-      this.firstTrailPeakPrice = 0;
-      this.basketTrailActive = false;
-      this.basketTrailPeakPrice = 0;
+      st.basketPeakPct = 0;
+      st.basketArmed = false;
+      st.firstTrailActive = false;
+      st.firstTrailSide = null;
+      st.firstTrailPeakPrice = 0;
+      st.basketTrailActive = false;
+      st.basketTrailPeakPrice = 0;
     }
 
     // M6 三层熔断：每 tick 评估一次（只拦新开/加层，不动出场）
     const pAll = ctx.params as Record<string, unknown>;
-    this.guardFlags = pAll.useExtremeGuard
+    st.guardFlags = pAll.useExtremeGuard
       ? extremeGuardFlags(ctx.candles, {
           atrSpikeMult: pAll.atrSpikeMult as number,
           volDirGate: pAll.volDirGate as number,
@@ -507,7 +553,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     // ---- 1. 出场：M4 优先级链（开启态）→ 篮子追踪/固定止损止盈兜底 ----
     if (lots.length > 0) {
-      const chainOn = pAll.useExitChain === true && this.regimeSnap !== null;
+      const chainOn = pAll.useExitChain === true && st.regimeSnap !== null;
       // 开启态接管也要留下新鲜快照（否则前端停在动作前的旧数据）；关断态不补记，
       // 保持与老策略 getState 逐位一致（E0 行为级钉）
       if (chainOn && (await this.runExitChain(ctx, exec))) {
@@ -525,27 +571,27 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     if (
       lots.length > 0 &&
       (ctx.params as Record<string, unknown>).usePendingDiscipline === true &&
-      this.basketArmed
+      st.basketArmed
     ) {
       for (const o of ctx.openOrders) {
         const r = await exec.cancelOrder(o.id);
         if (!r.ok) this.logger.warn(`armed 态撤单失败（${r.error}）`);
       }
-      this.lastNote = `篮子追踪已 arm（峰值 ${(this.basketPeakPct * 100).toFixed(2)}%）：维持空挂单，不开新层`;
+      st.lastNote = `篮子追踪已 arm（峰值 ${(st.basketPeakPct * 100).toFixed(2)}%）：维持空挂单，不开新层`;
       this.recordObservability(ctx);
       return;
     }
 
     // ---- 2. 方向选择（单侧金字塔过滤）+ M6 熔断拦截进场侧 ----
     let { allowLong, allowShort } = this.resolveSides(ctx);
-    if (this.guardFlags) {
-      if (this.guardFlags.spike) {
-        this.lastNote = `熔断：ATR 尖峰 ${this.guardFlags.atrRatio.toFixed(2)}× 暂停新开/加层（出场链不受影响）`;
+    if (st.guardFlags) {
+      if (st.guardFlags.spike) {
+        st.lastNote = `熔断：ATR 尖峰 ${st.guardFlags.atrRatio.toFixed(2)}× 暂停新开/加层（出场链不受影响）`;
         this.recordObservability(ctx);
         return;
       }
-      allowLong = allowLong && !this.guardFlags.blockLong;
-      allowShort = allowShort && !this.guardFlags.blockShort;
+      allowLong = allowLong && !st.guardFlags.blockLong;
+      allowShort = allowShort && !st.guardFlags.blockShort;
     }
 
     // ---- 3. 网格挂单 ----
@@ -614,6 +660,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
   }
 
   private recordObservability(ctx: StrategyContext): void {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       maxLayersPerSide: number;
       leverage: number;
@@ -659,7 +706,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     const pnlPriceType: 'mark' | 'last' = p.triggerPriceType === 'last' ? 'last' : 'mark';
     const pnlPrice = pnlPriceType === 'last' ? ctx.price : ctx.markPrice > 0 ? ctx.markPrice : ctx.price;
 
-    this.lastObs = {
+    st.lastObs = {
       price: ctx.price,
       pnlPrice,
       pnlPriceType,
@@ -687,7 +734,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     // ---- stateV:2 三模块快照（M8-① 数据契约；纯派生数据，零决策影响）----
     const pp = ctx.params as Record<string, unknown>;
-    const snap = this.regimeSnap;
+    const snap = st.regimeSnap;
     const trendRangeN = pp.trendRange as number;
     const r2 = (v: number, d = 2): number => Number(v.toFixed(d));
 
@@ -724,7 +771,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
           followTarget = t;
         }
       }
-      const ladderRows = this.lastObs?.ladder[dir === 'LONG' ? 'long' : 'short'] ?? [];
+      const ladderRows = st.lastObs?.ladder[dir === 'LONG' ? 'long' : 'short'] ?? [];
       return {
         layers: ls.length,
         lots: Number(ls.reduce((a, l) => a + l.quantity, 0).toFixed(8)),
@@ -746,7 +793,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     const longView = sideView('LONG');
     const shortView = sideView('SHORT');
 
-    this.lastV2 = {
+    st.lastV2 = {
       regime: snap
         ? {
             score: r2(snap.score),
@@ -765,7 +812,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
               trendiness: Number(f.trendiness.toFixed(3)),
               factors: f.factors,
             })),
-            calibrated: this.regime?.cfg.calib ?? null,
+            calibrated: st.regime?.cfg.calib ?? null,
           }
         : null,
       grid: {
@@ -776,14 +823,14 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
           marginOccupy: r2(p.leverage > 0 ? netNotional / p.leverage : 0),
           // 保守口径：两侧同帽，取更满一侧的剩余额度
           guardRemainLayers: Math.max(0, p.maxLayersPerSide - Math.max(longs.length, shorts.length)),
-          pivotAlarm: this.pivotAlarm,
+          pivotAlarm: st.pivotAlarm,
         },
       },
       exits: {
         basket: {
           netUsdt: r2(netUsdt),
           netPct: Number(netPct.toFixed(6)),
-          peakPct: Number(this.basketPeakPct.toFixed(6)),
+          peakPct: Number(st.basketPeakPct.toFixed(6)),
           startNow: Number(
             (pp.useScoreSizing === true && snap
               ? basketStartNow(pp.basketStartPct as number, snap.score, {
@@ -793,12 +840,12 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
               : (pp.basketStartPct as number)
             ).toFixed(6),
           ),
-          trailArmed: this.basketTrailActive,
-          retraceExitAt: this.basketTrailActive
+          trailArmed: st.basketTrailActive,
+          retraceExitAt: st.basketTrailActive
             ? r2(
                 ctx.netQty >= 0
-                  ? this.basketTrailPeakPrice * (1 - (pp.basketGivebackPct as number))
-                  : this.basketTrailPeakPrice * (1 + (pp.basketGivebackPct as number)),
+                  ? st.basketTrailPeakPrice * (1 - (pp.basketGivebackPct as number))
+                  : st.basketTrailPeakPrice * (1 + (pp.basketGivebackPct as number)),
               )
             : null,
         },
@@ -806,9 +853,9 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
           long: { targetUsdt: longView.target, hit: longView.hit },
           short: { targetUsdt: shortView.target, hit: shortView.hit },
         },
-        pair: { candidate: this.pairCandidate },
+        pair: { candidate: st.pairCandidate },
         firstTrail: {
-          active: this.firstTrailActive,
+          active: st.firstTrailActive,
           windowRemainBars: (() => {
             if (ctx.openLots.length !== 1) return null;
             const openedMs = Date.parse(ctx.openLots[0].openedAt);
@@ -820,10 +867,10 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       },
       // 暂停闸口（状态带徽章源）：哪个闸在拦新开/加层
       gates: {
-        spike: this.guardFlags?.spike === true,
+        spike: st.guardFlags?.spike === true,
         funding: pp.pauseAroundFunding === true && nearFundingWindow(ctx.now),
-        margin: this.marginBlocked,
-        atrRatio: this.guardFlags ? Number(this.guardFlags.atrRatio.toFixed(2)) : null,
+        margin: st.marginBlocked,
+        atrRatio: st.guardFlags ? Number(st.guardFlags.atrRatio.toFixed(2)) : null,
       },
     };
   }
@@ -860,6 +907,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
    * 点值→K 线口径换算见 lib/exit-chain 头注。返回 true = 本 tick 出场链已接管。
    */
   private async runExitChain(ctx: StrategyContext, exec: StrategyExecutor): Promise<boolean> {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as Record<string, unknown>;
     const firstTrailBars = p.firstTrailBars as number;
     const basketStartPct = p.basketStartPct as number;
@@ -875,12 +923,12 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     if (!(netNotional > 0)) return false;
     const netUsdt = lots.reduce((a, l) => a + l.unrealizedPnl, 0) - netNotional * EXIT_FEE_RATE;
     const netPct = netUsdt / netNotional;
-    if (netPct > this.basketPeakPct) this.basketPeakPct = netPct;
+    if (netPct > st.basketPeakPct) st.basketPeakPct = netPct;
 
     // 出场在途：等结算结果，不重复动作（同篮子兜底语义）
     const inflight = lots.filter((l) => l.hasPendingClose).length;
     if (inflight > 0) {
-      this.lastNote = `出场链进行中（${inflight}/${lots.length} 单在途），等待成交`;
+      st.lastNote = `出场链进行中（${inflight}/${lots.length} 单在途），等待成交`;
       return true;
     }
 
@@ -903,68 +951,75 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       const side: Side = lot.direction === 'SHORT' ? 'SHORT' : 'LONG';
       const openedMs = Date.parse(lot.openedAt);
       const inWindow = Number.isFinite(openedMs) && ctx.now - openedMs <= firstTrailBars * this.barMs(ctx);
-      if (this.firstTrailActive && this.firstTrailSide !== side) {
-        this.firstTrailActive = false; // 方向变了（旧单平后新单反向）：重置重开窗口
-        this.firstTrailPeakPrice = 0;
+      if (st.firstTrailActive && st.firstTrailSide !== side) {
+        st.firstTrailActive = false; // 方向变了（旧单平后新单反向）：重置重开窗口
+        st.firstTrailPeakPrice = 0;
       }
-      this.firstTrailSide = side;
+      st.firstTrailSide = side;
       const step = this.gridStepFor(ctx, lot.direction);
-      if (!this.firstTrailActive) {
+      if (!st.firstTrailActive) {
         if (inWindow && netUsdt >= step * lot.quantity) {
-          this.firstTrailActive = true;
-          this.firstTrailPeakPrice = pnlPrice;
+          st.firstTrailActive = true;
+          st.firstTrailPeakPrice = pnlPrice;
           for (const o of ctx.openOrders) await exec.cancelOrder(o.id); // arm 即撤挂单
-          this.lastNote = `首单追踪 arm @ ${pnlPrice.toFixed(2)}（净 ${netUsdt.toFixed(2)}U ≥ 1格 ${step.toFixed(2)}×${lot.quantity}）`;
+          st.lastNote = `首单追踪 arm @ ${pnlPrice.toFixed(2)}（净 ${netUsdt.toFixed(2)}U ≥ 1格 ${step.toFixed(2)}×${lot.quantity}）`;
           return true;
         }
       } else {
-        if (pnlPrice > this.firstTrailPeakPrice) this.firstTrailPeakPrice = pnlPrice;
-        for (const o of ctx.openOrders) await exec.cancelOrder(o.id);
+        // 峰值按方向取极值（2026-10-16 A2）：LONG 跟最高价、SHORT 跟最低价。
+        // 原来只往高推——空单盈利方向（跌）永远更新不了峰，追踪止盈退化成极高止损位
         const dirSign: 1 | -1 = side === 'LONG' ? 1 : -1;
-        if (distanceRetraced(dirSign, this.firstTrailPeakPrice, pnlPrice, step)) {
-          const peak = this.firstTrailPeakPrice;
+        if (
+          (dirSign > 0 && pnlPrice > st.firstTrailPeakPrice) ||
+          (dirSign < 0 && pnlPrice < st.firstTrailPeakPrice)
+        ) {
+          st.firstTrailPeakPrice = pnlPrice;
+        }
+        for (const o of ctx.openOrders) await exec.cancelOrder(o.id);
+        if (distanceRetraced(dirSign, st.firstTrailPeakPrice, pnlPrice, step)) {
+          const peak = st.firstTrailPeakPrice;
           const r = await exec.closeLot(lot.id, 'TAKE_PROFIT');
-          this.firstTrailActive = false;
-          this.firstTrailPeakPrice = 0;
-          this.lastNote = r.ok
+          st.firstTrailActive = false;
+          st.firstTrailPeakPrice = 0;
+          st.lastNote = r.ok
             ? `首单追踪离场：峰 ${peak.toFixed(2)} 回撤 1 格，净 ${netUsdt.toFixed(2)}U`
             : `首单追踪平仓失败：${r.error}`;
           return true;
         }
-        this.lastNote = `首单追踪持有中（峰 ${this.firstTrailPeakPrice.toFixed(2)}，回撤 1 格离场）`;
+        st.lastNote = `首单追踪持有中（峰 ${st.firstTrailPeakPrice.toFixed(2)}，回撤 1 格离场）`;
         return true;
       }
-    } else if (this.firstTrailActive) {
-      this.firstTrailActive = false; // 加层后首单追踪让位（EA L3136 仅单子持仓语义）
-      this.firstTrailPeakPrice = 0;
+    } else if (st.firstTrailActive) {
+      st.firstTrailActive = false; // 加层后首单追踪让位（EA L3136 仅单子持仓语义）
+      st.firstTrailPeakPrice = 0;
     }
 
     // ---- 2) 篮子追踪已 arm（G14）：独占监控，等待价格回撤离场----
-    if (this.basketTrailActive) {
+    if (st.basketTrailActive) {
       const dirSign: 1 | -1 = ctx.netQty >= 0 ? 1 : -1;
-      if ((dirSign > 0 && pnlPrice > this.basketTrailPeakPrice) || (dirSign < 0 && pnlPrice < this.basketTrailPeakPrice)) {
-        this.basketTrailPeakPrice = pnlPrice;
+      if ((dirSign > 0 && pnlPrice > st.basketTrailPeakPrice) || (dirSign < 0 && pnlPrice < st.basketTrailPeakPrice)) {
+        st.basketTrailPeakPrice = pnlPrice;
       }
       for (const o of ctx.openOrders) await exec.cancelOrder(o.id); // arm 态维持空挂单
-      if (priceRetraced(dirSign, this.basketTrailPeakPrice, pnlPrice, basketGivebackPct)) {
-        const peak = this.basketTrailPeakPrice;
+      if (priceRetraced(dirSign, st.basketTrailPeakPrice, pnlPrice, basketGivebackPct)) {
+        const peak = st.basketTrailPeakPrice;
         for (const l of lots) {
           const r = await exec.closeLot(l.id, 'TAKE_PROFIT');
           if (!r.ok) this.logger.warn(`篮子追踪平仓失败 lot=${l.id}: ${r.error}`);
         }
-        this.basketTrailActive = false;
-        this.basketTrailPeakPrice = 0;
-        this.basketPeakPct = 0;
-        this.lastNote = `篮子追踪离场：判定价峰 ${peak.toFixed(2)} 回撤 ${(basketGivebackPct * 100).toFixed(2)}%，净 ${netUsdt.toFixed(2)}U 全平 ${lots.length} 单`;
-        this.logger.log(this.lastNote);
+        st.basketTrailActive = false;
+        st.basketTrailPeakPrice = 0;
+        st.basketPeakPct = 0;
+        st.lastNote = `篮子追踪离场：判定价峰 ${peak.toFixed(2)} 回撤 ${(basketGivebackPct * 100).toFixed(2)}%，净 ${netUsdt.toFixed(2)}U 全平 ${lots.length} 单`;
+        this.logger.log(st.lastNote);
         return true;
       }
-      this.lastNote = `篮子追踪持有（arm 后独占：峰 ${this.basketTrailPeakPrice.toFixed(2)}，回撤 ${(basketGivebackPct * 100).toFixed(2)}% 离场）`;
+      st.lastNote = `篮子追踪持有（arm 后独占：峰 ${st.basketTrailPeakPrice.toFixed(2)}，回撤 ${(basketGivebackPct * 100).toFixed(2)}% 离场）`;
       return true; // 短路：arm 态不再走侧目标/配对/再 arm
     }
 
     // ---- 3) 分侧均值目标 + 域分流（G5/G6）----
-    const snap = this.regimeSnap!;
+    const snap = st.regimeSnap!;
     const domain = scoreDomain(snap.score, snap.dir, trendRange);
     const longLots = lots.filter((l) => l.direction === 'LONG');
     const shortLots = lots.filter((l) => l.direction === 'SHORT');
@@ -1010,7 +1065,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         const riskViews = this.sideViews(ctx, rLots);
         const pick = findReductionPair({ profitLots: profitViews, riskLots: riskViews, minNet: 0.01, guard });
         if (pick) {
-          this.pairCandidate = {
+          st.pairCandidate = {
             profitLotId: pick.profit.id,
             riskLotId: pick.risk.id,
             allowed: true,
@@ -1019,7 +1074,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         } else {
           // 去掉防护再探一次：能配对 = 被趋势防护拦，把拒绝原因直白展示
           const unp = findReductionPair({ profitLots: profitViews, riskLots: riskViews, minNet: 0.01, guard: null });
-          this.pairCandidate = unp
+          st.pairCandidate = unp
             ? { profitLotId: unp.profit.id, riskLotId: unp.risk.id, allowed: false, why: '趋势防护拦截（配对手数超占比帽或剩余敞口不达比例闸）' }
             : null;
         }
@@ -1052,7 +1107,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       const trendHit = trendSide === 'LONG' ? longHit : shortHit;
       if (counterLots.length > 0 && counterHit) {
         if (await this.closeSideExit(ctx, exec, counterLots, `${trendSide === 'LONG' ? '空' : '多'}头逆势侧`)) {
-          this.lastNote += '（趋势域逆势快跑）';
+          st.lastNote += '（趋势域逆势快跑）';
           return true;
         }
       }
@@ -1072,16 +1127,16 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     // ---- 4) 篮子 arm 尝试（G14 钱口径）：净益 ≥ 名义×启动线 + 1 格金额----
     const startNow =
-      (p.useScoreSizing as boolean) && this.regimeSnap
+      (p.useScoreSizing as boolean) && st.regimeSnap
         ? basketStartNow(basketStartPct, snap.score, { trendRange, basketAmpK: basketAmpK as number })
         : basketStartPct;
-    if (!this.basketTrailActive && startNow > 0 && netUsdt >= netNotional * startNow + this.gridStep(ctx) * Math.abs(ctx.netQty)) {
-      this.basketTrailActive = true;
-      this.basketArmed = true; // 与 M3-7 armed 块同步（链内也已维持续单撤挂）
-      this.basketPeakPct = Math.max(this.basketPeakPct, netPct);
-      this.basketTrailPeakPrice = pnlPrice;
+    if (!st.basketTrailActive && startNow > 0 && netUsdt >= netNotional * startNow + this.gridStep(ctx) * Math.abs(ctx.netQty)) {
+      st.basketTrailActive = true;
+      st.basketArmed = true; // 与 M3-7 armed 块同步（链内也已维持续单撤挂）
+      st.basketPeakPct = Math.max(st.basketPeakPct, netPct);
+      st.basketTrailPeakPrice = pnlPrice;
       for (const o of ctx.openOrders) await exec.cancelOrder(o.id);
-      this.lastNote = `篮子追踪 arm：净 ${netUsdt.toFixed(2)}U ≥ 名义×${(startNow * 100).toFixed(2)}% + 1 格金额，转价格口径跟踪（峰 ${pnlPrice.toFixed(2)}）`;
+      st.lastNote = `篮子追踪 arm：净 ${netUsdt.toFixed(2)}U ≥ 名义×${(startNow * 100).toFixed(2)}% + 1 格金额，转价格口径跟踪（峰 ${pnlPrice.toFixed(2)}）`;
       return true;
     }
 
@@ -1095,12 +1150,13 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     sideLots: StrategyLotView[],
     label: string,
   ): Promise<boolean> {
+    const st = this.stateOf(ctx.instanceId);
     if (sideLots.length === 0) return false;
     const want = sideLots[0].direction;
     for (const o of ctx.openOrders.filter((x) => (x.side === 'BUY') === (want === 'LONG'))) {
       const r = await exec.cancelOrder(o.id);
       if (!r.ok) {
-        this.lastNote = `${label}侧目标平仓中止：撤挂单失败（${r.error}）`;
+        st.lastNote = `${label}侧目标平仓中止：撤挂单失败（${r.error}）`;
         return true; // 已接管本 tick（保守等待下次重估）
       }
     }
@@ -1110,13 +1166,13 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       if (r.ok) closed++;
       else this.logger.warn(`${label}侧目标平仓失败 lot=${l.id}: ${r.error}`);
     }
-    this.basketPeakPct = 0;
-    this.basketArmed = false;
-    this.basketTrailActive = false;
-    this.basketTrailPeakPrice = 0;
+    st.basketPeakPct = 0;
+    st.basketArmed = false;
+    st.basketTrailActive = false;
+    st.basketTrailPeakPrice = 0;
     const pnl = sideLots.reduce((a, l) => a + l.unrealizedPnl, 0) - sideLots.reduce((a, l) => a + l.entryPrice * l.quantity, 0) * EXIT_FEE_RATE;
-    this.lastNote = `${label}均值目标达成：净 ${pnl.toFixed(2)}U，已平 ${closed}/${sideLots.length} 单`;
-    this.logger.log(this.lastNote);
+    st.lastNote = `${label}均值目标达成：净 ${pnl.toFixed(2)}U，已平 ${closed}/${sideLots.length} 单`;
+    this.logger.log(st.lastNote);
     return true;
   }
 
@@ -1131,6 +1187,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     riskLots: StrategyLotView[],
     guard: PairGuard | null,
   ): Promise<boolean> {
+    const st = this.stateOf(ctx.instanceId);
     const pick = findReductionPair({
       profitLots: this.sideViews(ctx, profitLots),
       riskLots: this.sideViews(ctx, riskLots),
@@ -1141,7 +1198,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     for (const o of ctx.openOrders) {
       const r = await exec.cancelOrder(o.id);
       if (!r.ok) {
-        this.lastNote = `配对减中止：撤挂单失败（${r.error}）`;
+        st.lastNote = `配对减中止：撤挂单失败（${r.error}）`;
         return true;
       }
     }
@@ -1153,15 +1210,15 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       guard,
     });
     if (!rePick || rePick.profit.id !== pick.profit.id || rePick.risk.id !== pick.risk.id) {
-      this.lastNote = '配对减重估落空（快照已变），本 tick 不动作';
+      st.lastNote = '配对减重估落空（快照已变），本 tick 不动作';
       return true;
     }
     const rp = await exec.closeLot(pick.profit.id, 'SIGNAL');
     const rr = await exec.closeLot(pick.risk.id, 'SIGNAL');
-    this.basketPeakPct = 0;
-    this.basketArmed = false;
-    this.lastNote = `配对减：盈单 ${pick.profit.id}(${pick.profit.netUsdt.toFixed(2)}U) + 亏单 ${pick.risk.id}(${pick.risk.netUsdt.toFixed(2)}U) 净 ${pick.net.toFixed(2)}U ${rp.ok && rr.ok ? '已平' : '平仓有失败，下 tick 重估'}`;
-    this.logger.log(this.lastNote);
+    st.basketPeakPct = 0;
+    st.basketArmed = false;
+    st.lastNote = `配对减：盈单 ${pick.profit.id}(${pick.profit.netUsdt.toFixed(2)}U) + 亏单 ${pick.risk.id}(${pick.risk.netUsdt.toFixed(2)}U) 净 ${pick.net.toFixed(2)}U ${rp.ok && rr.ok ? '已平' : '平仓有失败，下 tick 重估'}`;
+    this.logger.log(st.lastNote);
     return true;
   }
 
@@ -1188,6 +1245,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     exec: StrategyExecutor,
     disableTrail = false,
   ): Promise<boolean> {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       basketStartPct: number;
       basketGivebackPct: number;
@@ -1207,20 +1265,20 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     const netUsdt = gross - exitFee;
     const netPct = netUsdt / netNotional;
 
-    if (netPct > this.basketPeakPct) this.basketPeakPct = netPct;
+    if (netPct > st.basketPeakPct) st.basketPeakPct = netPct;
 
     // 启动线动态化（EA DynamicCloseAllTarget L1671，M2）：趋势越强，篮子目标越高
     // （多给空间换更大轮次收益）；关断态回退固定 basketStartPct（老行为）。
     const startNow =
-      p.useScoreSizing && this.regimeSnap
-        ? basketStartNow(p.basketStartPct, this.regimeSnap.score, {
+      p.useScoreSizing && st.regimeSnap
+        ? basketStartNow(p.basketStartPct, st.regimeSnap.score, {
             trendRange: p.trendRange,
             basketAmpK: p.basketAmpK,
           })
         : p.basketStartPct;
 
     // armed 标志（M3-7 消费）：峰值达启动线即进入 armed，与是否触发 giveback 离场无关
-    this.basketArmed = startNow > 0 && this.basketPeakPct >= startNow;
+    st.basketArmed = startNow > 0 && st.basketPeakPct >= startNow;
 
     let reason: 'TAKE_PROFIT' | 'STOP_LOSS' | null = null;
     // 止损：比例止损 或 固定金额止损，任一触发即平
@@ -1229,8 +1287,14 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     // 止盈：固定金额达标（不追踪）或 比例追踪止盈，任一触发即平
     const tpByUsdt = p.basketTakeProfitUsdt > 0 && netUsdt >= p.basketTakeProfitUsdt;
     // 出场链开启时比例追踪让位给 G14 双口径（链内管理），固定 SL/TP 保留为最外层保险
+    // netPct > 0 闸（2026-10-16 A9）：深亏时「峰值-现值」回撤也会超 giveback，
+    // 不加闸会把大亏平仓误记成 TAKE_PROFIT（与 V1 同修）
     const tpByTrail =
-      !disableTrail && startNow > 0 && this.basketPeakPct >= startNow && this.basketPeakPct - netPct >= p.basketGivebackPct;
+      !disableTrail &&
+      startNow > 0 &&
+      netPct > 0 &&
+      st.basketPeakPct >= startNow &&
+      st.basketPeakPct - netPct >= p.basketGivebackPct;
 
     if (slByPct || slByUsdt) {
       reason = 'STOP_LOSS';
@@ -1239,7 +1303,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     }
 
     if (!reason) {
-      this.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(this.basketPeakPct * 100).toFixed(2)}%）`;
+      st.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(st.basketPeakPct * 100).toFixed(2)}%）`;
       return false;
     }
 
@@ -1247,7 +1311,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     // 缺这道闸会让同一个 Lot 被平两次——第二次在已无仓位时就成了反向开仓。
     const inflight = ctx.openLots.filter((l) => l.hasPendingClose).length;
     if (inflight > 0) {
-      this.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
+      st.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
       return true;
     }
 
@@ -1256,8 +1320,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     for (const order of ctx.openOrders) {
       const r = await exec.cancelOrder(order.id);
       if (!r.ok) {
-        this.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
-        this.logger.warn(this.lastNote);
+        st.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
+        this.logger.warn(st.lastNote);
         return true;
       }
     }
@@ -1265,9 +1329,11 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       const r = await exec.closeLot(lot.id, reason);
       if (!r.ok) this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
     }
-    this.basketPeakPct = 0;
-    this.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
-    this.logger.log(this.lastNote);
+    st.basketPeakPct = 0;
+    // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
+    if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
+    st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
+    this.logger.log(st.lastNote);
     return true;
   }
 
@@ -1281,6 +1347,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
    * 未启用过滤时按 enabledSides 双向放行。
    */
   private resolveSides(ctx: StrategyContext): { allowLong: boolean; allowShort: boolean } {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       enabledSides: string;
       useTrendFilter: boolean;
@@ -1301,11 +1368,11 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     // M5 pivot alarm（EA L3449–3456）：单侧持仓深陷浮亏且近 N 根累计逆行超阈值
     // → 放行双侧 carry（允许对侧铺网格抗趋势，**不平老仓**——EA 同样只撤单边限制）。
     const pr = ctx.params as Record<string, unknown>;
-    if (pr.usePivotCarry === true && this.regimeSnap && (longLots.length > 0) !== (shortLots.length > 0)) {
+    if (pr.usePivotCarry === true && st.regimeSnap && (longLots.length > 0) !== (shortLots.length > 0)) {
       const holdingLong = longLots.length > 0;
       const heldLots = holdingLong ? longLots : shortLots;
       const heldNet = heldLots.reduce((a, l) => a + l.unrealizedPnl, 0);
-      const equity = ctx.availableMargin + ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0);
+      const equity = trueEquity(ctx);
       const lossGate = Math.max(50, equity * (pr.pivotLossPct as number));
       if (heldNet < -lossGate) {
         const cs = ctx.candles;
@@ -1314,8 +1381,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
           const mom = cs[cs.length - 1].close / cs[cs.length - 1 - lb].close - 1;
           const adverse = holdingLong ? -mom : mom; // 对持仓侧不利：LONG 怕跌 / SHORT 怕涨
           if (adverse >= (pr.pivotMomPct as number)) {
-            this.pivotAlarm = true; // stateV:2 标志：carry 模式高亮源（仅观察）
-            this.lastNote = `pivot 警报：持仓侧浮亏 ${heldNet.toFixed(2)}U < −${lossGate.toFixed(0)}U 且 ${lb} 根逆行 ${(adverse * 100).toFixed(2)}%，放行双侧 carry`;
+            st.pivotAlarm = true; // stateV:2 标志：carry 模式高亮源（仅观察）
+            st.lastNote = `pivot 警报：持仓侧浮亏 ${heldNet.toFixed(2)}U < −${lossGate.toFixed(0)}U 且 ${lb} 根逆行 ${(adverse * 100).toFixed(2)}%，放行双侧 carry`;
             return { allowLong: longOk, allowShort: shortOk };
           }
         }
@@ -1336,8 +1403,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     // 两侧都空 → 定向。useBrain 开启时换用 Brain：粘滞域机 dir 优先
     // （自带防抖，翻转需 TrendDirEnter 证据），dir=0 才看 score 符号（M5）。
-    if (p.useBrain && this.regimeSnap) {
-      const s = this.regimeSnap;
+    if (p.useBrain && st.regimeSnap) {
+      const s = st.regimeSnap;
       const dirScore = s.dir !== 0 ? s.dir : Math.sign(s.score);
       return {
         allowLong: longOk && dirScore >= 0,
@@ -1406,6 +1473,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     ctx: StrategyContext,
     exec: StrategyExecutor,
   ): Promise<void> {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       baseQty: number;
       lotMultiplier: number;
@@ -1413,6 +1481,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       firstStepAtrMult: number;
       leverage: number;
       firstOrderMarket: boolean;
+      cooldownAfterStopSec: number;
       useScoreSizing: boolean;
       trendMultMin: number;
       trendRange: number;
@@ -1425,6 +1494,19 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       marginGuardFree: number;
       marginGuardEquity: number;
     };
+    // 止损后冷却（2026-10-16，与 V1 同语义同默认）：本侧无持仓且无挂单时，
+    // 距上次篮子止损不足 N 秒则本 tick 不开——切断震荡市
+    // 「止损 → 反弹追入 → 再止损」的碎钞循环。
+    if (
+      lots.length === 0 &&
+      pendings.length === 0 &&
+      p.cooldownAfterStopSec > 0 &&
+      ctx.now - st.lastStopAt < p.cooldownAfterStopSec * 1000
+    ) {
+      const remain = Math.ceil((p.cooldownAfterStopSec * 1000 - (ctx.now - st.lastStopAt)) / 1000);
+      st.lastNote = `止损冷却中（剩余 ${remain}s），暂停开新首层`;
+      return;
+    }
     const disc = p.usePendingDiscipline;
     const side: Side = dir === 'LONG' ? 'LONG' : 'SHORT';
 
@@ -1432,7 +1514,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     if (disc && lots.length >= p.maxLayersPerSide) {
       for (const o of pendings) await exec.cancelOrder(o.id);
       if (pendings.length > 0) {
-        this.lastNote = `${dir} 侧层数达帽 ${lots.length}/${p.maxLayersPerSide}：已撤挂单挡口`;
+        st.lastNote = `${dir} 侧层数达帽 ${lots.length}/${p.maxLayersPerSide}：已撤挂单挡口`;
       }
       return;
     }
@@ -1444,8 +1526,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     // useScoreSizing 开 → 趋势压平倍率（EA DynamicLotMultiplier L1638：
     // 震荡域敢用 >1 倍率，强趋势退回近等权，防爆仓式倍增）。
     const mult =
-      p.useScoreSizing && this.regimeSnap
-        ? scoreLotMultiplier(this.regimeSnap.score, p.lotMultiplier, p.trendMultMin, {
+      p.useScoreSizing && st.regimeSnap
+        ? scoreLotMultiplier(st.regimeSnap.score, p.lotMultiplier, p.trendMultMin, {
             trendRange: p.trendRange,
             trendStrong: p.trendStrong,
           })
@@ -1455,7 +1537,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     // M3-5 护栏扩展（独立开关）：funding 结算窗 ±15min 暂停本侧一切新开层/换单
     if (p.pauseAroundFunding && nearFundingWindow(ctx.now)) {
-      this.lastNote = `${dir} funding 结算窗（±15min）暂停开新层`;
+      st.lastNote = `${dir} funding 结算窗（±15min）暂停开新层`;
       return;
     }
 
@@ -1470,13 +1552,14 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       if (disc) {
         // M3-6 首 K 线锁：同一根执行周期 K 线内不重复市价开首层（替代 20s 时间戳去重）
         const barT = ctx.candles.length > 0 ? ctx.candles[ctx.candles.length - 1].time : 0;
-        if (barT > 0 && barT === this.firstMarketBarTime) return;
-        if (barT > 0) this.firstMarketBarTime = barT;
+        if (barT > 0 && barT === st.firstMarketBarTime) return;
+        if (barT > 0) st.firstMarketBarTime = barT;
       } else {
-        // 去重：市价单发出到 Lot 入账有对账延迟，这期间每 tick 都会看到
-        // 「无持仓」，不设闸就会重复市价开仓。
-        if (ctx.now - this.firstMarketAt < 20_000) return;
-        this.firstMarketAt = ctx.now;
+        // 与 disc 分支同款 K 线锁（2026-10-16 B8 统一）：20s 时间戳会被
+        // demo 异步成交的对账延迟（可达 60s）击穿 → 首层开 2~3 倍仓位
+        const barT = ctx.candles.length > 0 ? ctx.candles[ctx.candles.length - 1].time : 0;
+        if (barT > 0 && barT === st.firstMarketBarTime) return;
+        if (barT > 0) st.firstMarketBarTime = barT;
       }
 
       for (const o of pendings) {
@@ -1495,13 +1578,13 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         reason: `grid-${dir.toLowerCase()}-L1-market`,
       });
       if (r.lotId || r.error === undefined) {
-        this.lastNote = `市价开 ${dir} 首层 × ${firstQty}（${p.leverage}x）`;
-        this.logger.log(this.lastNote);
+        st.lastNote = `市价开 ${dir} 首层 × ${firstQty}（${p.leverage}x）`;
+        this.logger.log(st.lastNote);
       } else if (r.error) {
-        this.firstMarketAt = 0; // 失败则允许下一 tick 重试
-        this.firstMarketBarTime = 0; // 不消耗 K 线锁
-        this.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
-        this.logger.warn(this.lastNote);
+        st.firstMarketBarTime = 0; // 失败则允许下一 tick 重试
+        st.firstMarketBarTime = 0; // 不消耗 K 线锁
+        st.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
+        this.logger.warn(st.lastNote);
       }
       return;
     }
@@ -1517,8 +1600,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       if (!this.marginOk(ctx, target * pend.quantity, p)) return;
       const c = await exec.cancelOrder(pend.id);
       if (!c.ok) {
-        this.lastNote = `跟踪换单撤旧失败：${c.error}`;
-        this.logger.warn(this.lastNote);
+        st.lastNote = `跟踪换单撤旧失败：${c.error}`;
+        this.logger.warn(st.lastNote);
         return;
       }
       const r = await exec.placeStopOrder({
@@ -1529,11 +1612,11 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         reason: `grid-${dir.toLowerCase()}-L${layers + 1}-trail`,
       });
       if (r.orderId) {
-        this.lastNote = `跟踪换单 ${dir} @ ${pend.stopPrice.toFixed(2)} → ${target.toFixed(2)} × ${pend.quantity}`;
-        this.logger.log(this.lastNote);
+        st.lastNote = `跟踪换单 ${dir} @ ${pend.stopPrice.toFixed(2)} → ${target.toFixed(2)} × ${pend.quantity}`;
+        this.logger.log(st.lastNote);
       } else if (r.error) {
-        this.lastNote = `跟踪换单挂新失败：${r.error}`;
-        this.logger.warn(this.lastNote);
+        st.lastNote = `跟踪换单挂新失败：${r.error}`;
+        this.logger.warn(st.lastNote);
       }
       return;
     }
@@ -1580,11 +1663,11 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       reason: `grid-${dir.toLowerCase()}-L${layers + 1}`,
     });
     if (r.orderId) {
-      this.lastNote = `挂 ${dir} 第 ${layers + 1} 层 @ ${stopPrice.toFixed(2)} × ${qty}（${p.leverage}x）`;
-      this.logger.log(this.lastNote);
+      st.lastNote = `挂 ${dir} 第 ${layers + 1} 层 @ ${stopPrice.toFixed(2)} × ${qty}（${p.leverage}x）`;
+      this.logger.log(st.lastNote);
     } else if (r.error) {
-      this.lastNote = `挂 ${dir} 第 ${layers + 1} 层失败：${r.error}`;
-      this.logger.warn(this.lastNote);
+      st.lastNote = `挂 ${dir} 第 ${layers + 1} 层失败：${r.error}`;
+      this.logger.warn(st.lastNote);
     }
   }
 
@@ -1636,7 +1719,10 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     notional: number,
     p: { leverage: number; marginGuardFree: number; marginGuardEquity: number },
   ): boolean {
-    const equity = ctx.availableMargin + ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0);
+    const st = this.stateOf(ctx.instanceId);
+    // 真权益 = 钱包余额 + 浮盈（2026-10-16 B4）：availableMargin 是 availableBalance，
+    // 本身已含浮盈且已扣已用保证金——再叠加浮盈=双算，且不计已占用，深亏时误拦加层
+    const equity = trueEquity(ctx);
     const ok = marginPrecheck({
       availableMargin: ctx.availableMargin,
       equity,
@@ -1646,9 +1732,9 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       equityK: p.marginGuardEquity,
     });
     if (!ok) {
-      this.marginBlocked = true; // stateV:2 暂停徽章 margin 位（仅本 tick，链顶复位）
-      this.lastNote = `保证金预检拦截：预计占用 ${(notional / p.leverage).toFixed(2)}U（可用 ${ctx.availableMargin.toFixed(0)}U / 权益 ${equity.toFixed(0)}U）`;
-      this.logger.warn(this.lastNote);
+      st.marginBlocked = true; // stateV:2 暂停徽章 margin 位（仅本 tick，链顶复位）
+      st.lastNote = `保证金预检拦截：预计占用 ${(notional / p.leverage).toFixed(2)}U（可用 ${ctx.availableMargin.toFixed(0)}U / 权益 ${equity.toFixed(0)}U）`;
+      this.logger.warn(st.lastNote);
     }
     return ok;
   }
@@ -1669,10 +1755,11 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
    * useScoreSizing 开且 Brain 有快照时，在基准 s0 上乘方向倍率；否则回退 s0（老行为）。
    */
   private gridStepFor(ctx: StrategyContext, dir: LotDirection): number {
+    const st = this.stateOf(ctx.instanceId);
     const base = this.gridStep(ctx);
     const p = ctx.params as Record<string, unknown>;
-    if (!p.useScoreSizing || !this.regimeSnap) return base;
-    return directionalStep(base, this.regimeSnap.score, dir === 'LONG' ? 'LONG' : 'SHORT', this.sizingCfg(p));
+    if (!p.useScoreSizing || !st.regimeSnap) return base;
+    return directionalStep(base, st.regimeSnap.score, dir === 'LONG' ? 'LONG' : 'SHORT', this.sizingCfg(p));
   }
 
   private atrOf(candles: Candle[]): number {

@@ -86,6 +86,7 @@ function makeContext(
     openLots: [],
     openOrders: [],
     availableMargin: 10_000,
+    walletBalance: 10_000,
     netQty: 0,
     params: strategy.normalizeParams(),
     now: 1_700_000_000_000 + 60 * 300_000,

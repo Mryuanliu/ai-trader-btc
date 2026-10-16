@@ -45,14 +45,7 @@ export interface AppEnv {
   MCP_SERVERS: string;
   /** Agent Skills 目录，留空自动探测 src/dist 旁挂 skills/ */
   SKILLS_DIR: string;
-  BINANCE_ENABLED: boolean;
-  BINANCE_API_KEY: string;
-  BINANCE_API_SECRET: string;
-  /** 币安账户环境：demo=模拟盘 testnet=测试网 live=实盘 */
-  BINANCE_ENV: 'demo' | 'testnet' | 'live';
-  /** 保留旧变量名做向后兼容，仅当 BINANCE_ENV 未显式设置时生效 */
-  BINANCE_TESTNET: boolean;
-  /** 币安 U 本位合约账户（demo 环境可复用现货 key） */
+  /** 币安 U 本位合约账户（唯一交易所；现货已于 2026-08-31 移除，OKX 无实现） */
   BINANCE_FUTURES_ENABLED: boolean;
   BINANCE_FUTURES_API_KEY: string;
   BINANCE_FUTURES_API_SECRET: string;
@@ -61,11 +54,6 @@ export interface AppEnv {
   HTTPS_PROXY: string;
   HTTP_PROXY: string;
   NO_PROXY: string;
-  OKX_ENABLED: boolean;
-  OKX_API_KEY: string;
-  OKX_API_SECRET: string;
-  OKX_PASSPHRASE: string;
-  OKX_TESTNET: boolean;
   NEWS_ENABLED: boolean;
   NEWS_FETCH_INTERVAL_SEC: number;
   NEWS_SOURCES: string;
@@ -124,16 +112,7 @@ export const envSchema = Joi.object({
   MCP_SERVERS: Joi.string().allow('').default(''),
   SKILLS_DIR: Joi.string().allow('').default(''),
 
-  BINANCE_ENABLED: Joi.boolean().default(false),
-  BINANCE_API_KEY: Joi.string().allow('').default(''),
-  BINANCE_API_SECRET: Joi.string().allow('').default(''),
-  // 默认 demo：币安官方已用模拟交易（Demo Mode）取代旧测试网作为主流验证环境
-  BINANCE_ENV: Joi.string().valid('demo', 'testnet', 'live').default('demo'),
-  // 旧开关，仅用于 BINANCE_ENV 未显式配置时推断
-  BINANCE_TESTNET: Joi.boolean().default(true),
-
-  // 币安 U 本位合约：留空时交易所账户层会自动回退复用 BINANCE_API_KEY/SECRET
-  // （demo 环境已实测同一 key 现货与合约通用），实盘可显式配置独立合约 key
+  // 币安 U 本位合约（唯一交易所；现货 2026-08-31 已移除，OKX 无实现）
   BINANCE_FUTURES_ENABLED: Joi.boolean().default(false),
   BINANCE_FUTURES_API_KEY: Joi.string().allow('').default(''),
   BINANCE_FUTURES_API_SECRET: Joi.string().allow('').default(''),
@@ -142,12 +121,6 @@ export const envSchema = Joi.object({
   HTTPS_PROXY: Joi.string().allow('').default(''),
   HTTP_PROXY: Joi.string().allow('').default(''),
   NO_PROXY: Joi.string().allow('').default(''),
-
-  OKX_ENABLED: Joi.boolean().default(false),
-  OKX_API_KEY: Joi.string().allow('').default(''),
-  OKX_API_SECRET: Joi.string().allow('').default(''),
-  OKX_PASSPHRASE: Joi.string().allow('').default(''),
-  OKX_TESTNET: Joi.boolean().default(true),
 
   NEWS_ENABLED: Joi.boolean().default(true),
   NEWS_FETCH_INTERVAL_SEC: Joi.number().default(900),

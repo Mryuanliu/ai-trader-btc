@@ -193,7 +193,10 @@ export class TrendFollowingStrategy implements TradingStrategy {
     }
 
     // ---- 3. 趋势判定 ----
-    const closes = ctx.candles.map((c) => c.close);
+    // 排除未收盘的最后一根（2026-10-16 A14）：ctx.candles 含未闭合 bar，
+    // 其 close 随价格实时跳动——喂进 EMA 会让 bar 内方向判定反复横跳，
+    // 且回测（最后一根已收盘）与实盘信号不一致。与 donchian/均值回归对齐。
+    const closes = ctx.candles.slice(0, -1).map((c) => c.close);
     if (closes.length < p.emaSlow + 2) {
       this.lastNote = 'K 线不足，等待数据';
       return;

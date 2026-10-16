@@ -1,7 +1,7 @@
 /**
  * 波动率定标仓位（Vol-targeted position sizing）。
  *
- * 调研文档 `strategy-marketplace-research.md` L1/Kim-Tse-Wald 的核心：
+ * 波动率定标仓位（Vol-targeted position sizing，Kim-Tse-Wald 路线的核心结论）：
  * **方向性「稳」的第一来源不是信号，而是仓位规则**。同一份入场信号，
  * 用固定张数下单 vs 按当前波动率反比缩放，Sharpe/最大回撤差数倍。
  *

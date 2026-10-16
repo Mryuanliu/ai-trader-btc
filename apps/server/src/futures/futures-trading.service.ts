@@ -456,6 +456,24 @@ export class FuturesTradingService {
   }
 
   /**
+   * 保证金快照（一次 getBalances 同时取两个口径，2026-10-16 新增）：
+   * - availableMargin = USDT free（availableBalance，已含浮盈、已扣已用保证金）
+   * - walletBalance = USDT total（钱包余额，真实权益的基座）
+   *
+   * runner 每 tick 都需要这两个值，分开取等于双倍 REST 调用。
+   */
+  async getMarginSnapshot(): Promise<{ availableMargin: number; walletBalance: number }> {
+    try {
+      const adapter = await this.registry.get(FUTURES_EXCHANGE);
+      const balances = await adapter.getBalances();
+      const usdt = balances.find((b) => b.asset === 'USDT');
+      return { availableMargin: usdt?.free ?? 0, walletBalance: usdt?.total ?? 0 };
+    } catch {
+      return { availableMargin: 0, walletBalance: 0 };
+    }
+  }
+
+  /**
    * 确保账户为双向持仓（hedge mode）——Lot 多空共存的前提。幂等。
    *
    * 只在真实交易模式调用（dry-run 不触交易所）。

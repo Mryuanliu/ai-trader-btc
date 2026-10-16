@@ -63,12 +63,12 @@ export async function runBacktestOnCandles(
     throw new Error(`K 线仅 ${candles.length} 根，不足以预热 ${config.warmupBars} 根`);
   }
 
+  const instanceId = `${config.strategyName}:${config.symbol}`;
   const params = strategy.normalizeParams(config.params ?? {});
-  strategy.onStart?.(params);
+  strategy.onStart?.(params, instanceId);
 
   const intervalMs = TIMEFRAME_MS[config.interval];
   const contextLookback = Math.max(CONTEXT_LOOKBACK, strategy.contextCandles ?? 0);
-  const instanceId = `${config.strategyName}:${config.symbol}`;
   const broker = new SimBroker({
     symbol: config.symbol,
     instanceId,
@@ -101,6 +101,9 @@ export async function runBacktestOnCandles(
         openLots: broker.lotViews(mark),
         openOrders: broker.orderViews(),
         availableMargin: broker.equity(mark),
+        // 回测无独立钱包口径：equity 即真实权益（与 availableMargin 同值，
+        // 策略的 walletBalance 优先分支自然走通，行为与实盘一致）
+        walletBalance: broker.equity(mark),
         netQty: broker.netQty(),
         params,
         now: bar.time,
@@ -172,6 +175,6 @@ export async function runBacktestOnCandles(
       .map(([exitReason, v]) => ({ exitReason, count: v.count, realizedPnl: Number(v.realizedPnl.toFixed(8)) })),
   };
 
-  strategy.onStop?.();
+  strategy.onStop?.(instanceId);
   return { candles, config, report, rounds };
 }

@@ -20,8 +20,7 @@
     "pm2:restart": "pm2 restart ai-trader-server",
     "pm2:stop": "pm2 stop ai-trader-server",
     "pm2:delete": "pm2 delete ai-trader-server",
-    "typecheck": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' typecheck",
-    "db:init": "psql -d postgres -h localhost -f scripts/init-db.sql"
+    "typecheck": "pnpm shared:build && pnpm -r --filter '!@ai-trader/shared' typecheck"
   },
   "devDependencies": {
     "pm2": "^5.4.3",

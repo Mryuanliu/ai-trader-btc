@@ -453,32 +453,8 @@ export function AdminStrategy() {
             </Col>
           </Row>
           <Row gutter={16}>
-            {paramFields.map(({ key, type, title, tip, dflt }) => (
-              <Col xs={24} md={12} key={key}>
-                <Form.Item
-                  name={key}
-                  label={title}
-                  tooltip={tip || undefined}
-                  valuePropName={type === 'boolean' ? 'checked' : 'value'}
-                >
-                  {type === 'boolean' ? (
-                    <Switch />
-                  ) : type === 'integer' || type === 'number' ? (
-                    <InputNumber
-                      className="!w-full"
-                      placeholder={dflt !== undefined ? String(dflt) : undefined}
-                    />
-                  ) : (
-                    <Select
-                      options={(
-                        (configuring?.paramSchema as { properties?: Record<string, { enum?: string[] }> })
-                          ?.properties?.[key]?.enum ?? []
-                      ).map((v) => ({ value: v, label: v }))}
-                      placeholder={dflt !== undefined ? String(dflt) : '请选择'}
-                    />
-                  )}
-                </Form.Item>
-              </Col>
+            {paramFields.map((f) => (
+              <ParamField key={f.key} field={f} />
             ))}
           </Row>
         </Form>
@@ -494,5 +470,63 @@ function Stat({ label, value }: { label: string; value: string }) {
       <div className="muted-text">{label}</div>
       <div className="num mt-0.5 text-[14px] text-white">{value}</div>
     </div>
+  );
+}
+
+/**
+ * 单个参数字段（抽成组件以使用 Form.useWatch 做实时预警）。
+ *
+ * 止损类参数为 0 时给醒目提示（2026-10-16 B6）：马丁网格默认无止损时，
+ * 亏损篮子会无限持有直到强平——回填实际值后 0 会直接显示在表单里，
+ * 必须让用户明确看到「这道保险没上」。
+ */
+function ParamField({
+  field,
+}: {
+  field: {
+    key: string;
+    type: string;
+    title: string;
+    tip: string;
+    dflt: unknown;
+    spec: Record<string, unknown>;
+  };
+}) {
+  // 依赖 Form 上下文取实时值（组件渲染在 Form 内），不传 form 实例以兼容各 antd 小版本签名
+  const value = Form.useWatch(field.key);
+  const isStopLoss = /stoploss/i.test(field.key);
+  const effective = value ?? field.dflt;
+  const noStop = isStopLoss && Number(effective ?? 0) === 0;
+  const enumValues = (field.spec.enum as string[] | undefined) ?? [];
+  return (
+    <Col xs={24} md={12}>
+      <Form.Item
+        name={field.key}
+        label={field.title}
+        tooltip={field.tip || undefined}
+        valuePropName={field.type === 'boolean' ? 'checked' : 'value'}
+        extra={
+          noStop ? (
+            <span className="text-[11px] text-down">
+              ⚠ 0 = 不设止损：亏损篮子将一直持有直到交易所强平，确认这是有意的
+            </span>
+          ) : undefined
+        }
+      >
+        {field.type === 'boolean' ? (
+          <Switch />
+        ) : field.type === 'integer' || field.type === 'number' ? (
+          <InputNumber
+            className="!w-full"
+            placeholder={field.dflt !== undefined ? String(field.dflt) : undefined}
+          />
+        ) : (
+          <Select
+            options={enumValues.map((v) => ({ value: v, label: v }))}
+            placeholder={field.dflt !== undefined ? String(field.dflt) : '请选择'}
+          />
+        )}
+      </Form.Item>
+    </Col>
   );
 }

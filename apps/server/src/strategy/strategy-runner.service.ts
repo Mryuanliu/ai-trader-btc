@@ -289,7 +289,7 @@ export class StrategyRunner implements OnModuleInit {
       };
     }
 
-    strategy.onStart?.(params);
+    strategy.onStart?.(params, instanceId);
     const interval: Timeframe = opts?.interval ?? '1m';
     this.instances.set(instanceId, {
       instanceId,
@@ -342,7 +342,7 @@ export class StrategyRunner implements OnModuleInit {
   async stopInstance(instanceId: string): Promise<StrategyRunStatus> {
     const inst = this.instances.get(instanceId);
     if (inst) {
-      inst.strategy.onStop?.();
+      inst.strategy.onStop?.(inst.instanceId);
       // 只撤销**本实例**的未成交挂单：挂单是「尚未发生的开仓意图」，
       // 实例停了还留着它，等于策略已下线却仍可能被交易所触发开仓。
       // 其他实例的挂单不动。已成交的持仓**不**动。
@@ -544,7 +544,7 @@ export class StrategyRunner implements OnModuleInit {
           if (!ctx) continue;
           await inst.strategy.onTick(ctx, this.executorFor(inst.instanceId));
           // 逐轮回灌策略决策注解（变化才落盘），供日终总结「为什么动/没动」
-          this.journal.decision(inst.instanceId, inst.strategy.getState?.()?.note as string);
+          this.journal.decision(inst.instanceId, inst.strategy.getState?.(inst.instanceId)?.note as string);
         } catch (err) {
           // 实例级隔离：单实例失败不影响其他实例
           this.lastError = `实例 ${inst.instanceId}: ${(err as Error).message}`;
@@ -599,7 +599,7 @@ export class StrategyRunner implements OnModuleInit {
       startedAt: first ? first.startedAt.toISOString() : null,
       lastTickAt: this.lastTickAt ? new Date(this.lastTickAt).toISOString() : null,
       lastError: this.lastError,
-      state: first?.strategy.getState() ?? null,
+      state: first?.strategy.getState(first.instanceId) ?? null,
       openLotCount: openLots.length,
       // P2 新增：实例数（前端据此判断是否多实例运行）
       instanceCount: this.instances.size,
@@ -663,11 +663,11 @@ export class StrategyRunner implements OnModuleInit {
     const brk = Number((inst.params as { breakoutLookbackBars?: number }).breakoutLookbackBars ?? 0);
     const ctxLimit = Math.max(CONTEXT_CANDLE_LIMIT, brk + 5, inst.strategy?.contextCandles ?? 0);
     const candles: Candle[] = this.market.getCandles(symbol, inst.interval, ctxLimit);
-    const [openLots, openOrders, availableMargin, positions, pendingCloseLots] =
+    const [openLots, openOrders, margin, positions, pendingCloseLots] =
       await Promise.all([
         this.lots.listOpen('futures', symbol),
         this.trading.listOpenOrders(symbol),
-        this.safeAvailableMargin(),
+        this.safeMarginSnapshot(),
         this.safePositions(symbol),
         // 在途平仓委托：策略据此避免对同一 Lot 重复平仓
         this.trading.listPendingCloseLotIds(symbol),
@@ -675,7 +675,15 @@ export class StrategyRunner implements OnModuleInit {
     const pendingCloseSet = new Set(pendingCloseLots);
     // 实例过滤：只保留本实例的仓与单
     const myLots = openLots.filter((l) => l.strategyInstanceId === inst.instanceId);
-    const myOrders = openOrders.filter((o) => o.strategyInstanceId === inst.instanceId);
+    // ⚠️ 挂单还必须排除**交易所灾难保险丝**（source=PROTECTION / reduceOnly）：
+    // 保险丝是平台兜底平仓单，不是策略的网格层——混进 ctx.openOrders 会被
+    // 策略当成待成交层（计入层数帽、挡住挂单、被撤换掉），2026-10-16 修复。
+    const myOrders = openOrders.filter(
+      (o) =>
+        o.strategyInstanceId === inst.instanceId &&
+        o.source !== 'PROTECTION' &&
+        !o.reduceOnly,
+    );
 
     // 标记价：止盈判定用它（抗插针、与交易所风控同口径），
     // 取不到时退化为 0，策略会回退到最新成交价
@@ -721,7 +729,8 @@ export class StrategyRunner implements OnModuleInit {
         quantity: Number(o.quantity ?? 0),
         exchangeOrderId: o.exchangeOrderId ?? null,
       })),
-      availableMargin,
+      availableMargin: margin.availableMargin,
+      walletBalance: margin.walletBalance,
       netQty,
       params: inst.params,
       now: Date.now(),
@@ -751,12 +760,12 @@ export class StrategyRunner implements OnModuleInit {
     }
   }
 
-  /** 保证金读取失败不阻塞策略：按 0 处理（策略会自行判断能否开仓） */
-  private async safeAvailableMargin(): Promise<number> {
+  /** 保证金快照读取失败不阻塞策略：按 0 处理（策略的保证金预检会自行兜底） */
+  private async safeMarginSnapshot(): Promise<{ availableMargin: number; walletBalance: number }> {
     try {
-      return await this.trading.getAvailableMargin();
+      return await this.trading.getMarginSnapshot();
     } catch {
-      return 0;
+      return { availableMargin: 0, walletBalance: 0 };
     }
   }
 

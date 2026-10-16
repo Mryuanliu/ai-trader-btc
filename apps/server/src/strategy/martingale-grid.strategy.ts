@@ -31,6 +31,7 @@ const PARAM_SCHEMA = {
     basketStopLossPct: { type: 'number', title: '篮子止损(比例,0=关)', minimum: 0 },
     basketTakeProfitUsdt: { type: 'number', title: '篮子固定止盈(USDT,0=关)', minimum: 0 },
     basketStopLossUsdt: { type: 'number', title: '篮子固定止损(USDT,0=关)', minimum: 0 },
+    cooldownAfterStopSec: { type: 'integer', title: '止损后冷却(秒,0=关)', minimum: 0, maximum: 86400 },
     netExposureCapPct: { type: 'number', title: '净敞口上限(名义/保证金,0=不限)', minimum: 0 },
     triggerPriceType: { type: 'string', title: '止盈/止损判定基准', enum: ['mark', 'last'] },
   },
@@ -77,6 +78,18 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   // 不依赖比例/追踪——便于用「赚够 X U / 亏到 X U 就走」的直观口径观察整条交易链路。
   basketTakeProfitUsdt: 0,
   basketStopLossUsdt: 0,
+  /**
+   * 止损后冷却（秒，2026-10-16 新增，0=关）。
+   *
+   * 为什么要它：篮子被止损后若立刻重开首层，震荡市里会形成
+   * 「止损 → 几秒后价格反弹、趋势分还没翻脸 → 市价追进去 → 再止损」
+   * 的碎钞循环（2026-10-16 凌晨实测：3 分钟连亏 3 篮、每轮仅活 6~7 秒，
+   * 手续费 ~6.6U/轮）。趋势过滤翻脸有滞后，挡不住这种 whipsaw，
+   * 必须在策略层加「止损后 N 秒内不开新首层」的硬冷却。
+   * 与 donchian/均值回归的 cooldownSec 同族；止盈了结不触发冷却
+   * （止盈说明判断正确，没有盲目追高的必要）。
+   */
+  cooldownAfterStopSec: 300,
   netExposureCapPct: 0,
   // 判定基准默认标记价（抗插针、与交易所风控同口径）；last=最新成交价（更跟手但可能被插针误触发）
   triggerPriceType: 'mark',
@@ -102,41 +115,7 @@ const EXIT_FEE_RATE = FUTURES_TAKER_FEE_RATE;
  *
  * 平台侧不参与以上任何判断：策略自治，平台只负责把单子送到交易所。
  */
-@Injectable()
-export class MartingaleGridStrategy implements TradingStrategy {
-  private readonly logger = new Logger(MartingaleGridStrategy.name);
-
-  readonly name = 'martingale_grid';
-  readonly label = '马丁网格';
-  readonly description =
-    '双向 STOP 挂单网格 + 马丁倍率加层 + 单侧金字塔过滤 + 篮子追踪止盈（移植自黄金 EA）';
-  readonly defaultParams = DEFAULT_PARAMS;
-  readonly paramSchema = PARAM_SCHEMA;
-
-  // 注：版本 / 能力声明 / 风险提示**不再写在这里**——
-  // 统一由 `strategies/martingale-grid/manifest.json` 提供（P1 元信息外置），
-  // 改文案或上下架不必改代码、不必重新编译。两处都写会漂移，故此处不留。
-
-  /** 篮子净收益率的峰值（追踪止盈用）；篮子清空后重置 */
-  private basketPeakPct = 0;
-  /**
-   * 首层市价开仓的去重时间戳。
-   *
-   * 市价单发出到 Lot 入账之间有对账延迟，这段时间内 `openLots` 恒为空，
-   * 不设闸的话每个 tick 都会认为「该开首层」而重复市价开仓。
-   */
-  private firstMarketAt = 0;
-  /** 最近一次 tick 的决策摘要，供前端展示 */
-  private lastNote = '';
-
-  /**
-   * 可观测快照：纯派生数据，不参与任何决策。
-   *
-   * 用户看到「只下了一单就不动了」时，需要能回答「它在等什么」——
-   * 是等价格走到加层线，还是等净收益触及止盈启动线。
-   * 没有这些数字，正常的等待与真的卡死无法区分。
-   */
-  private lastObs: {
+  interface V1Obs {
     price: number;
     step: number;
     longLayers: number;
@@ -163,7 +142,60 @@ export class MartingaleGridStrategy implements TradingStrategy {
       long: Array<{ layer: number; price: number; qty: number }>;
       short: Array<{ layer: number; price: number; qty: number }>;
     };
-  } | null = null;
+  }
+
+interface V1InstanceState {
+  basketPeakPct: number;
+  /** 已发过市价首层的执行周期 K 线时间戳（首层去重闸） */
+  firstMarketBarTime: number;
+  /** 最近一次篮子止损时间（冷却闸用；止盈了结不更新） */
+  lastStopAt: number;
+  lastNote: string;
+  lastObs: V1Obs | null;
+}
+
+@Injectable()
+export class MartingaleGridStrategy implements TradingStrategy {
+  private readonly logger = new Logger(MartingaleGridStrategy.name);
+
+  readonly name = 'martingale_grid';
+  readonly label = '马丁网格';
+  readonly description =
+    '双向 STOP 挂单网格 + 马丁倍率加层 + 单侧金字塔过滤 + 篮子追踪止盈（移植自黄金 EA）';
+  readonly defaultParams = DEFAULT_PARAMS;
+  readonly paramSchema = PARAM_SCHEMA;
+
+  // 注：版本 / 能力声明 / 风险提示**不再写在这里**——
+  // 统一由 `strategies/martingale-grid/manifest.json` 提供（P1 元信息外置），
+  // 改文案或上下架不必改代码、不必重新编译。两处都写会漂移，故此处不留。
+
+
+  /**
+   * 可观测快照：纯派生数据，不参与任何决策。
+   *
+   * 用户看到「只下了一单就不动了」时，需要能回答「它在等什么」——
+   * 是等价格走到加层线，还是等净收益触及止盈启动线。
+   * 没有这些数字，正常的等待与真的卡死无法区分。
+   */
+
+  /**
+   * 每实例可变状态（2026-10-16 修复「多实例状态互串」）。
+   *
+   * 策略是 DI 单例：同一策略的多个实例（不同币种）共享同一个对象，
+   * 可变状态放实例字段上时，一个实例的 tick 会抹掉另一个实例的状态——
+   * 空仓实例每 tick 重置 basketPeakPct，直接让有仓实例的追踪止盈失效。
+   * 所有可变状态按 `ctx.instanceId`（策略名:交易对）隔离。
+   */
+  private readonly states = new Map<string, V1InstanceState>();
+
+  private stateOf(instanceId: string): V1InstanceState {
+    let s = this.states.get(instanceId);
+    if (!s) {
+      s = { basketPeakPct: 0, firstMarketBarTime: 0, lastStopAt: 0, lastNote: '', lastObs: null };
+      this.states.set(instanceId, s);
+    }
+    return s;
+  }
 
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown> {
     const src = raw ?? {};
@@ -194,6 +226,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
       basketStopLossPct: num('basketStopLossPct', 0, 1),
       basketTakeProfitUsdt: num('basketTakeProfitUsdt', 0, 1e9),
       basketStopLossUsdt: num('basketStopLossUsdt', 0, 1e9),
+      cooldownAfterStopSec: Math.floor(num('cooldownAfterStopSec', 0, 86400)),
       netExposureCapPct: num('netExposureCapPct', 0, 100),
       triggerPriceType: ['mark', 'last'].includes(String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType))
         ? String(src.triggerPriceType ?? DEFAULT_PARAMS.triggerPriceType)
@@ -201,22 +234,29 @@ export class MartingaleGridStrategy implements TradingStrategy {
     };
   }
 
-  onStart(params: Record<string, unknown>): void {
-    this.basketPeakPct = 0;
-    this.lastNote = `已启动（每侧最多 ${params.maxLayersPerSide} 层，倍率 ${params.lotMultiplier}）`;
+  onStart(params: Record<string, unknown>, instanceId?: string): void {
+    const id = instanceId ?? '';
+    this.states.delete(id);
+    const st = this.stateOf(id);
+    st.lastNote = `已启动（每侧最多 ${params.maxLayersPerSide} 层，倍率 ${params.lotMultiplier}）`;
   }
 
-  onStop(): void {
-    this.basketPeakPct = 0;
-    this.firstMarketAt = 0;
-    this.lastNote = '';
+  onStop(instanceId?: string): void {
+    if (instanceId) this.states.delete(instanceId);
+    else this.states.clear();
   }
 
-  getState(): Record<string, unknown> {
-    const o = this.lastObs;
+  getState(instanceId?: string): Record<string, unknown> {
+    // 无 instanceId 的调用（单实例场景/旧代码）：优先取有实际交易状态的条目，
+    // 跳过 onStart 无参调用遗留的空键条目
+    const st = instanceId
+      ? this.states.get(instanceId)
+      : ([...this.states.entries()].find(([k]) => k !== '')?.[1] ??
+        [...this.states.values()][0]);
+    const o = st?.lastObs ?? null;
     return {
-      basketPeakPct: this.basketPeakPct,
-      note: this.lastNote,
+      basketPeakPct: st?.basketPeakPct ?? 0,
+      note: st?.lastNote ?? '',
       // 可观测信息：回答「为什么现在不动」
       ...(o
         ? {
@@ -243,10 +283,11 @@ export class MartingaleGridStrategy implements TradingStrategy {
   }
 
   async onTick(ctx: StrategyContext, exec: StrategyExecutor): Promise<void> {
+    const st = this.stateOf(ctx.instanceId);
     const lots = ctx.openLots;
 
     // 篮子为空：重置追踪峰值（新周期）
-    if (lots.length === 0) this.basketPeakPct = 0;
+    if (lots.length === 0) st.basketPeakPct = 0;
 
     // ---- 1. 篮子出场（唯一出场途径）----
     if (lots.length > 0 && (await this.checkBasketExit(ctx, exec))) return;
@@ -320,6 +361,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
   }
 
   private recordObservability(ctx: StrategyContext): void {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       maxLayersPerSide: number;
       leverage: number;
@@ -360,7 +402,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
     const pnlPriceType: 'mark' | 'last' = p.triggerPriceType === 'last' ? 'last' : 'mark';
     const pnlPrice = pnlPriceType === 'last' ? ctx.price : ctx.markPrice > 0 ? ctx.markPrice : ctx.price;
 
-    this.lastObs = {
+    st.lastObs = {
       price: ctx.price,
       pnlPrice,
       pnlPriceType,
@@ -396,6 +438,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
    * 触及止损，或「曾达到启动阈值且回撤超过 giveback」即全平所有仓位单。
    */
   private async checkBasketExit(ctx: StrategyContext, exec: StrategyExecutor): Promise<boolean> {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       basketStartPct: number;
       basketGivebackPct: number;
@@ -412,7 +455,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
     const netUsdt = gross - exitFee;
     const netPct = netUsdt / netNotional;
 
-    if (netPct > this.basketPeakPct) this.basketPeakPct = netPct;
+    if (netPct > st.basketPeakPct) st.basketPeakPct = netPct;
 
     let reason: 'TAKE_PROFIT' | 'STOP_LOSS' | null = null;
     // 止损：比例止损 或 固定金额止损，任一触发即平
@@ -420,10 +463,13 @@ export class MartingaleGridStrategy implements TradingStrategy {
     const slByUsdt = p.basketStopLossUsdt > 0 && netUsdt <= -p.basketStopLossUsdt;
     // 止盈：固定金额达标（不追踪）或 比例追踪止盈，任一触发即平
     const tpByUsdt = p.basketTakeProfitUsdt > 0 && netUsdt >= p.basketTakeProfitUsdt;
+    // netPct > 0 闸（2026-10-16 A9）：曾达启动线后深亏时，
+    // 「峰值-现值」回撤也会超 giveback——不加闸会把大亏平仓误记成 TAKE_PROFIT
     const tpByTrail =
       p.basketStartPct > 0 &&
-      this.basketPeakPct >= p.basketStartPct &&
-      this.basketPeakPct - netPct >= p.basketGivebackPct;
+      netPct > 0 &&
+      st.basketPeakPct >= p.basketStartPct &&
+      st.basketPeakPct - netPct >= p.basketGivebackPct;
 
     if (slByPct || slByUsdt) {
       reason = 'STOP_LOSS';
@@ -432,7 +478,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
     }
 
     if (!reason) {
-      this.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(this.basketPeakPct * 100).toFixed(2)}%）`;
+      st.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(st.basketPeakPct * 100).toFixed(2)}%）`;
       return false;
     }
 
@@ -440,7 +486,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
     // 缺这道闸会让同一个 Lot 被平两次——第二次在已无仓位时就成了反向开仓。
     const inflight = ctx.openLots.filter((l) => l.hasPendingClose).length;
     if (inflight > 0) {
-      this.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
+      st.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
       return true;
     }
 
@@ -449,8 +495,8 @@ export class MartingaleGridStrategy implements TradingStrategy {
     for (const order of ctx.openOrders) {
       const r = await exec.cancelOrder(order.id);
       if (!r.ok) {
-        this.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
-        this.logger.warn(this.lastNote);
+        st.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
+        this.logger.warn(st.lastNote);
         return true;
       }
     }
@@ -458,9 +504,11 @@ export class MartingaleGridStrategy implements TradingStrategy {
       const r = await exec.closeLot(lot.id, reason);
       if (!r.ok) this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
     }
-    this.basketPeakPct = 0;
-    this.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
-    this.logger.log(this.lastNote);
+    st.basketPeakPct = 0;
+    // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
+    if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
+    st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
+    this.logger.log(st.lastNote);
     return true;
   }
 
@@ -554,6 +602,7 @@ export class MartingaleGridStrategy implements TradingStrategy {
     ctx: StrategyContext,
     exec: StrategyExecutor,
   ): Promise<void> {
+    const st = this.stateOf(ctx.instanceId);
     const p = ctx.params as {
       baseQty: number;
       lotMultiplier: number;
@@ -561,7 +610,21 @@ export class MartingaleGridStrategy implements TradingStrategy {
       firstStepAtrMult: number;
       leverage: number;
       firstOrderMarket: boolean;
+      cooldownAfterStopSec: number;
     };
+    // 止损后冷却（2026-10-16）：本侧无持仓且无挂单（= 即将开新首层）时，
+    // 若距上次篮子止损不足 N 秒则本 tick 不开——切断震荡市
+    // 「止损 → 反弹追入 → 再止损」的碎钞循环（趋势过滤翻脸有滞后，挡不住）。
+    if (
+      lots.length === 0 &&
+      pendings.length === 0 &&
+      p.cooldownAfterStopSec > 0 &&
+      ctx.now - st.lastStopAt < p.cooldownAfterStopSec * 1000
+    ) {
+      const remain = Math.ceil((p.cooldownAfterStopSec * 1000 - (ctx.now - st.lastStopAt)) / 1000);
+      st.lastNote = `止损冷却中（剩余 ${remain}s），暂停开新首层`;
+      return;
+    }
     const layers = lots.length + pendings.length;
     if (layers >= p.maxLayersPerSide) return;
 
@@ -579,8 +642,11 @@ export class MartingaleGridStrategy implements TradingStrategy {
     if (lots.length === 0 && p.firstOrderMarket === true) {
       // 去重：市价单发出到 Lot 入账有对账延迟，这期间每 tick 都会看到
       // 「无持仓」，不设闸就会重复市价开仓。
-      if (ctx.now - this.firstMarketAt < 20_000) return;
-      this.firstMarketAt = ctx.now;
+      // K 线锁（2026-10-16 B8）：同一根执行周期 K 线内不重复市价开首层。
+      // 20s 时间戳会被 demo 异步成交的对账延迟（可达 60s）击穿 → 首层开 2~3 倍仓位
+      const barT = ctx.candles.length > 0 ? ctx.candles[ctx.candles.length - 1].time : 0;
+      if (barT > 0 && barT === st.firstMarketBarTime) return;
+      if (barT > 0) st.firstMarketBarTime = barT;
 
       for (const o of pendings) {
         await exec.cancelOrder(o.id);
@@ -596,12 +662,12 @@ export class MartingaleGridStrategy implements TradingStrategy {
         reason: `grid-${dir.toLowerCase()}-L1-market`,
       });
       if (r.lotId || r.error === undefined) {
-        this.lastNote = `市价开 ${dir} 首层 × ${firstQty}（${p.leverage}x）`;
-        this.logger.log(this.lastNote);
+        st.lastNote = `市价开 ${dir} 首层 × ${firstQty}（${p.leverage}x）`;
+        this.logger.log(st.lastNote);
       } else if (r.error) {
-        this.firstMarketAt = 0; // 失败则允许下一 tick 重试
-        this.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
-        this.logger.warn(this.lastNote);
+        st.firstMarketBarTime = 0; // 失败则允许下一 tick 重试
+        st.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
+        this.logger.warn(st.lastNote);
       }
       return;
     }
@@ -642,11 +708,11 @@ export class MartingaleGridStrategy implements TradingStrategy {
       reason: `grid-${dir.toLowerCase()}-L${layers + 1}`,
     });
     if (r.orderId) {
-      this.lastNote = `挂 ${dir} 第 ${layers + 1} 层 @ ${stopPrice.toFixed(2)} × ${qty}（${p.leverage}x）`;
-      this.logger.log(this.lastNote);
+      st.lastNote = `挂 ${dir} 第 ${layers + 1} 层 @ ${stopPrice.toFixed(2)} × ${qty}（${p.leverage}x）`;
+      this.logger.log(st.lastNote);
     } else if (r.error) {
-      this.lastNote = `挂 ${dir} 第 ${layers + 1} 层失败：${r.error}`;
-      this.logger.warn(this.lastNote);
+      st.lastNote = `挂 ${dir} 第 ${layers + 1} 层失败：${r.error}`;
+      this.logger.warn(st.lastNote);
     }
   }
 

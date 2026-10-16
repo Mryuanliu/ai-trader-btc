@@ -41,11 +41,9 @@ const EPS = 1e-6;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function adapterFromEnv(): BinanceFuturesAdapter {
-  const futKey = (process.env.BINANCE_FUTURES_API_KEY ?? '').trim();
-  const futSec = (process.env.BINANCE_FUTURES_API_SECRET ?? '').trim();
-  const key = futKey || (process.env.BINANCE_API_KEY ?? '').trim();
-  const sec = futSec || (process.env.BINANCE_API_SECRET ?? '').trim();
-  if (!key || !sec) throw new Error('缺少币安 API 密钥（BINANCE_FUTURES_API_KEY/SECRET 或 BINANCE_API_KEY/SECRET）');
+  const key = (process.env.BINANCE_FUTURES_API_KEY ?? '').trim();
+  const sec = (process.env.BINANCE_FUTURES_API_SECRET ?? '').trim();
+  if (!key || !sec) throw new Error('缺少币安 API 密钥（BINANCE_FUTURES_API_KEY/SECRET）');
   return new BinanceFuturesAdapter('demo', key, sec);
 }
 

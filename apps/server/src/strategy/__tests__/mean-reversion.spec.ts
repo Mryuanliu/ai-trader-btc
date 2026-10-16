@@ -110,6 +110,7 @@ function makeContext(
     openLots: [],
     openOrders: [],
     availableMargin: 10_000,
+    walletBalance: 10_000,
     netQty: 0,
     now: T0 + 30 * HOUR,
     ...overrides,

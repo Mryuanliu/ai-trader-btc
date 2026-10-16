@@ -96,6 +96,15 @@ export interface StrategyContext {
   openOrders: StrategyOrderView[];
   /** 可用保证金（USDT） */
   availableMargin: number;
+  /**
+   * 钱包余额（USDT，total = 钱包口径，含未实现盈亏、不扣已用保证金）。
+   *
+   * 与 availableMargin（availableBalance）的区别：后者已含浮盈且已扣已用保证金。
+   * 需要「真实权益」判定的场景（保证金预检/权益回撤）必须用 walletBalance + 浮盈，
+   * 用 availableMargin 代理会双算浮盈、不计已占用（2026-10-16 修复）。
+   * 取不到时退化为 0，策略应回退 availableMargin 口径。
+   */
+  walletBalance: number;
   /** 净持仓数量（多头为正、空头为负） */
   netQty: number;
   /** 归一化后的策略参数（已合并默认值） */
@@ -203,16 +212,27 @@ export interface TradingStrategy {
   /** 校验并合并外部参数；非法值回落默认，策略永不因参数崩溃 */
   normalizeParams(raw?: Record<string, unknown> | null): Record<string, unknown>;
 
-  /** 启动钩子：重置内部状态（参数已归一化） */
-  onStart?(params: Record<string, unknown>): void;
-  /** 停止钩子：清空内部状态 */
-  onStop?(): void;
+  /**
+   * 启动钩子：重置内部状态（参数已归一化）。
+   *
+   * `instanceId` 由 runner 传入（2026-10-16 多实例修复）：策略是 DI 单例，
+   * 同一策略的多个实例共享同一个对象，内部状态必须按实例隔离——
+   * 不传时退化为单实例语义（回测/CLI）。
+   */
+  onStart?(params: Record<string, unknown>, instanceId?: string): void;
+  /** 停止钩子：清空内部状态（传 instanceId 时只清该实例） */
+  onStop?(instanceId?: string): void;
 
   /** 每次 tick 调用：策略自行决定开仓/加层/平仓/挂单 */
   onTick(ctx: StrategyContext, exec: StrategyExecutor): Promise<void>;
 
-  /** 供前端展示的实时状态（网格层数、均价、浮盈等） */
-  getState(): Record<string, unknown>;
+  /**
+   * 供前端展示的实时状态（网格层数、均价、浮盈等）。
+   *
+   * `instanceId` 可选（2026-10-16）：多实例下必须传，否则拿到的是
+   * 「某个实例」的快照（策略内部状态按实例隔离后的兜底语义）。
+   */
+  getState(instanceId?: string): Record<string, unknown>;
 }
 
 /**

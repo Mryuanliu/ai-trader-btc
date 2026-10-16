@@ -77,6 +77,7 @@ function makeContext(
     openLots: [],
     openOrders: [],
     availableMargin: 5000,
+    walletBalance: 5000,
     netQty: 0,
     params,
     now: 1_700_000_000_000,
@@ -287,7 +288,10 @@ describe('MartingaleGridV2Strategy · M2/M1 开启态行为（强趋势 fixture�
       { useTrendFilter: false, useScoreSizing: true, firstOrderMarket: false },
       [{}],
     );
-    const snap = (s as unknown as { regimeSnap: { score: number } | null }).regimeSnap;
+    // regimeSnap 现居 per-instance 状态容器（2026-10-16 多实例修复），经 states 读
+    // （跳过 onStart 无参调用遗留的空键条目）
+    const states = (s as unknown as { states: Map<string, { regimeSnap: { score: number } | null }> }).states;
+    const snap = [...states.entries()].find(([k]) => k !== '')?.[1]?.regimeSnap ?? null;
     expect(snap).not.toBeNull();
     expect(snap!.score).toBeGreaterThan(45);
   });
@@ -461,6 +465,20 @@ describe('MartingaleGridV2Strategy · M4 出场优先级链开启态（useExitCh
     expect(off.rec.closes).toHaveLength(0); // 兑底链：netPct 0.46% 未达启动线
   });
 
+  it('M4-1b 首单追踪 SHORT 方向（A2 回归）：峰值须跟最低价，反弹 1 格即平', async () => {
+    // 2026-10-16 A2 修复前：峰值只往高推 → 空单 arm 后「峰」= 最高价，
+    // 判据 cur ≥ peak+step 永远不满足 → 盈利空单无法止盈。此用例钉死双向语义。
+    const fresh = makeLot({ direction: 'SHORT', quantity: 0.01, entryPrice: 100_000, unrealizedPnl: 5 }); // 空单下跌盈利
+    const steps: Partial<StrategyContext>[] = [
+      { openLots: [{ ...fresh, openedAt: new Date(1_700_000_000_000).toISOString() }], price: 99_600 }, // 净 4.6 ≥ 1格金额 3 → arm @ 99600
+      { openLots: [{ ...fresh, openedAt: new Date(1_700_000_000_000).toISOString() }], price: 100_000 }, // 反弹 400 ≥ step 300 → 离场
+    ];
+    const on = await v2Flat(chain, steps);
+    expect(on.rec.closes).toHaveLength(1);
+    expect(on.rec.closes[0]).toEqual({ lotId: 'lot-1', reason: 'TAKE_PROFIT' });
+    expect((on.s.getState() as Record<string, unknown>).note).toContain('首单追踪离场');
+  });
+
   it('M4-2 篮子双口径（G14）：钱达标 arm+撤残单 → 下 tick 只监控价格回撤，回撤离场全平', async () => {
     const rich = oldLot({ unrealizedPnl: 25 }); // net=24.6 ≥ 名义×1.5%+1格金额=18；侧目标抬到 5% 避免先走侧平
     const steps: Partial<StrategyContext>[] = [
@@ -498,10 +516,12 @@ describe('MartingaleGridV2Strategy · M4 出场优先级链开启态（useExitCh
       makeContext(params, {
         candles: upCandles(),
         price: 111_990,
-        netQty: 0.009,
+        netQty: 0,
         openLots: [
-          oldLot({ direction: 'LONG', entryPrice: 110_000, quantity: 0.01, unrealizedPnl: 19.9 }), // 净 19.46 ≥ 侧目标 ≈9.8（顺势 ×1.49）
-          oldLot({ id: 'lot-s', direction: 'SHORT', entryPrice: 111_500, quantity: 0.001, unrealizedPnl: -0.49 }), // 净 −0.54
+          // 等手数配对（2026-10-16 A12）：保护侧全平量 0.001 ≤ cap=max(0.001, 0.001×0.3)。
+          // 旧用例是 顺势0.01/逆势0.001——保护侧要全平 0.01 超帽，正是 A12 拦掉的形态
+          oldLot({ direction: 'LONG', entryPrice: 110_000, quantity: 0.001, unrealizedPnl: 19.9 }), // 净 ≈19.5 ≥ 侧目标 ≈1.0（顺势 ×1.49）
+          oldLot({ id: 'lot-s', direction: 'SHORT', entryPrice: 111_500, quantity: 0.001, unrealizedPnl: -0.49 }), // 净 ≈−0.5
         ],
         openOrders: [ord('ord-p', 'BUY', 112_300)],
       }),
@@ -725,7 +745,15 @@ describe('MartingaleGridV2Strategy · stateV:2 运行快照（M8-① 数据契�
       openLots: [oldLot({ direction: 'LONG', entryPrice: 110_000, quantity: 0.01, unrealizedPnl: 19.9 })],
     };
     const ok = await v2State({ ...chain, sideTargetPct: 0.006 }, [
-      { ...base, netQty: 0.009, openLots: [...base.openLots, oldLot({ id: 'lot-s', direction: 'SHORT', entryPrice: 111_500, quantity: 0.001, unrealizedPnl: -0.49 })] },
+      // 等手数配对（A12）：保护侧全平 0.001 ≤ cap=max(0.001, 0.001×0.3) → allowed
+      {
+        ...base,
+        netQty: 0,
+        openLots: [
+          oldLot({ direction: 'LONG', entryPrice: 110_000, quantity: 0.001, unrealizedPnl: 19.9 }),
+          oldLot({ id: 'lot-s', direction: 'SHORT', entryPrice: 111_500, quantity: 0.001, unrealizedPnl: -0.49 }),
+        ],
+      },
     ]);
     expect(ok.state.exits.pair.candidate).toBeTruthy();
     expect(ok.state.exits.pair.candidate.allowed).toBe(true);

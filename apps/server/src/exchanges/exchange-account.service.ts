@@ -74,32 +74,18 @@ export class ExchangeAccountService implements OnModuleInit {
     return this.config.get<string>(`${prefix}_TESTNET`, 'true') !== 'false' ? 'testnet' : 'live';
   }
 
-  /**
-   * 合约账户未单独配置密钥时回退复用币安现货密钥。
-   *
-   * demo 环境已实测同一个 key 现货与合约通用；实盘若需权限隔离，
-   * 显式配置 BINANCE_FUTURES_API_KEY/SECRET 即可覆盖。
-   */
-  private resolveCredentials(code: ExchangeCode, prefix: string) {
-    let apiKey = this.config.get<string>(`${prefix}_API_KEY`, '') || '';
-    let apiSecret = this.config.get<string>(`${prefix}_API_SECRET`, '') || '';
+  /** 每个交易所前缀独立配置密钥，现货与合约互不回退 */
+  private resolveCredentials(prefix: string) {
+    const apiKey = this.config.get<string>(`${prefix}_API_KEY`, '') || '';
+    const apiSecret = this.config.get<string>(`${prefix}_API_SECRET`, '') || '';
     const passphrase = this.config.get<string>(`${prefix}_PASSPHRASE`, '') || '';
-
-    if (code === 'binance-futures' && !apiKey && !apiSecret) {
-      apiKey = this.config.get<string>('BINANCE_API_KEY', '') || '';
-      apiSecret = this.config.get<string>('BINANCE_API_SECRET', '') || '';
-      if (apiKey && apiSecret) {
-        this.logger.log('合约账户未单独配置密钥，已回退复用币安现货密钥');
-      }
-    }
-
     return { apiKey, apiSecret, passphrase };
   }
 
   async seedFromEnv() {
     for (const code of EXCHANGE_CODES) {
       const prefix = this.envPrefixOf(code);
-      const { apiKey, apiSecret, passphrase } = this.resolveCredentials(code, prefix);
+      const { apiKey, apiSecret, passphrase } = this.resolveCredentials(prefix);
       const enabled = this.config.get<string>(`${prefix}_ENABLED`, 'false') === 'true';
       const environment = this.resolveEnvironment(prefix);
 

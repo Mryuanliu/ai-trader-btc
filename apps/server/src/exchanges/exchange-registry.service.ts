@@ -30,17 +30,16 @@ export class ExchangeRegistry {
 
   /**
    * 账户未落库时的兜底环境：非实盘一律落到模拟环境。
-   * 合约读 BINANCE_FUTURES_ENV，未显式配置时回退现货的 BINANCE_ENV。
+   * 合约读 BINANCE_FUTURES_ENV（2026-10-16：现货/OKX 移除后不再有 BINANCE_ENV 回退）。
    */
   private defaultEnvironmentOf(code: ExchangeCode): Environment {
     const mode = this.config.get<string>('APP_RUN_MODE', 'testnet');
     if (mode === 'live') return 'live';
 
-    const fallback = this.config.get<string>('BINANCE_ENV', 'demo');
     const raw =
       code === 'binance-futures'
-        ? this.config.get<string>('BINANCE_FUTURES_ENV', '') || fallback
-        : fallback;
+        ? this.config.get<string>('BINANCE_FUTURES_ENV', 'demo')
+        : 'demo';
     return raw === 'testnet' || raw === 'demo' || raw === 'live' ? raw : 'demo';
   }
 

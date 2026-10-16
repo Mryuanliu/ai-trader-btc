@@ -111,7 +111,7 @@ describe('findReductionPair（EA L2334–2504，Lot 全平语义）', () => {
   });
 
   it('趋势保护（EA L2436–2440）：占比帽 + 保护侧剩余 ≥ 风险侧剩余×minRatio', () => {
-    // 占比帽：paired=min(0.01,0.01)=0.01 > cap=max(0.001, 0.01×0.3)=0.003 → 拒
+    // 占比帽：保护侧全平 0.01 > cap=max(0.001, 0.01×0.3)=0.003 → 拒
     expect(
       findReductionPair({
         profitLots: [lv({ id: 'p1', netUsdt: 5, quantity: 0.01 })],
@@ -120,12 +120,24 @@ describe('findReductionPair（EA L2334–2504，Lot 全平语义）', () => {
         guard: { protectLotsQty: 0.01, riskLotsQty: 0.01, minRatio: 0.35, maxShare: 0.3 },
       }),
     ).toBeNull();
-    // 小亏单可对：paired=0.001≤0.003；两侧全平后 afterRisk=0 → 比例闸跳过（EA L2440 同语义）
+    // A12（2026-10-16）：帽按**保护侧实际全平量**判。顺势大手数 0.01 + 逆势小手数 0.001
+    // 时保护侧要全平 0.01 > cap=0.003 → 拒（旧实现按 min(p,r)=0.001 判帽会放行，
+    // 结果保护侧被打光而逆势侧只减 0.001，趋势防护形同虚设）
+    expect(
+      findReductionPair({
+        profitLots: [lv({ id: 'p1', netUsdt: 5, quantity: 0.01 })],
+        riskLots: [lv({ id: 'rSmall', netUsdt: -3, quantity: 0.001 })],
+        minNet,
+        guard: { protectLotsQty: 0.01, riskLotsQty: 0.001, minRatio: 0.35, maxShare: 0.3 },
+      }),
+    ).toBeNull();
+    // 等手数小对：保护侧全平 0.001 ≤ cap=max(0.001, 0.001×0.3)；两侧全平后 afterRisk=0
+    // → 比例闸跳过（EA L2440 同语义）→ 放行
     const ok = findReductionPair({
-      profitLots: [lv({ id: 'p1', netUsdt: 5, quantity: 0.01 })],
+      profitLots: [lv({ id: 'p1', netUsdt: 5, quantity: 0.001 })],
       riskLots: [lv({ id: 'rSmall', netUsdt: -3, quantity: 0.001 })],
       minNet,
-      guard: { protectLotsQty: 0.01, riskLotsQty: 0.001, minRatio: 0.35, maxShare: 0.3 },
+      guard: { protectLotsQty: 0.001, riskLotsQty: 0.001, minRatio: 0.35, maxShare: 0.3 },
     });
     expect(ok).not.toBeNull();
     const tight = findReductionPair({
@@ -134,7 +146,7 @@ describe('findReductionPair（EA L2334–2504，Lot 全平语义）', () => {
       minNet,
       guard: { protectLotsQty: 0.002, riskLotsQty: 0.005, minRatio: 0.4, maxShare: 0.6 },
     });
-    // paired=0.001 ≤ cap=max(0.001,0.0012)；afterProtect=0.001 ≥ afterRisk(0.001)×0.4 ✓ → 通过
+    // 保护侧全平 0.001 ≤ cap=max(0.001,0.0012)；afterProtect=0.001 ≥ afterRisk(0.001)×0.4 ✓ → 通过
     expect(tight).not.toBeNull();
     const blocked = findReductionPair({
       profitLots: [lv({ id: 'p1', netUsdt: 5, quantity: 0.001 })],

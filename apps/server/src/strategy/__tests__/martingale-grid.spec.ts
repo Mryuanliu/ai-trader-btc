@@ -73,6 +73,7 @@ function makeContext(
     openLots: [],
     openOrders: [],
     availableMargin: 5000,
+    walletBalance: 5000,
     netQty: 0,
     params: strategy.normalizeParams(),
     now: Date.now(),
@@ -247,6 +248,44 @@ describe('MartingaleGridStrategy · 篮子追踪止盈（EA 的唯一出场）',
 
     expect(closes).toHaveLength(1);
     expect(closes[0].reason).toBe('STOP_LOSS');
+  });
+
+  it('止损后冷却：冷却期内不开新首层，过期后恢复（2026-10-16 防碎钞循环）', async () => {
+    const strategy = new MartingaleGridStrategy();
+    const params = strategy.normalizeParams({
+      useTrendFilter: false,
+      enabledSides: 'longOnly',
+      firstOrderMarket: false, // 挂单模式：首层走 placeStopOrder（可被断言）
+      basketStopLossUsdt: 10,
+      cooldownAfterStopSec: 300,
+    });
+    strategy.onStart?.(params, 'martingale_grid:BTCUSDT');
+    const { executor, stops, closes } = makeExecutor();
+    const now = 1_700_000_000_000;
+    const lot = makeLot({ quantity: 0.001, entryPrice: 100_000 });
+
+    // 第一跳：净亏 −12 ≤ −10 → 篮子止损（记录 lastStopAt）
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [{ ...lot, unrealizedPnl: -12 }], now }),
+      executor,
+    );
+    expect(closes).toHaveLength(1);
+    expect(closes[0].reason).toBe('STOP_LOSS');
+
+    // 第二跳：止损后 10s（冷却 300s 内）→ 不挂新首层
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [], now: now + 10_000 }),
+      executor,
+    );
+    expect(stops).toHaveLength(0);
+
+    // 第三跳：过了冷却（301s）→ 恢复挂首层
+    await strategy.onTick(
+      makeContext(strategy, { params, openLots: [], now: now + 301_000 }),
+      executor,
+    );
+    expect(stops).toHaveLength(1);
+    expect(stops[0].direction).toBe('LONG');
   });
 
   it('出场前先撤掉未成交挂单，避免残单', async () => {

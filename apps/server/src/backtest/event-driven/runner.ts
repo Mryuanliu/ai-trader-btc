@@ -83,7 +83,7 @@ export async function runBacktestEventDriven(
   }
 
   const params = strategy.normalizeParams(config.params ?? {});
-  strategy.onStart?.(params);
+  strategy.onStart?.(params, instanceId);
 
   const broker = new EventBroker({
     symbol: config.symbol,
@@ -129,6 +129,8 @@ export async function runBacktestEventDriven(
         openLots: broker.lotViews(mark),
         openOrders: broker.orderViews(),
         availableMargin: broker.equity(mark),
+        // 回测无独立钱包口径：equity 即真实权益（与 availableMargin 同值）
+        walletBalance: broker.equity(mark),
         netQty: broker.netQty(),
         params,
         now: ev.bar.time + intervalMs,
@@ -201,7 +203,7 @@ export async function runBacktestEventDriven(
     trades: broker.trades,
   };
 
-  strategy.onStop?.();
+  strategy.onStop?.(instanceId);
 
   return {
     candles,

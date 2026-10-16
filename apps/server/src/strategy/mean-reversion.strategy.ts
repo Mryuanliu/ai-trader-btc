@@ -199,10 +199,24 @@ export class MeanReversionStrategy implements TradingStrategy {
         if (!this.entryTimes.has(lot.id)) {
           this.entryTimes.set(lot.id, lot.openedAt ? Date.parse(lot.openedAt) : ctx.now);
         }
-        // 缺入场快照（如接管的历史 Lot）：用当前布林带惰性补一份，避免无法止盈/止损
+        // 缺入场快照（异步成交 60s 补账的 Lot / 接管的历史 Lot）：
+        // 用当前布林带惰性补一份，避免无法止盈/止损。
+        // 护栏（2026-10-16 A7）：若补快照时标记价已越过中轨（止盈条件当场成立），
+        // 直接止盈=「开仓即平」白付双边手续费——把中轨锚到入场价外侧一格 ATR，
+        // 给仓位一个真实的回归空间，下根 K 线起 band 自然跟上再正常止盈。
         if (!this.entryRefs.has(lot.id)) {
           const band = this.bollinger(closes, p.bollingerPeriod, p.bollingerK);
-          if (band) this.entryRefs.set(lot.id, band);
+          if (band) {
+            const crossed =
+              (lot.direction === 'LONG' && mark >= band.mid) ||
+              (lot.direction === 'SHORT' && mark <= band.mid);
+            const mid = crossed
+              ? lot.direction === 'LONG'
+                ? Math.max(band.mid, lot.entryPrice + ctx.atr)
+                : Math.min(band.mid, lot.entryPrice - ctx.atr)
+              : band.mid;
+            this.entryRefs.set(lot.id, { ...band, mid });
+          }
         }
         const exit = this.decideExit(lot, ctx, p, intervalMs, mark);
         if (!exit.shouldClose) continue;

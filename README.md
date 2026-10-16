@@ -5,8 +5,8 @@
 交易逻辑全部由**挂载的策略**自行负责 —— 平台不做决策，也不做任何风控。
 
 > 2026-09-23 起项目定位为「策略托管平台」：原决策引擎（指标信号 → 策略插件 → 产出 BUY/SELL/HOLD）、
-> 全局风控（杠杆钳制 / 熔断 / 敞口限制 / 强平距离）、回测引擎均已移除。
-> 设计决策与实施记录见 `docs/slim-martingale-refactor-plan.md`。
+> 全局风控（杠杆钳制 / 熔断 / 敞口限制 / 强平距离）均已移除；2026-10-15 起 dry_run 本地模拟模式移除，
+> 币安 demo（testnet）是唯一测试环境。
 
 ---
 
@@ -44,13 +44,13 @@ DB_USERNAME=postgres
 DB_PASSWORD=你的密码
 DB_DATABASE=ai_trader
 
-# 币安合约（demo = testnet，同一套环境）
+# 币安合约（demo = testnet，同一套环境；唯一交易所）
 BINANCE_FUTURES_API_KEY=
 BINANCE_FUTURES_API_SECRET=
-BINANCE_FUTURES_TESTNET=true
+BINANCE_FUTURES_ENV=demo
 
-# 运行模式：dry_run（本地模拟）/ testnet（币安测试网）/ live（实盘）
-APP_RUN_MODE=dry_run
+# 运行模式：testnet（币安 demo/测试网，唯一测试环境）/ live（实盘）
+APP_RUN_MODE=testnet
 
 # AI 行情（可选，不配则「AI 行情」页只显示本地指标）
 LLM_ENABLED=true
@@ -80,8 +80,7 @@ pnpm --filter web dev                     # 前端 :5173
 
 | 模式 | 行为 |
 |---|---|
-| `dry_run` | 完全本地模拟：不触交易所，挂单由调度器按行情模拟触发，成交与盈亏记账与实盘同路径（只差真实滑点） |
-| `testnet` | 真实发单到币安测试网（demo-fapi），用虚拟资金 |
+| `testnet` | 真实发单到币安 demo（demo-fapi），虚拟资金、真实撮合——**唯一测试环境**（dry_run 本地模拟已于 2026-10-15 移除） |
 | `live` | 真实资金 |
 
 **切到 `live` 时前端会弹二次确认**（提示会用真实资金自动下单、平台不拦截任何交易）。
@@ -95,10 +94,10 @@ pnpm --filter web dev                     # 前端 :5173
 Scheduler（每 5 秒）
   ├─ 行情喂入 / 新闻抓取
   ├─ syncPendingFills()      合约成交对账：回查交易所，补记 trade_fills 与 Lot
-  ├─ 触发 dry-run 挂单        按行情模拟触发 STOP 单
   └─ StrategyRunner.tick()
-        ├─ 构造 StrategyContext（价格 / ATR / K 线 / 未完结仓位单 / 挂单 / 可用保证金）
+        ├─ 构造 StrategyContext（价格 / ATR / K 线 / 未完结仓位单 / 挂单 / 保证金）
         └─ 挂载的 Strategy.onTick(ctx, executor)
+              ├─ executor.openLot()         市价开仓
               ├─ executor.placeStopOrder()  挂网格待成交层
               ├─ executor.closeLot()        全量平掉某仓位单
               └─ executor.cancelOrder()     撤单
@@ -135,20 +134,20 @@ AI 只出现在「AI 行情」页：输入行情 + 新闻，输出市场状态�
 
 ---
 
-## 内置策略：马丁网格
+## 内置策略（5 个，martingale-grid-v2 为马丁网格的 King 内核升级版）
 
-移植自黄金 EA `king-v4-balance.mq5`，忠于原始语义：
+| 策略 | name | 状态 |
+|---|---|---|
+| 马丁网格 | `martingale_grid` | 上架 |
+| 马丁网格V2 · King 内核 | `martingale_grid_v2` | 上架（六因子 Brain / M2-M6 开关默认关，关断态 = V1 逐位一致） |
+| 唐奇安突破 | `donchian_breakout` | 上架（1h 周期） |
+| 均值回归 | `mean_reversion` | 上架 |
+| 趋势跟踪 | `trend_following` | 已下架（代码保留） |
 
-| 机制 | 说明 |
-|---|---|
-| **双向 STOP 挂单** | 无持仓即挂首层：上方 `BUY_STOP`、下方 `SELL_STOP`，**谁的价先被突破谁成交** |
-| **加层等回归确认** | 价格相对**最不利持仓**再走远 2 个网格，才在现价外侧挂突破单（不是"跌了就摊平"） |
-| **单侧金字塔** | 默认只在一侧持仓，另一侧挂单会被撤掉 |
-| **篮子追踪止盈** | 不设逐层止盈，只看整篮子净收益（扣平仓成本）达到阈值后跟踪峰值，回撤即全平 |
-| **动态倍率/间距** | ATR 驱动；震荡区倍率 1.5、趋势区压到 1.1 |
-
-默认参数：每侧 6 层、倍率 1.5、首层数量 0.001 BTC、杠杆 5x。
-参数可在「策略管理」页按策略单独配置（前端按 JSON Schema 动态渲染表单）。
+马丁网格的核心机制（V1/V2 关断态）：双向 STOP 挂单网格、加层等回归确认（价格相对最不利持仓走远 2 格）、
+单侧金字塔过滤、篮子追踪止盈（整篮子净收益达阈值后跟踪峰值、回撤全平）、ATR 动态间距、
+止损后冷却（`cooldownAfterStopSec`，防震荡市连续止损后立刻追入的碎钞循环）。
+参数可在「策略管理」页按策略单独配置（前端按 JSON Schema 动态渲染表单，回填实例实际值）。
 
 ---
 
@@ -157,22 +156,25 @@ AI 只出现在「AI 行情」页：输入行情 + 新闻，输出市场状态�
 ```
 apps/
   server/                 Nest.js 后端
-    src/strategy/         策略层：契约 / 马丁网格 / 运行器 / 执行器 / HTTP 接口
+    src/strategy/         策略层：契约 / 5 个策略 / 运行器 / 执行器 / HTTP 接口
     src/futures/          合约执行：下单唯一出口 / 持仓 / 配置
-    src/account/          仓位单（Lot）服务 / 持仓推导
+    src/account/          仓位单（Lot）/ 篮子 / 资金流水
     src/market/           行情（合约 K 线与报价，本地缓存 + 实时订阅）
     src/exchanges/        交易所适配器（binance-futures）与注册表
     src/trading/          订单查询与记账
     src/scheduler/        主循环
     src/database/         实体与迁移
   web/                    Vite + React + antd
-    src/pages/admin/      总览 / 策略管理 / AI 行情 / 合约面板 / 新闻 / 账户
+    src/pages/admin/      总览 / 策略管理 / 上架治理 / 回测台 / AI 行情 / 合约面板 / 新闻 / 账户
     src/pages/mobile/     移动端：资产 / 交易 / 策略
 packages/
   shared/                 前后端共享类型与纯函数（指标、下单归一化、持仓推导）
 docs/
-  slim-martingale-refactor-plan.md   当前架构方案与实施记录
-  binance-api/                       币安接口笔记
+  strategy-dev-guide.md   策略开发指南（现行）
+  swing-breakout-port-plan.md           摆动突破策略移植方案（待批准）
+  donchian-v2-upgrade.md                唐奇安升级方案（待批准）
+  exchange-protection-orders-plan.md    交易所灾难保险丝（Phase 1 已合入）
+  binance-api/                        币安接口参考
 ```
 
 ---
