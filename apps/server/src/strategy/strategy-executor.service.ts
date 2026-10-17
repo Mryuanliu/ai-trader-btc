@@ -42,6 +42,11 @@ export class StrategyExecutorService implements StrategyExecutor {
       if (!result.order) {
         return { lotId: null, error: '下单未产生订单（被前置校验拦下）' };
       }
+      // placeOrder 内部吃掉交易所异常只标 FAILED——不检查就会把失败上报为成功
+      //（2026-10-16 复盘：导致策略以为已平仓/已开仓，实际仓位失联）。
+      if (result.order.status === 'FAILED') {
+        return { lotId: null, error: `开仓下单失败：${result.order.error ?? '交易所拒绝'}` };
+      }
       // 真实成交可能延迟（demo 环境响应常无成交量），Lot 由对账任务补建，
       // 此时返回 null——策略下一 tick 会从 ctx.openLots 看到它，不影响正确性。
       const lot = await this.lots.findByOpenOrderId(result.order.id);
@@ -62,13 +67,20 @@ export class StrategyExecutorService implements StrategyExecutor {
     try {
       const lot = await this.lots.getOpenLot(lotId);
       if (!lot) return { ok: false, error: `未找到未完结仓位单（${lotId}）` };
-      await this.trading.placeOrder({
+      const result = await this.trading.placeOrder({
         action: lot.direction === 'LONG' ? 'SELL' : 'BUY',
         lotId,
         source: 'strategy',
         exitReason: reason,
         strategyInstanceId: instanceId ?? lot.strategyInstanceId ?? undefined,
       });
+      // 同上：FAILED 必须如实上报，策略据此保留出场判定、下 tick 限速重试
+      if (!result.order || result.order.status === 'FAILED') {
+        return {
+          ok: false,
+          error: `平仓下单失败：${result.order?.error ?? '交易所拒绝'}`,
+        };
+      }
       return { ok: true };
     } catch (err) {
       const message = (err as Error).message;

@@ -205,6 +205,7 @@ describe('StrategyRunner · 熔断接线（basketClosed → stopInstance → pro
       protection, // protection
       events, // events
       journal as never, // journal
+      { event: noop } as never, // records（交易档案旁路）
     );
     const instances = (runner as unknown as { instances: Map<string, unknown> }).instances;
     if (opts.running) {

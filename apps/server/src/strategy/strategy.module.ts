@@ -18,6 +18,7 @@ import { StrategyRunner } from './strategy-runner.service';
 import { PerformanceService } from './performance.service';
 import { ProtectionService } from './protection.service';
 import { TradingJournalService } from './trading-journal.service';
+import { TradeRecordService } from './trade-record.service';
 import { StrategyController } from './strategy.controller';
 
 /**
@@ -49,6 +50,7 @@ import { StrategyController } from './strategy.controller';
     PerformanceService,
     ProtectionService,
     TradingJournalService,
+    TradeRecordService,
   ],
   controllers: [StrategyController],
   exports: [StrategyRunner, StrategyRegistry, PerformanceService, StrategyHub],

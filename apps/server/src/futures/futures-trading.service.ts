@@ -20,7 +20,7 @@ import {
   resolveLotCloseIntent,
   SymbolFilters,
 } from '@ai-trader/shared';
-import { Repository } from 'typeorm';
+import { MoreThanOrEqual, Repository } from 'typeorm';
 import { OrderEntity, PositionLotEntity, TradeFillEntity } from '../database/entities';
 import { ExchangeRegistry } from '../exchanges/exchange-registry.service';
 import {
@@ -765,10 +765,75 @@ export class FuturesTradingService {
             `@ ${price} 杠杆 ${leverage}x -> ${result.status}`,
         );
     } catch (err) {
-      order.status = 'FAILED';
-      order.error = (err as Error).message;
-      order = await this.orderRepo.save(order);
-      this.logger.error(`合约下单失败: ${order.error}`);
+      const message = (err as Error).message;
+      // 发单抛错 ≠ 未成交：适配器 withRetry 对无响应错误会重发，首发可能已在
+      // 交易所成交而响应丢在网络抖动里（重试随即被 -2022 拒）。按 clientOrderId
+      // 回查一次，命中即按成交记账——纠正「实际成交却标 FAILED」的幽灵仓与漏记盈亏
+      //（2026-10-16 实锤：-11.91U 已落地交易所，本地 Lot 挂 OPEN 17.5 小时）。
+      const recovered = type === 'MARKET' ? await this.confirmMarketFill(adapter, order) : null;
+      if (recovered && recovered.filledQuantity > 0) {
+        const fillPrice = recovered.filledPrice > 0 ? recovered.filledPrice : price;
+        const realFee = await this.fetchRealCommission(adapter, symbol, recovered.exchangeOrderId);
+        const filledFee =
+          recovered.fee ??
+          realFee ??
+          recovered.filledQuantity * fillPrice * (FUTURES_FEE_BPS / 10_000);
+        order.status =
+          recovered.status === 'PARTIALLY_FILLED' || recovered.filledQuantity < Number(order.quantity)
+            ? 'PARTIALLY_FILLED'
+            : 'FILLED';
+        order.exchangeOrderId = recovered.exchangeOrderId ?? order.exchangeOrderId;
+        order.filledQuantity = recovered.filledQuantity;
+        order.filledPrice = fillPrice;
+        order.error = null;
+        order = await this.orderRepo.save(order);
+        await this.fillRepo.save(
+          this.fillRepo.create({
+            orderId: order.id,
+            symbol,
+            price: fillPrice,
+            quantity: recovered.filledQuantity,
+            fee: filledFee,
+            feeAsset: recovered.feeAsset ?? 'USDT',
+            filledAt: new Date(),
+          }),
+        );
+        await this.settleOrOpenLot(input, intent, order, {
+          price: fillPrice,
+          quantity: recovered.filledQuantity,
+          fee: filledFee,
+        });
+        this.logger.warn(
+          `[${mode}][合约] 下单抛错但回查确认已成交（原错误: ${message}），按成交记账：` +
+            `${intent.kind} ${intent.positionSide} ${recovered.filledQuantity} ${symbol} @ ${fillPrice}`,
+        );
+      } else {
+        order.status = 'FAILED';
+        order.error = message;
+        order = await this.orderRepo.save(order);
+        this.logger.error(`合约下单失败: ${order.error}`);
+        // 平仓单被交易所拒 -2022（ReduceOnly rejected）＝交易所侧已无可平仓位：
+        // 该 Lot 是幽灵仓，等重启才对账会让策略每 tick 盲发废单（曾 17.5h 发 665 张）。
+        // 立即分方向对账归档；读持仓失败则保守不归档。
+        if (intent.kind === 'close' && message.includes('-2022')) {
+          try {
+            const snaps = await this.positions.listPositions(symbol);
+            const longQty = snaps.filter((p) => p.quantity > 0).reduce((a, p) => a + p.quantity, 0);
+            const shortQty = snaps.filter((p) => p.quantity < 0).reduce((a, p) => a - p.quantity, 0);
+            const archived = await this.lots.reconcileOrphanLots('futures', symbol, {
+              longQty,
+              shortQty,
+            });
+            if (archived > 0) {
+              this.logger.warn(
+                `-2022 拒单触发运行时对账：归档 ${archived} 个幽灵 Lot（${symbol} 多 ${longQty}/空 ${shortQty}）`,
+              );
+            }
+          } catch (recErr) {
+            this.logger.warn(`-2022 运行时对账跳过：${(recErr as Error).message}`);
+          }
+        }
+      }
     }
 
     const dto = this.toDTO(order);
@@ -1261,16 +1326,31 @@ export class FuturesTradingService {
    * 策略据此跳过重复出场。
    */
   async listPendingCloseLotIds(symbol?: string): Promise<string[]> {
+    // 在途 = NEW 平仓单 + 最近 60s 内失败的平仓单（退避窗）。
+    // 缺退避窗时 FAILED 不被视为在途，策略每 tick 对同一 Lot 盲发废单
+    //（2026-10-16 实锤：17.5 小时 665 张 -2022 废单）。
+    const base = { market: 'futures' as const, reduceOnly: true };
+    const cutoff = new Date(Date.now() - 60_000);
     const rows = await this.orderRepo.find({
       where: symbol
-        ? { market: 'futures', symbol, reduceOnly: true, status: 'NEW' }
-        : { market: 'futures', reduceOnly: true, status: 'NEW' },
+        ? [
+            { ...base, symbol, status: 'NEW' },
+            { ...base, symbol, status: 'FAILED', createdAt: MoreThanOrEqual(cutoff) },
+          ]
+        : [
+            { ...base, status: 'NEW' },
+            { ...base, status: 'FAILED', createdAt: MoreThanOrEqual(cutoff) },
+          ],
       select: { lotId: true },
-      take: 200,
+      take: 400,
     });
-    return rows
-      .map((r) => r.lotId)
-      .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    return Array.from(
+      new Set(
+        rows
+          .map((r) => r.lotId)
+          .filter((v): v is string => typeof v === 'string' && v.length > 0),
+      ),
+    );
   }
 
   /**

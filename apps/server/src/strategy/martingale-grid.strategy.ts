@@ -500,14 +500,26 @@ export class MartingaleGridStrategy implements TradingStrategy {
         return true;
       }
     }
+    let closed = 0;
+    const failed: string[] = [];
     for (const lot of ctx.openLots) {
       const r = await exec.closeLot(lot.id, reason);
-      if (!r.ok) this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
+      if (r.ok) closed++;
+      else {
+        failed.push(lot.id);
+        this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
+      }
     }
-    st.basketPeakPct = 0;
-    // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
-    if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
-    st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
+    if (failed.length === 0) {
+      st.basketPeakPct = 0;
+      // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
+      if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
+      st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${closed} 单`;
+    } else {
+      // 平仓指令未全部落地：不能谎报「已全平」，也不清峰值/不设冷却基准——
+      // 保留出场判定，由在途退避闸限速重试。
+      st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，平仓指令 成功${closed}/失败${failed.length}（稍后自动重试）`;
+    }
     this.logger.log(st.lastNote);
     return true;
   }

@@ -47,6 +47,7 @@ function buildRunner(calls: { interval: string; limit: number }[]) {
     noop as never, // protection
     new EventBusService(), // events
     journal as never, // journal
+    { event: noop } as never, // records（交易档案旁路）
   );
   return runner;
 }

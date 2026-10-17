@@ -269,12 +269,21 @@ interface V2InstanceState {
   /** Brain 已重算到的最后一根已收盘 K 线时间戳（bar 门控） */
   regimeBarTime: number;
   lastObs: V2Obs | null;
+  /** 出场判定档案（EXIT_TRACE）降采样：上次快照签名 */
+  traceSig: string;
+  /** 出场判定档案降采样计数器：签名未变时每 10 tick 才写一行 */
+  traceTick: number;
 }
 
 /** 真权益：钱包余额 + 浮盈（walletBalance 缺失时退化为可用保证金口径） */
 function trueEquity(ctx: StrategyContext): number {
   const upnl = ctx.openLots.reduce((a, l) => a + l.unrealizedPnl, 0);
   return ctx.walletBalance > 0 ? ctx.walletBalance + upnl : ctx.availableMargin + upnl;
+}
+
+/** 档案快照取整（6 位）：避免浮点尾数把日志签名刷成每 tick 都「变了」 */
+function round6(v: number): number {
+  return Math.round(v * 1e6) / 1e6;
 }
 
 @Injectable()
@@ -339,6 +348,8 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         regimeSnap: null,
         regimeBarTime: 0,
         lastObs: null,
+        traceSig: '',
+        traceTick: 0,
       };
       this.states.set(instanceId, s);
     }
@@ -1255,6 +1266,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       useScoreSizing: boolean;
       trendRange: number;
       basketAmpK: number;
+      cooldownAfterStopSec: number;
     };
     const netNotional = ctx.openLots.reduce((a, l) => a + l.entryPrice * l.quantity, 0);
     if (!(netNotional > 0)) return false;
@@ -1304,6 +1316,56 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
 
     if (!reason) {
       st.lastNote = `篮子净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%（峰值 ${(st.basketPeakPct * 100).toFixed(2)}%）`;
+      // 出场判定档案（2026-10-17 实测调优回路）：把「每条规则当前值 vs 阈值还差多少」
+      // 落成结构化快照——「面板价到达止盈却没触发」的每一段差距（基差/费/追踪语义/退避）
+      // 都能在这里对账。签名未变时降采样，不放大日志。
+      const inflightNow = ctx.openLots.filter((l) => l.hasPendingClose).length;
+      // 同持仓结构下的 last 口径毛/净收益：mark 判定价与面板 last 价的基差影响直接可量化
+      const grossAtLast =
+        gross +
+        ctx.openLots.reduce(
+          (a, l) => a + (l.direction === 'LONG' ? 1 : -1) * (ctx.price - (ctx.markPrice || ctx.price)) * l.quantity,
+          0,
+        );
+      this.emitExitTrace(
+        ctx,
+        st,
+        {
+          notExit: 'NO_RULE_HIT',
+          last: ctx.price,
+          mark: ctx.markPrice,
+          basis: ctx.markPrice > 0 ? 'mark' : 'last',
+          layers: ctx.openLots.length,
+          netNotional,
+          entryFeePaid: ctx.openLots.reduce((a, l) => a + (l.entryFeeUsdt ?? 0), 0),
+          gross: round6(gross),
+          exitFeeEst: round6(exitFee),
+          net: round6(netUsdt),
+          netPct: round6(netPct),
+          grossAtLast: round6(grossAtLast),
+          netAtLast: round6(grossAtLast - exitFee),
+          peakPct: round6(st.basketPeakPct),
+          armed: st.basketArmed,
+          inflight: inflightNow,
+          cooldownLeftSec:
+            p.cooldownAfterStopSec > 0 && ctx.now - st.lastStopAt < p.cooldownAfterStopSec * 1000
+              ? Math.ceil((p.cooldownAfterStopSec * 1000 - (ctx.now - st.lastStopAt)) / 1000)
+              : 0,
+          rules: {
+            tpUsdt: { thr: p.basketTakeProfitUsdt, gap: round6(p.basketTakeProfitUsdt - netUsdt) },
+            slUsdt: { thr: -p.basketStopLossUsdt, gap: round6(netUsdt - -p.basketStopLossUsdt) },
+            slPct: { thr: -p.basketStopLossPct, gap: round6(netPct - -p.basketStopLossPct) },
+            trail: {
+              startPct: round6(startNow),
+              gapToArmPct: round6(startNow - st.basketPeakPct),
+              givebackPct: p.basketGivebackPct,
+              gapToGivebackPct: round6(p.basketGivebackPct - (st.basketPeakPct - netPct)),
+              disabledByChain: disableTrail,
+            },
+          },
+        },
+        'NO_RULE_HIT',
+      );
       return false;
     }
 
@@ -1312,6 +1374,7 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     const inflight = ctx.openLots.filter((l) => l.hasPendingClose).length;
     if (inflight > 0) {
       st.lastNote = `篮子出场进行中（${inflight}/${ctx.openLots.length} 单在途），等待成交`;
+      this.emitExitTrace(ctx, st, { notExit: 'INFIGHT_BACKOFF', exit: reason, inflight, net: round6(netUsdt) }, 'INFIGHT_BACKOFF');
       return true;
     }
 
@@ -1322,19 +1385,67 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       if (!r.ok) {
         st.lastNote = `篮子出场中止：撤销挂单失败（${r.error}）`;
         this.logger.warn(st.lastNote);
+        this.emitExitTrace(ctx, st, { notExit: 'CANCEL_FAIL', exit: reason, error: r.error, net: round6(netUsdt) }, 'CANCEL_FAIL');
         return true;
       }
     }
+    let closed = 0;
+    const failed: string[] = [];
     for (const lot of ctx.openLots) {
       const r = await exec.closeLot(lot.id, reason);
-      if (!r.ok) this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
+      if (r.ok) closed++;
+      else {
+        failed.push(lot.id);
+        this.logger.warn(`篮子出场平仓失败 lot=${lot.id}: ${r.error}`);
+      }
     }
-    st.basketPeakPct = 0;
-    // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
-    if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
-    st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${ctx.openLots.length} 单`;
+    if (failed.length === 0) {
+      st.basketPeakPct = 0;
+      // 止损后冷却的时间基准（2026-10-16）：只认 STOP_LOSS，止盈不触发冷却
+      if (reason === 'STOP_LOSS') st.lastStopAt = ctx.now;
+      st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，已全平 ${closed} 单`;
+    } else {
+      // 平仓指令未全部落地：不能谎报「已全平」（日志曾因此误导复盘），
+      // 也不清峰值/不设冷却基准——保留出场判定，由在途退避闸限速重试。
+      st.lastNote = `篮子${reason === 'TAKE_PROFIT' ? '止盈' : '止损'}：净收益 ${netUsdt.toFixed(2)}U / ${(netPct * 100).toFixed(2)}%，平仓指令 成功${closed}/失败${failed.length}（稍后自动重试）`;
+    }
     this.logger.log(st.lastNote);
+    // 出场执行结果也进档案：exit 行带 closedOk/failed，与 LOT_SETTLE 事件对账
+    // 可还原「判定到达→实际成交」的时差与滑点。
+    this.emitExitTrace(
+      ctx,
+      st,
+      {
+        exit: reason,
+        net: round6(netUsdt),
+        netPct: round6(netPct),
+        last: ctx.price,
+        mark: ctx.markPrice,
+        layers: ctx.openLots.length,
+        closedOk: closed,
+        failed: failed.length,
+      },
+      `EXIT:${reason}`,
+    );
     return true;
+  }
+
+  /**
+   * EXIT_TRACE 写入：签名（判定结果/net取整/inflight/armed）未变且距上次
+   * 写入不足 10 tick 则跳过——持仓期每 tick 都判定，全量写会淹没档案。
+   * 纯旁路：不改动任何判定数据，写完照原样返回。
+   */
+  private emitExitTrace(
+    ctx: StrategyContext,
+    st: V2InstanceState,
+    snap: Record<string, unknown>,
+    sigKey: string,
+  ): void {
+    st.traceTick++;
+    const sig = `${sigKey}|${Math.round(Number(snap.net ?? 0) * 10)}|${snap.inflight ?? ''}|${st.basketArmed ? 1 : 0}`;
+    if (sig === st.traceSig && st.traceTick % 10 !== 0) return;
+    st.traceSig = sig;
+    ctx.trace?.({ type: 'EXIT_TRACE', ...snap });
   }
 
   // ------------------------------------------------------------ 方向过滤
@@ -1505,6 +1616,20 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
     ) {
       const remain = Math.ceil((p.cooldownAfterStopSec * 1000 - (ctx.now - st.lastStopAt)) / 1000);
       st.lastNote = `止损冷却中（剩余 ${remain}s），暂停开新首层`;
+      // 进场拦截也进档案（同一冷却窗只写一次）：分析器能区分「没单是冷却」与「没单是故障」
+      const cdSig = `COOLDOWN:${st.lastStopAt}`;
+      if (st.traceSig !== cdSig) {
+        st.traceSig = cdSig;
+        ctx.trace?.({
+          type: 'ENTRY_TRACE',
+          action: 'BLOCK',
+          notEntry: 'COOLDOWN',
+          dir,
+          cooldownLeftSec: remain,
+          last: ctx.price,
+          mark: ctx.markPrice,
+        });
+      }
       return;
     }
     const disc = p.usePendingDiscipline;
@@ -1586,6 +1711,17 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         st.lastNote = `市价开 ${dir} 首层失败：${r.error}`;
         this.logger.warn(st.lastNote);
       }
+      ctx.trace?.({
+        type: 'ENTRY_TRACE',
+        action: 'FIRST_MARKET',
+        dir,
+        qty: firstQty,
+        leverage: p.leverage,
+        last: ctx.price,
+        mark: ctx.markPrice,
+        ok: Boolean(r.lotId) || r.error === undefined,
+        error: r.error,
+      });
       return;
     }
 
@@ -1618,6 +1754,18 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
         st.lastNote = `跟踪换单挂新失败：${r.error}`;
         this.logger.warn(st.lastNote);
       }
+      ctx.trace?.({
+        type: 'ENTRY_TRACE',
+        action: 'TRAIL_SWAP',
+        dir,
+        layer: layers + 1,
+        qty: pend.quantity,
+        fromStopPrice: pend.stopPrice,
+        stopPrice: target,
+        last: ctx.price,
+        ok: Boolean(r.orderId),
+        error: r.error,
+      });
       return;
     }
 
@@ -1669,6 +1817,25 @@ export class MartingaleGridV2Strategy implements TradingStrategy {
       st.lastNote = `挂 ${dir} 第 ${layers + 1} 层失败：${r.error}`;
       this.logger.warn(st.lastNote);
     }
+    ctx.trace?.({
+      type: 'ENTRY_TRACE',
+      action: lots.length === 0 ? 'PLACE_FIRST' : 'PLACE_LAYER',
+      dir,
+      layer: layers + 1,
+      qty,
+      stopPrice,
+      last: ctx.price,
+      mark: ctx.markPrice,
+      step,
+      worstEntry: lots.length > 0
+        ? dir === 'LONG'
+          ? Math.min(...lots.map((l) => l.entryPrice))
+          : Math.max(...lots.map((l) => l.entryPrice))
+        : null,
+      marginAvail: ctx.availableMargin,
+      ok: Boolean(r.orderId),
+      error: r.error,
+    });
   }
 
   /**

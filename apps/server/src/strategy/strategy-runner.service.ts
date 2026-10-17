@@ -20,6 +20,7 @@ import { StrategyExecutorService } from './strategy-executor.service';
 import { StrategyInstanceService } from './strategy-instance.service';
 import { ProtectionService, ProtectionVerdict } from './protection.service';
 import { TradingJournalService } from './trading-journal.service';
+import { TradeRecordService } from './trade-record.service';
 import type {
   StrategyContext,
   StrategyDescriptor,
@@ -92,6 +93,7 @@ export class StrategyRunner implements OnModuleInit {
     private readonly protection: ProtectionService,
     private readonly events: EventBusService,
     private readonly journal: TradingJournalService,
+    private readonly records: TradeRecordService,
   ) {
     this.subscribePriceTicks();
     this.subscribeProtections();
@@ -311,6 +313,7 @@ export class StrategyRunner implements OnModuleInit {
       'START',
       `${strategy.label} @ ${symbol} 周期=${interval} 参=${JSON.stringify(params)}`,
     );
+    this.records.event(instanceId, 'LIFECYCLE', { kind: 'START', interval, params });
     return {
       ok: true,
       status: await this.getStatus(),
@@ -355,6 +358,7 @@ export class StrategyRunner implements OnModuleInit {
         'STOP',
         `${inst.strategy.label} @ ${inst.symbol}（持仓保留）`,
       );
+      this.records.event(instanceId, 'LIFECYCLE', { kind: 'STOP' });
       this.journal.forgetInstance(instanceId);
       this.instances.delete(instanceId);
     }
@@ -734,6 +738,9 @@ export class StrategyRunner implements OnModuleInit {
       netQty,
       params: inst.params,
       now: Date.now(),
+      // 交易档案钩子（2026-10-17）：策略在判定点写的结构化快照落到
+      // logs/trade-records/<slug>/events-*.jsonl；写失败不反噬交易（服务内部只 warn）。
+      trace: (evt) => this.records.event(inst.instanceId, evt.type, evt),
     };
   }
 

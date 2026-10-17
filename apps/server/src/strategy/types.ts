@@ -54,6 +54,19 @@ export interface StrategyOrderView {
 }
 
 /**
+ * 结构化交易档案事件（2026-10-17 实测调优回路）。
+ *
+ * 策略在关键判定点经 ctx.trace() 主动写事实数字快照（为何没出场、
+ * 为何开这一单），落到 logs/trade-records/ 供 analyze-trades CLI 事后归因。
+ * payload loose 是故意的：档案层不参与决策，字段演进不应改动契约。
+ */
+export interface TradeTraceEvent {
+  /** EXIT_TRACE=出场判定快照；ENTRY_TRACE=开仓/挂单判定快照 */
+  type: 'EXIT_TRACE' | 'ENTRY_TRACE';
+  [k: string]: unknown;
+}
+
+/**
  * 策略运行上下文（每个 tick 重新构造）。
  *
  * 只给「事实」不给「建议」：平台不做任何信号计算与风控判断，
@@ -111,6 +124,13 @@ export interface StrategyContext {
   params: Record<string, unknown>;
   /** 当前时间戳（毫秒） */
   now: number;
+  /**
+   * 交易档案钩子（可选）：策略在关键判定点写结构化事实快照。
+   *
+   * runner 未接线时为 undefined——策略侧必须用 `ctx.trace?.(...)` 调用，
+   * 回测/CLI 直接调 onTick 的场合不报错。不参与任何决策，只留痕。
+   */
+  trace?(evt: TradeTraceEvent): void;
 }
 
 /**
